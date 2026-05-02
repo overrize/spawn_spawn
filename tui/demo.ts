@@ -1,5 +1,5 @@
 /**
- * Demo: spawn agents → print ANSI snapshot.
+ * Demo: spawn OMO instances → print ANSI snapshot.
  * npx tsx tui/demo.ts
  */
 import { spawnBridge } from "../omo-bridge/index.js";
@@ -49,8 +49,8 @@ const paus=agents.filter(a=>a.status===AgentStatus.PAUSED).length;
 const term=agents.filter(a=>a.status===AgentStatus.TERMINATED).length;
 
 const out:string[]=[];
-out.push(hdr("Fork-Agent Status"));
-out.push(ln(`  ${ANSI.bld}${total}${ANSI.rst} agents │ ${ANSI.grn}${actv} active${ANSI.rst} │ ${ANSI.ylw}${paus} paused${ANSI.rst} │ ${ANSI.red}${term} terminated${ANSI.rst} │ ${ANSI.cyn}${mk} memory keys${ANSI.rst}  `));
+out.push(hdr("OMO Instance Status"));
+out.push(ln(`  ${ANSI.bld}${total}${ANSI.rst} OMO instances │ ${ANSI.grn}${actv} active${ANSI.rst} │ ${ANSI.ylw}${paus} paused${ANSI.rst} │ ${ANSI.red}${term} terminated${ANSI.rst} │ ${ANSI.cyn}${mk} keys${ANSI.rst}  `));
 out.push(sep());
 out.push(ln(`  ◆ MainAgent  (${ANSI.grn}RUNNING${ANSI.rst})`));
 out.push(ln(`  │`));

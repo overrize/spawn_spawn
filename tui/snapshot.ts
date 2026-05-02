@@ -1,7 +1,8 @@
 /**
- * Fork-Agent Status Snapshot
+ * OMO Instance Status Snapshot
  *
  * Outputs a single-frame ANSI-formatted dashboard to stdout.
+ * Each SpawnAgent = one OMO instance, ForkAgent = parallel worker within it.
  * Compatible with OpenCode/OMO terminal display — NO full-screen takeover.
  *
  * Run: npx tsx tui/snapshot.ts [spawnId]
@@ -240,7 +241,7 @@ function renderStats(agents: AgentInfo[], memKeyCount: number, width: number): s
   }
 
   const parts: string[] = [];
-  parts.push(`  ${ANSI.bold}${total}${ANSI.reset} agents`);
+  parts.push(`  ${ANSI.bold}${total}${ANSI.reset} OMO instances`);
   parts.push(`${ANSI.green}${active} active${ANSI.reset}`);
   parts.push(`${ANSI.yellow}${paused} paused${ANSI.reset}`);
   parts.push(`${ANSI.red}${terminated} terminated${ANSI.reset}`);
@@ -266,7 +267,7 @@ function renderAgentTree(agents: AgentInfo[], width: number): string[] {
     lines.push(boxBlank(width));
     lines.push(
       boxLine(
-        `  ${ANSI.gray}No spawn agents. Use s:spawn to create one.${ANSI.reset}`,
+        `  ${ANSI.gray}No OMO instances. Use s:spawn to create one.${ANSI.reset}`,
         width
       )
     );
@@ -428,7 +429,7 @@ function render(targetSpawnId?: string, width = 78): string {
   const out: string[] = [];
 
   // ── Header ──
-  out.push(boxHeader("Fork-Agent Status", width));
+  out.push(boxHeader("OMO Instance Status", width));
 
   // ── Gather agents ──
   let agents: AgentInfo[];
@@ -442,7 +443,7 @@ function render(targetSpawnId?: string, width = 78): string {
   if (agents.length === 0) {
     out.push(
       boxLine(
-        `  ${ANSI.yellow}No agents running. Run spawnAgent() first.${ANSI.reset}`,
+        `  ${ANSI.yellow}No OMO instances running. Run spawnAgent() first.${ANSI.reset}`,
         width
       )
     );

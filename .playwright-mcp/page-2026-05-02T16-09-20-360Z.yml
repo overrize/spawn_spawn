@@ -1,0 +1,165 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - heading "Fork‑Agent Dashboard" [level=1] [ref=e4]
+    - generic [ref=e5]: DEMO MODE
+  - generic [ref=e6]:
+    - generic [ref=e425]:
+      - generic [ref=e426]: Total Agents
+      - generic [ref=e427]: "7"
+      - generic [ref=e428]: 1 main · 2 spawn · 4 fork
+    - generic [ref=e429]:
+      - generic [ref=e430]: Active
+      - generic [ref=e431]: "7"
+    - generic [ref=e432]:
+      - generic [ref=e433]: Paused
+      - generic [ref=e434]: "0"
+    - generic [ref=e435]:
+      - generic [ref=e436]: Terminated
+      - generic [ref=e437]: "0"
+    - generic [ref=e438]:
+      - generic [ref=e439]: Memory Entries
+      - generic [ref=e440]: "10"
+  - generic [ref=e23]:
+    - generic [ref=e441]:
+      - button "+ Spawn" [ref=e442] [cursor=pointer]
+      - button "+ Fork" [disabled]
+      - button "Pause" [ref=e444] [cursor=pointer]
+      - button "Resume" [disabled]
+      - button "Terminate" [disabled]
+    - generic [ref=e445]:
+      - generic [ref=e446]: "Target Spawn:"
+      - combobox [ref=e447]:
+        - option "-- select --" [selected]
+        - option "spawn-357494d5… [RUNNING]"
+        - option "spawn-9ba4a471… [RUNNING]"
+      - generic [ref=e449]:
+        - textbox "key" [ref=e450]
+        - textbox "value" [ref=e451]
+        - button "Set" [ref=e452] [cursor=pointer]
+      - button "Clear" [ref=e453] [cursor=pointer]
+    - generic [ref=e454]: "Selected: main-bfdd49e1… [MAIN]"
+  - generic [ref=e37]:
+    - generic [ref=e38]:
+      - generic [ref=e455]: Main Orchestrator
+      - generic [ref=e456] [cursor=pointer]:
+        - generic [ref=e457]:
+          - generic [ref=e458]: MAIN
+          - generic [ref=e459]: RUNNING
+        - generic "main-bfdd49e1" [ref=e461]
+        - generic [ref=e462]: Fork-Agent orchestration dashboard
+      - generic [ref=e463]: Spawn
+      - generic [ref=e464]:
+        - generic [ref=e465] [cursor=pointer]:
+          - generic [ref=e466]:
+            - generic [ref=e467]: SPAWN
+            - generic [ref=e468]: RUNNING
+          - generic "spawn-357494d5" [ref=e470]
+          - generic [ref=e471]: Spawn task 1 — data processing pipeline
+        - generic [ref=e472]:
+          - generic [ref=e473] [cursor=pointer]:
+            - generic [ref=e474]:
+              - generic [ref=e475]: FORK
+              - generic [ref=e476]: RUNNING
+            - generic "fork-3b95432a" [ref=e478]
+            - generic [ref=e479]: Fork sub-task 1 — parallel worker
+          - generic [ref=e480] [cursor=pointer]:
+            - generic [ref=e481]:
+              - generic [ref=e482]: FORK
+              - generic [ref=e483]: RUNNING
+            - generic "fork-92458373" [ref=e485]
+            - generic [ref=e486]: Fork sub-task 2 — parallel worker
+      - generic [ref=e487]: Spawn
+      - generic [ref=e488]:
+        - generic [ref=e489] [cursor=pointer]:
+          - generic [ref=e490]:
+            - generic [ref=e491]: SPAWN
+            - generic [ref=e492]: RUNNING
+          - generic "spawn-9ba4a471" [ref=e494]
+          - generic [ref=e495]: Spawn task 2 — data processing pipeline
+        - generic [ref=e496]:
+          - generic [ref=e497] [cursor=pointer]:
+            - generic [ref=e498]:
+              - generic [ref=e499]: FORK
+              - generic [ref=e500]: RUNNING
+            - generic "fork-0b5cc105" [ref=e502]
+            - generic [ref=e503]: Fork sub-task 1 — parallel worker
+          - generic [ref=e504] [cursor=pointer]:
+            - generic [ref=e505]:
+              - generic [ref=e506]: FORK
+              - generic [ref=e507]: RUNNING
+            - generic "fork-4cf7e251" [ref=e509]
+            - generic [ref=e510]: Fork sub-task 2 — parallel worker
+    - generic [ref=e47]:
+      - generic [ref=e48]:
+        - text: Shared Memory
+        - generic [ref=e49]: 0 entries
+      - generic [ref=e511]: Select a SpawnAgent to view its shared memory
+    - generic [ref=e52]:
+      - generic [ref=e53]:
+        - text: Event Log
+        - generic [ref=e54]: 16 events
+      - list [ref=e512]:
+        - listitem [ref=e513]:
+          - generic [ref=e514]: SET
+          - generic "spawn-357494d5" [ref=e515]: last_active = "2026-05-02T16:09:17.659Z"
+          - generic [ref=e516]: 00:09:17
+        - listitem [ref=e517]:
+          - generic [ref=e518]: SET
+          - generic "spawn-357494d5" [ref=e519]: last_active = "2026-05-02T16:09:17.659Z"
+          - generic [ref=e520]: 00:09:17
+        - listitem [ref=e521]:
+          - generic [ref=e522]: SET
+          - generic "spawn-357494d5" [ref=e523]: latency_ms = 165
+          - generic [ref=e524]: 00:09:13
+        - listitem [ref=e525]:
+          - generic [ref=e526]: SET
+          - generic "spawn-357494d5" [ref=e527]: latency_ms = 165
+          - generic [ref=e528]: 00:09:13
+        - listitem [ref=e529]:
+          - generic [ref=e530]: SET
+          - generic "spawn-357494d5" [ref=e531]: task_count = 2
+          - generic [ref=e532]: 00:09:09
+        - listitem [ref=e533]:
+          - generic [ref=e534]: SET
+          - generic "spawn-357494d5" [ref=e535]: task_count = 2
+          - generic [ref=e536]: 00:09:09
+        - listitem [ref=e537]:
+          - generic [ref=e538]: SET
+          - generic "spawn-9ba4a471" [ref=e539]: throughput = 459
+          - generic [ref=e540]: 00:09:05
+        - listitem [ref=e541]:
+          - generic [ref=e542]: SET
+          - generic "spawn-9ba4a471" [ref=e543]: throughput = 459
+          - generic [ref=e544]: 00:09:05
+        - listitem [ref=e545]:
+          - generic [ref=e546]: SET
+          - generic "spawn-9ba4a471" [ref=e547]: throughput = 666
+          - generic [ref=e548]: 00:09:01
+        - listitem [ref=e549]:
+          - generic [ref=e550]: SET
+          - generic "spawn-9ba4a471" [ref=e551]: throughput = 666
+          - generic [ref=e552]: 00:09:01
+        - listitem [ref=e553]:
+          - generic [ref=e554]: SET
+          - generic "spawn-9ba4a471" [ref=e555]: batch_id = "B-9800"
+          - generic [ref=e556]: 00:08:58
+        - listitem [ref=e557]:
+          - generic [ref=e558]: SET
+          - generic "spawn-9ba4a471" [ref=e559]: priority = "normal"
+          - generic [ref=e560]: 00:08:58
+        - listitem [ref=e561]:
+          - generic [ref=e562]: SET
+          - generic "spawn-9ba4a471" [ref=e563]: status = "active"
+          - generic [ref=e564]: 00:08:58
+        - listitem [ref=e565]:
+          - generic [ref=e566]: SET
+          - generic "spawn-357494d5" [ref=e567]: batch_id = "B-4167"
+          - generic [ref=e568]: 00:08:58
+        - listitem [ref=e569]:
+          - generic [ref=e570]: SET
+          - generic "spawn-357494d5" [ref=e571]: priority = "high"
+          - generic [ref=e572]: 00:08:58
+        - listitem [ref=e573]:
+          - generic [ref=e574]: SET
+          - generic "spawn-357494d5" [ref=e575]: status = "active"
+          - generic [ref=e576]: 00:08:58

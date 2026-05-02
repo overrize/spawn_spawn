@@ -1,0 +1,142 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e5]: System Architecture
+    - heading "Fork Agent Orchestration Engine" [level=1] [ref=e6]:
+      - text: Fork Agent
+      - emphasis [ref=e7]: Orchestration
+      - text: Engine
+    - paragraph [ref=e9]: Agent hierarchy, shared resource propagation, lifecycle state management, cascade termination, and event-driven memory model — documented as interactive architecture diagrams.
+  - generic [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e16]: 01 — Hierarchy
+      - heading "Agent Hierarchy & Context Propagation" [level=2] [ref=e17]
+      - document [ref=e19]:
+        - generic [ref=e21]:
+          - generic [ref=e22]:
+            - generic [ref=e27]: Layer 2 — ForkAgents (independent)
+            - generic [ref=e32]: Layer 1 — SpawnAgents
+            - generic [ref=e37]: MainAgent (Root Orchestrator)
+          - generic [ref=e43]:
+            - generic [ref=e47]: spawn() → context.derive(SPAWN)
+            - generic [ref=e51]: spawn() → context.derive(SPAWN)
+            - generic [ref=e55]: spawn() → context.derive(SPAWN)
+            - generic [ref=e59]: fork() → context.derive(FORK)
+            - generic [ref=e63]: fork() → context.derive(FORK)
+          - generic [ref=e64]:
+            - generic [ref=e70]:
+              - text: ForkAgent A1
+              - text: refs SharedMemory
+              - text: depth=2
+            - generic [ref=e76]:
+              - text: ForkAgent A2
+              - text: refs SharedMemory
+              - text: depth=2
+            - generic [ref=e82]:
+              - text: SpawnAgent A
+              - text: owns SharedMemory
+              - text: depth=1
+            - generic [ref=e88]:
+              - text: SpawnAgent B
+              - text: owns SharedMemory
+              - text: depth=1
+            - generic [ref=e94]:
+              - text: SpawnAgent C
+              - text: owns SharedMemory
+              - text: depth=1
+            - generic [ref=e100]:
+              - text: MainAgent
+              - text: owner of SkillRegistry
+              - text: task context root
+    - generic [ref=e101]:
+      - generic [ref=e102]: 02 — Resources
+      - heading "Resource Sharing Model" [level=2] [ref=e103]
+      - document [ref=e106]:
+        - generic [ref=e107]:
+          - generic [ref=e114]: Syntax error in text
+          - generic [ref=e115]: mermaid version 10.9.5
+  - generic [ref=e121]:
+    - generic [ref=e122]: 03 — Lifecycle
+    - heading "Lifecycle State Machine (all agent types)" [level=2] [ref=e123]
+    - document [ref=e125]:
+      - generic [ref=e127]:
+        - generic [ref=e138]:
+          - generic [ref=e143]: constructor
+          - generic [ref=e148]: init()
+          - generic [ref=e153]: onInit success
+          - generic [ref=e158]: onInit throws
+          - generic [ref=e163]: pause()
+          - generic [ref=e168]: resume()
+          - generic [ref=e173]: onResume success
+          - generic [ref=e178]: onResume throws
+          - generic [ref=e183]: terminate()
+          - generic [ref=e189]:
+            - text: onPause throws
+            - text: execute fails
+          - generic [ref=e194]: terminate()
+          - generic [ref=e199]: terminate()
+          - generic [ref=e204]: onTerminate success
+          - generic [ref=e209]: onTerminate throws
+        - generic [ref=e210]:
+          - generic [ref=e217]: IDLE
+          - generic [ref=e222]: INITIALIZING
+          - generic [ref=e227]: RUNNING
+          - generic [ref=e232]: ERROR
+          - generic [ref=e237]: PAUSED
+          - generic [ref=e242]: RESUMING
+          - generic [ref=e247]: TERMINATING
+          - generic [ref=e252]: TERMINATED
+  - generic [ref=e260]:
+    - generic [ref=e261]:
+      - generic [ref=e262]: 04 — Termination
+      - heading "Cascade Termination Flow" [level=2] [ref=e263]
+      - document [ref=e265]:
+        - generic [ref=e270]: ForkAgent-2
+        - generic [ref=e274]: ForkAgent-1
+        - generic [ref=e278]: SpawnAgent
+        - generic [ref=e282]: MainAgent
+        - generic [ref=e286]: User / System
+        - generic [ref=e289]: MainAgent.terminate()
+        - generic [ref=e292]: All agents terminated. No orphans.
+        - generic [ref=e293]:
+          - generic [ref=e295]: Fork independent
+          - generic [ref=e296]: lifecycle paused here
+          - generic [ref=e297]: without blocking Spawn
+        - generic [ref=e298]: terminate()
+        - generic [ref=e299]: terminateAllChildren()
+        - generic [ref=e301]: terminateChild(spawn.id)
+        - generic [ref=e302]: terminateAllForks()
+        - generic [ref=e304]: terminateFork(f1.id)
+        - generic [ref=e305]: TERMINATING → TERMINATED
+        - generic [ref=e307]: fork:terminated event
+        - generic [ref=e309]: terminateFork(f2.id)
+        - generic [ref=e310]: TERMINATING → TERMINATED
+        - generic [ref=e312]: fork:terminated event
+        - generic [ref=e314]: TERMINATING → TERMINATED
+        - generic [ref=e316]: TERMINATING → TERMINATED
+    - generic [ref=e318]:
+      - generic [ref=e319]: 05 — Events
+      - heading "SharedMemory Event Model" [level=2] [ref=e320]
+      - document [ref=e322]:
+        - generic [ref=e326]: SpawnAgent
+        - generic [ref=e328]:
+          - generic [ref=e330]: SharedMemory
+          - generic [ref=e331]: (EventEmitter)
+        - generic [ref=e333]:
+          - generic [ref=e335]: ForkAgent-B
+          - generic [ref=e336]: (subscriber)
+        - generic [ref=e340]: ForkAgent-A
+        - generic [ref=e343]: All agents see the change
+        - generic [ref=e344]: memorySet("key1", "hello")
+        - generic [ref=e345]: "emit(\"memory:set\", {key, val, prevVal})"
+        - generic [ref=e346]: "emit(\"memory:set\", {key, val, prevVal})"
+        - generic [ref=e347]: memorySet("key1", "overwrite")
+        - generic [ref=e348]: "emit(\"memory:set\", {key, val, prevVal:\"hello\"})"
+        - generic [ref=e349]: memoryDelete("key1")
+        - generic [ref=e350]: "emit(\"memory:delete\", {key, prevVal:\"overwrite\"})"
+        - generic [ref=e351]: serializeMemory()
+        - generic [ref=e352]: MemorySnapshot
+        - generic [ref=e353]: memoryClear()
+        - generic [ref=e354]: emit("memory:clear")
+        - generic [ref=e355]: emit("memory:clear")
+  - contentinfo [ref=e356]:
+    - paragraph [ref=e357]: Fork Agent System · TypeScript · Node.js · vitest · 475 tests · 0 failures
