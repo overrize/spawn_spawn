@@ -1,0 +1,8 @@
+{
+  "skills": {
+    "fork-agent": {
+      "path": "fork-agent/skill/fork-agent.ts",
+      "description": "Multi-agent coordination system: spawn agents with shared memory, fork parallel workers, independent lifecycle management"
+    }
+  }
+}
