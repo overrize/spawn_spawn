@@ -3,7 +3,7 @@
  * Fork-Agent OpenCode TUI Plugin
  * 
  * Renders spawn management in the sidebar — between LSP status and cwd path.
- * Slot: sidebar_content, order: 250 (between internal blocks)
+ * Slot: sidebar_content, order: 350 (between LSP status and Todo list)
  */
 import type {
   TuiPlugin,
@@ -169,7 +169,7 @@ function createSlot(api: TuiPluginApi): TuiSlotPlugin {
   onCleanup(() => clearInterval(interval))
 
   return {
-    order: 250, // between LSP status and cwd path
+    order: 350, // between LSP (300) and Todo list (400)
     slots: {
       sidebar_content(ctx) {
         return (
