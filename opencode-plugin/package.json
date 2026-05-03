@@ -1,0 +1,8 @@
+{
+  "name": "fork-agent-opencode",
+  "version": "1.0.0",
+  "description": "Fork-Agent spawn management — OpenCode sidebar TUI plugin",
+  "type": "module",
+  "exports": { ".": "./index.tsx" },
+  "files": ["index.tsx"]
+}
