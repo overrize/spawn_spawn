@@ -8,10 +8,14 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "status": "tsx tui/snapshot.ts",
+    "demo": "tsx tui/demo.ts",
+    "dashboard": "tsx tui/dashboard.ts"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "esbuild": "^0.28.0",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
