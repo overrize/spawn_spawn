@@ -1,8 +1,8 @@
 {
   "name": "fork-agent-opencode",
   "version": "1.0.0",
-  "description": "Fork-Agent spawn management — OpenCode sidebar TUI plugin",
+  "description": "Fork-Agent: OMO instance orchestration. Server-side plugin for OpenCode.",
   "type": "module",
-  "exports": { ".": "./index.tsx" },
-  "files": ["index.tsx"]
+  "main": "./index.ts",
+  "exports": { ".": "./index.ts" }
 }
