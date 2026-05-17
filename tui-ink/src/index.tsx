@@ -204,6 +204,19 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
       if (!mustApprove) leaderToolQueue.push(e);
     }
 
+    // Sending a message counts as acting — prevents auto-continuation from
+    // re-nudging the leader immediately after it sends a coordination message.
+    // Also forward leader→worker messages to the target worker's LLM.
+    if (e.type === "message") {
+      leaderActedThisTurn = true;
+      if (e.to !== "user") {
+        const target = agents.get(e.to);
+        if (target instanceof HttpConvAgent) {
+          target.sendCommand({ type: "user.message", text: `[leader] ${e.text}` });
+        }
+      }
+    }
+
     // Agent idle → drain tool queue OR auto-continue if todos are pending
     if (e.type === "agent.state" && e.state === "idle") {
       if (leaderToolQueue.length > 0) {
@@ -387,6 +400,11 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       const mustApprove = toolNeedsApproval(ev.name);
       if (!mustApprove) toolQueue.push(ev);
       // mustApprove=true 的走 pendingApprovals → y/n 路径（store 已处理）
+    }
+
+    // Sending a message counts as acting — same logic as in startLeader.
+    if (ev.type === "message") {
+      workerActedThisTurn = true;
     }
 
     // Agent 变 idle → 批量执行排队的工具并把结果回喂给 agent
