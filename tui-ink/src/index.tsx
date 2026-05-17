@@ -344,6 +344,38 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     pm.observe(ev);
     secretary.observe(ev);
 
+    // ── Forward worker→parent communication to the parent LLM ────────────────
+    // Without this, leader spawns a worker but never hears back — hangs forever.
+    if (ev.type === "message" && ev.to === e.parent) {
+      const parentAgent = agents.get(e.parent);
+      if (parentAgent instanceof HttpConvAgent) {
+        parentAgent.sendCommand({
+          type: "user.message",
+          text: `[${e.child}→${e.parent}] ${ev.text}`,
+        });
+      }
+    }
+    if (ev.type === "agent.done") {
+      const parentAgent = agents.get(e.parent);
+      if (parentAgent instanceof HttpConvAgent) {
+        const status = ev.success ? "成功完成" : "失败";
+        parentAgent.sendCommand({
+          type: "user.message",
+          text: `[系统] ${e.child} 已${status}${ev.reason ? ": " + ev.reason : ""}。请继续推进你的任务。`,
+        });
+      }
+    }
+    if (ev.type === "unit.handup") {
+      const parentAgent = agents.get(e.parent);
+      if (parentAgent instanceof HttpConvAgent) {
+        parentAgent.sendCommand({
+          type: "user.message",
+          text: `[${e.child} handup] 已完成: ${ev.summary}${ev.failed_acceptance?.length ? "\n未达成: " + ev.failed_acceptance.join("; ") : ""}`,
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Track turn start
     if (ev.type === "agent.state" && ev.state === "run") {
       workerActedThisTurn = false;

@@ -20,6 +20,7 @@ export class HttpConvAgent extends EventEmitter {
   private messages: Array<{ role: "user" | "assistant"; content: string }> = [];
   private _busy = false;
   private _abort: AbortController | null = null;
+  private _queue: string[] = []; // outbound message queue when busy
 
   constructor(public cfg: {
     id: string;
@@ -40,9 +41,17 @@ export class HttpConvAgent extends EventEmitter {
 
   sendCommand(cmd: AgentCommand): void {
     if (cmd.type === "user.message") {
-      this.send(cmd.text);
+      this._enqueue(cmd.text);
     } else if (cmd.type === "tool.result") {
       const text = `[tool_result id="${cmd.id}" ok="${cmd.ok}"]\n${cmd.output}`;
+      this._enqueue(text);
+    }
+  }
+
+  private _enqueue(text: string): void {
+    if (this._busy) {
+      this._queue.push(text);
+    } else {
       this.send(text);
     }
   }
@@ -147,6 +156,11 @@ export class HttpConvAgent extends EventEmitter {
     } finally {
       this._busy = false;
       this._abort = null;
+      // Drain one queued message per turn so worker reports land in order
+      if (this._queue.length > 0) {
+        const next = this._queue.shift()!;
+        setImmediate(() => this.send(next));
+      }
     }
   }
 
@@ -253,6 +267,7 @@ export class HttpConvAgent extends EventEmitter {
       const isHttps = !hostname.startsWith("localhost") && !hostname.startsWith("127.");
       const mod = isHttps ? https : http;
 
+      const REQUEST_TIMEOUT_MS = 8 * 60 * 1000; // 8 min — well under PM's 60min kill
       const req = mod.request({
         hostname,
         port,
@@ -260,6 +275,7 @@ export class HttpConvAgent extends EventEmitter {
         method,
         headers: { ...headers, accept: "text/event-stream" },
         signal: this._abort?.signal,
+        timeout: REQUEST_TIMEOUT_MS,
       }, (res) => {
         if (res.statusCode && res.statusCode >= 400) {
           let errBody = "";
@@ -279,6 +295,7 @@ export class HttpConvAgent extends EventEmitter {
       });
 
       req.on("error", reject);
+      req.on("timeout", () => req.destroy(new Error("request timeout (8min)")));
       req.write(body);
       req.end();
     });
