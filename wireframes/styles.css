@@ -1,0 +1,481 @@
+/* TUI wireframe styles — paper-leaning low-fi, swappable palette */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Caveat:wght@400;600&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+  /* paper palette (default) */
+  --tui-bg:        #fafaf7;
+  --tui-bg-2:      #f4f3ee;
+  --tui-bg-3:      #ebe9e1;
+  --tui-line:      #c4bead;
+  --tui-line-2:    #ddd9cc;
+  --tui-line-3:    #e6e3d8;
+  --tui-ink:       #2b2820;
+  --tui-ink-2:     #605a4a;
+  --tui-ink-3:     #9a9481;
+  --tui-accent:    #3a5f5a;     /* muted teal */
+  --tui-accent-2:  #d9efe9;
+  --tui-warn:      #b8742b;
+  --tui-warn-bg:   #f4e6cf;
+  --tui-down:      #b83565;
+
+  --tui-mono: "IBM Plex Mono", "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+  --tui-script: "Caveat", "Comic Sans MS", cursive;
+  --tui-sans: "Inter", -apple-system, sans-serif;
+}
+
+[data-palette="green"] {
+  --tui-bg:        #0a1410;
+  --tui-bg-2:      #0e1a14;
+  --tui-bg-3:      #122019;
+  --tui-line:      #2a4a3a;
+  --tui-line-2:    #1e3527;
+  --tui-line-3:    #16271d;
+  --tui-ink:       #5be38b;
+  --tui-ink-2:     #3da66a;
+  --tui-ink-3:     #2a7a4d;
+  --tui-accent:    #aaffcc;
+  --tui-accent-2:  #1a3325;
+  --tui-warn:      #ffd166;
+  --tui-warn-bg:   #2a2410;
+  --tui-down:      #ff7a9a;
+}
+
+[data-palette="amber"] {
+  --tui-bg:        #1a1408;
+  --tui-bg-2:      #221b0e;
+  --tui-bg-3:      #2a2212;
+  --tui-line:      #5a4318;
+  --tui-line-2:    #3a2c10;
+  --tui-line-3:    #28200c;
+  --tui-ink:       #ffb454;
+  --tui-ink-2:     #c98a30;
+  --tui-ink-3:     #8a5e1e;
+  --tui-accent:    #ffe0a8;
+  --tui-accent-2:  #3a2a10;
+  --tui-warn:      #ff8c40;
+  --tui-warn-bg:   #2a1a0a;
+  --tui-down:      #ff6a8a;
+}
+
+/* page chrome */
+html, body {
+  margin: 0;
+  background: #f0ece2;
+  font-family: var(--tui-sans);
+  color: #2b2820;
+}
+
+.page-header {
+  padding: 24px 32px 8px;
+  border-bottom: 1px dashed #c4bead;
+  background: #f4f0e4;
+}
+.page-header h1 {
+  font-family: var(--tui-script);
+  font-weight: 600;
+  font-size: 32px;
+  margin: 0;
+  color: #2b2820;
+  letter-spacing: 0.01em;
+}
+.page-header p {
+  font-size: 13px;
+  color: #605a4a;
+  margin: 4px 0 0;
+  max-width: 720px;
+}
+.page-header .meta {
+  display: inline-flex;
+  gap: 16px;
+  margin-top: 10px;
+  font-family: var(--tui-mono);
+  font-size: 11px;
+  color: #9a9481;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.page-header .meta span::before { content: "// "; color: #c4bead; }
+
+/* artboard interior — the "screen" */
+.tui-screen {
+  width: 100%;
+  height: 100%;
+  background: var(--tui-bg);
+  color: var(--tui-ink);
+  font-family: var(--tui-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* terminal-window chrome — thin frame, no traffic-light kitsch.
+   In these wireframes the frame only holds the titlebar (panes/status are
+   siblings inside .tui-screen) so it does NOT flex-grow. */
+.tui-frame {
+  background: var(--tui-bg);
+  flex: none;
+}
+.tui-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--tui-line-2);
+  background: var(--tui-bg-2);
+  font-size: 11px;
+  color: var(--tui-ink-2);
+}
+.tui-titlebar .dots {
+  display: inline-flex;
+  gap: 5px;
+}
+.tui-titlebar .dots i {
+  width: 8px; height: 8px;
+  border: 1px solid var(--tui-line);
+  border-radius: 50%;
+  display: inline-block;
+}
+.tui-titlebar .title {
+  font-weight: 500;
+  color: var(--tui-ink);
+  letter-spacing: 0.04em;
+}
+.tui-titlebar .tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 0;
+  font-size: 10px;
+  color: var(--tui-ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.tui-titlebar .tabs span { padding: 0 8px; border-left: 1px solid var(--tui-line-2); }
+
+/* panes */
+.tui-body { flex: 1; display: flex; min-height: 0; }
+.tui-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--tui-line-2);
+}
+.tui-pane:last-child { border-right: none; }
+.tui-pane-head {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--tui-line-3);
+  background: var(--tui-bg-2);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--tui-ink-3);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tui-pane-head .count {
+  background: var(--tui-bg-3);
+  border: 1px solid var(--tui-line-2);
+  border-radius: 2px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+.tui-pane-head .right { margin-left: auto; color: var(--tui-ink-2); }
+.tui-pane-body { flex: 1; overflow: auto; padding: 6px 0; }
+
+/* rows — agent / session / todo */
+.tui-row {
+  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  position: relative;
+}
+.tui-row:hover { background: var(--tui-bg-2); }
+.tui-row.sel {
+  background: var(--tui-bg-3);
+  border-left-color: var(--tui-accent);
+}
+.tui-row .icon { width: 14px; text-align: center; color: var(--tui-ink-2); flex: none; }
+.tui-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tui-row .sub { font-size: 10px; color: var(--tui-ink-3); }
+.tui-row .tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  border: 1px solid var(--tui-line-2);
+  padding: 0 4px;
+  border-radius: 2px;
+  color: var(--tui-ink-2);
+}
+
+/* indent levels for hierarchy */
+.tui-row.lvl1 { padding-left: 22px; }
+.tui-row.lvl1::before { content: "└"; position: absolute; left: 12px; color: var(--tui-line); }
+.tui-row.lvl2 { padding-left: 34px; }
+.tui-row.lvl2::before { content: "└"; position: absolute; left: 24px; color: var(--tui-line); }
+
+/* status dots */
+.dot { display:inline-block; width: 6px; height: 6px; border-radius: 50%; }
+.dot.run { background: var(--tui-accent); box-shadow: 0 0 0 2px var(--tui-accent-2); }
+.dot.wait { background: var(--tui-ink-3); }
+.dot.done { background: transparent; border: 1px solid var(--tui-ink-3); }
+.dot.warn { background: var(--tui-warn); }
+.dot.err { background: var(--tui-down); }
+
+/* spinner (static glyph for wireframes) */
+.spin {
+  display: inline-block;
+  animation: tui-spin 1.4s steps(8) infinite;
+  color: var(--tui-accent);
+}
+@keyframes tui-spin {
+  0%   { content: "⠋"; }
+  100% { transform: rotate(360deg); }
+}
+.spin::before { content: "◐"; }
+
+/* conversation */
+.conv { padding: 10px 14px; overflow: auto; }
+.bubble { margin-bottom: 12px; }
+.bubble .who {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--tui-ink-3);
+  margin-bottom: 2px;
+}
+.bubble .who.user { color: var(--tui-accent); }
+.bubble .body { color: var(--tui-ink); padding-left: 0; }
+.bubble.tool .body {
+  background: var(--tui-bg-2);
+  border-left: 2px solid var(--tui-line);
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--tui-ink-2);
+}
+.bubble.tool .body .args { color: var(--tui-ink-3); }
+
+/* todo list */
+.todo-list { padding: 8px 12px; }
+.todo {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.todo .glyph { color: var(--tui-ink-2); text-align: center; }
+.todo.done .text { color: var(--tui-ink-3); text-decoration: line-through; text-decoration-thickness: 1px; }
+.todo.run .text { color: var(--tui-ink); }
+.todo.todo .text { color: var(--tui-ink-2); }
+.todo .meta { font-size: 10px; color: var(--tui-ink-3); display: flex; gap: 6px; align-items: center; }
+.bar {
+  height: 6px;
+  background: var(--tui-bg-3);
+  border: 1px solid var(--tui-line-2);
+  border-radius: 1px;
+  position: relative;
+  overflow: hidden;
+  margin-top: 2px;
+}
+.bar > i {
+  display: block;
+  height: 100%;
+  background: var(--tui-accent);
+}
+.bar.striped > i {
+  background-image: repeating-linear-gradient(45deg, var(--tui-accent), var(--tui-accent) 3px, var(--tui-accent-2) 3px, var(--tui-accent-2) 6px);
+}
+
+/* input prompt */
+.tui-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--tui-line-2);
+  background: var(--tui-bg-2);
+  font-size: 12px;
+}
+.tui-input .prompt { color: var(--tui-accent); }
+.tui-input .ph { color: var(--tui-ink-3); flex: 1; }
+.tui-input .caret {
+  width: 7px; height: 14px;
+  background: var(--tui-ink);
+  display: inline-block;
+  vertical-align: middle;
+  animation: blink 1.1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+.tui-input .keys { color: var(--tui-ink-3); font-size: 10px; display: flex; gap: 8px; }
+.tui-input .keys kbd {
+  border: 1px solid var(--tui-line-2);
+  border-radius: 2px;
+  padding: 0 4px;
+  background: var(--tui-bg);
+  color: var(--tui-ink-2);
+}
+
+/* status bar */
+.tui-status {
+  padding: 4px 10px;
+  border-top: 1px solid var(--tui-line-2);
+  background: var(--tui-bg-2);
+  font-size: 10px;
+  color: var(--tui-ink-3);
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.tui-status .seg { display: inline-flex; gap: 4px; align-items: center; }
+.tui-status .seg.on { color: var(--tui-accent); }
+.tui-status .gap { flex: 1; }
+
+/* DAG mini-map */
+.dag {
+  position: relative;
+  padding: 14px;
+  background: var(--tui-bg);
+  border-bottom: 1px solid var(--tui-line-2);
+  flex: none;
+}
+.dag svg { display: block; width: 100%; height: 100%; }
+.dag-legend {
+  position: absolute;
+  top: 8px; right: 10px;
+  display: flex; gap: 10px;
+  font-size: 10px;
+  color: var(--tui-ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* tabs */
+.tui-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--tui-line-2);
+  background: var(--tui-bg-2);
+  font-size: 11px;
+  overflow: hidden;
+  flex: none;
+}
+.tui-tab {
+  padding: 6px 12px;
+  border-right: 1px solid var(--tui-line-2);
+  color: var(--tui-ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tui-tab.sel {
+  background: var(--tui-bg);
+  color: var(--tui-ink);
+  border-bottom: 2px solid var(--tui-accent);
+  margin-bottom: -1px;
+}
+.tui-tab .close { color: var(--tui-ink-3); margin-left: 4px; }
+
+/* dock at bottom */
+.tui-dock {
+  border-top: 1px solid var(--tui-line);
+  background: var(--tui-bg-2);
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  font-size: 11px;
+  flex: none;
+}
+.tui-dock-col {
+  padding: 8px 10px;
+  border-right: 1px solid var(--tui-line-2);
+  min-height: 0;
+  overflow: hidden;
+}
+.tui-dock-col:last-child { border-right: none; }
+.tui-dock-col h4 {
+  margin: 0 0 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--tui-ink-3);
+  font-weight: 600;
+}
+
+/* sketchy annotation */
+.annot {
+  position: absolute;
+  font-family: var(--tui-script);
+  font-size: 15px;
+  color: #b8742b;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.annot::before {
+  content: "← ";
+  font-family: var(--tui-mono);
+}
+
+/* spec card */
+.spec-card {
+  background: var(--tui-bg);
+  border: 1px solid var(--tui-line);
+  border-radius: 6px;
+  padding: 20px 24px;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  font-family: var(--tui-mono);
+  font-size: 12px;
+  color: var(--tui-ink);
+}
+.spec-card h3 {
+  font-family: var(--tui-script);
+  font-weight: 600;
+  font-size: 22px;
+  margin: 0 0 4px;
+  color: var(--tui-ink);
+}
+.spec-card h4 {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin: 18px 0 6px;
+  color: var(--tui-ink-2);
+  border-bottom: 1px dashed var(--tui-line-2);
+  padding-bottom: 4px;
+}
+.spec-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 16px;
+  font-size: 11px;
+}
+.spec-row { display: flex; gap: 10px; align-items: center; }
+.spec-row .k { color: var(--tui-ink-3); width: 130px; flex: none; }
+.spec-row .v { color: var(--tui-ink); }
+.glyph-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 1px dashed var(--tui-line-2);
+  border-radius: 3px;
+  margin: 2px;
+  min-width: 56px;
+}
+.glyph-cell .g { font-size: 18px; color: var(--tui-ink); }
+.glyph-cell .lbl { font-size: 9px; color: var(--tui-ink-3); text-transform: uppercase; letter-spacing: 0.08em; }
+
+/* responsive escape for fullscreen artboard mode */
+.dc-focus .tui-screen { font-size: 13px; }

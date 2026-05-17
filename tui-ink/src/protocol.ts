@@ -1,0 +1,109 @@
+// 协议类型 — 这就是 TUI 和 agent 之间的全部词汇。
+// 见 docs/AGENTS.md §3.
+
+export type AgentRunState = "idle" | "run" | "wait" | "done" | "warn" | "err";
+export type TodoState = "todo" | "run" | "done" | "warn" | "err";
+
+// S1: DispatchSpec — 每次 spawn 必须携带，Leader 在 spawn 前验证
+export interface DispatchSpec {
+  background: string;                  // 上下文背景（必填）
+  constraints: string[];               // 执行约束
+  acceptance_criteria: string[];       // 验收标准（至少 1 条）
+  stop_conditions: string[];           // 终止条件（至少 1 条）
+  skills?: {
+    inherit_default: boolean;
+    exclude?: string[];
+    request?: string[];
+  };
+  max_turns?: number;
+  memory_quota_kb?: number;
+  seed_facts?: string[];
+}
+
+export interface TodoItem {
+  id: string;
+  state: TodoState;
+  text: string;
+  progress?: number; // 0..100
+  started_at?: number;
+  eta?: number;
+}
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  role: "Leader" | "Secretary" | "Worker";
+  parent?: string;
+  state: AgentRunState;
+  sub?: string; // 一行话状态
+  model?: string;
+  cost_usd?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  dispatch?: DispatchSpec; // S1: spawn 时携带的 DispatchSpec
+  depth?: number;          // S3: 在 spawn 树中的深度
+}
+
+export interface Message {
+  id: string;
+  agent: string;     // 谁说的 (agent id),或 "user"
+  to: string;        // 给谁,通常 "user" 或另一个 agent id
+  ts: number;
+  kind: "text" | "tool_call" | "tool_result" | "system";
+  text: string;
+  tool_name?: string;
+  tool_args?: unknown;
+  tool_id?: string;
+  needs_approval?: boolean;
+  approved?: boolean;
+  level?: "debug" | "info" | "warn" | "error";
+}
+
+// agent → TUI
+export type TuiEvent =
+  | { v: 1; type: "todo.set"; agent: string; items: TodoItem[] }
+  | { v: 1; type: "step"; agent: string; text: string }
+  | {
+      v: 1; type: "tool.call"; agent: string; id: string;
+      name: string; args: unknown; needs_approval?: boolean;
+    }
+  | { v: 1; type: "tool.result"; agent: string; id: string; ok: boolean; output: string }
+  | { v: 1; type: "message"; agent: string; to: string; text: string }
+  | {
+      v: 1; type: "spawn"; parent: string; child: string;
+      role: "Secretary" | "Worker"; goal: string; model?: string;
+      dispatch?: DispatchSpec; // S1: full dispatch spec
+    }
+  | { v: 1; type: "agent.done"; agent: string; success: boolean; reason?: string }
+  | { v: 1; type: "agent.error"; agent: string; code: string; detail?: string; retry_in?: number }
+  | { v: 1; type: "agent.state"; agent: string; state: AgentRunState; sub?: string }
+  // S6: new protocol events
+  | { v: 1; type: "unit.handup"; agent: string; parent: string;
+      summary: string; artifacts: string[];
+      facts_to_promote: string[]; decisions: string[];
+      failed_acceptance: string[] }
+  | { v: 1; type: "memory.snapshot"; agent: string; path: string; size_kb: number }
+  | { v: 1; type: "shutdown.start"; agent: string; reason: string }
+  | { v: 1; type: "pm.alert"; severity: "warn" | "error";
+      code: string; agent: string; detail: string; ts?: number }
+  | { v: 1; type: "proposal.new"; agent: string; proposal_id: string;
+      target: "role_boundary" | "principles"; diff: string }
+  | { v: 1; type: "proposal.decision"; proposal_id: string;
+      decision: "apply" | "reject"; reason?: string };
+
+// TUI → agent  (写到 agent.stdin)
+export type AgentCommand =
+  | { type: "user.message"; text: string }
+  | { type: "tool.result"; id: string; ok: boolean; output: string }
+  | { type: "tool.reject"; id: string; reason: string }
+  | { type: "control"; action: "pause" | "resume" | "interrupt" };
+
+export interface Session {
+  id: string;
+  agentId: string;
+  title: string;
+  createdAt: number;
+  messageCount: number;
+}
+
+export type LogLevel = "debug" | "info" | "warn" | "error";

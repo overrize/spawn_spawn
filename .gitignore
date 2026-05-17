@@ -3,3 +3,20 @@ dist/
 *.tsbuildinfo
 coverage/
 .vitest/
+
+# Claude Code local settings (contains API key history in allow-list)
+.claude/
+
+# Runtime session / memory snapshots (not source)
+**/.spawn/
+
+# Temp files written by MemoryStore
+*.json.tmp
+
+# Binary artifacts
+*.zip
+*.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
