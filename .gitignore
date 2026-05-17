@@ -16,6 +16,8 @@ coverage/
 # Binary artifacts
 *.zip
 *.tar.gz
+*.png
+*.html
 
 # OS
 .DS_Store

@@ -1,6 +1,0 @@
-[    2380ms] [ERROR] Failed to load resource: the server responded with a status of 404 (File not found) @ http://localhost:8768/src/index.js:0
-[    2385ms] [WARNING] [Dashboard] ESM import failed: Failed to fetch dynamically imported module: http://localhost:8768/src/index.js @ http://localhost:8768/ui/spawn-dashboard.html:1000
-[    2385ms] [INFO] [Dashboard] Activating demo mode with mock agent system. @ http://localhost:8768/ui/spawn-dashboard.html:1001
-[    2387ms] [LOG] [Dashboard] Ready. Type=demo mode active: true @ http://localhost:8768/ui/spawn-dashboard.html:1707
-[    2423ms] [ERROR] Failed to load resource: the server responded with a status of 404 (File not found) @ http://localhost:8768/favicon.ico:0
-[    4556ms] [LOG] [Dashboard] Initialized with 2 spawns @ http://localhost:8768/ui/spawn-dashboard.html:1641
