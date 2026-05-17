@@ -260,6 +260,91 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   );
 }
 
+// ── Lightweight markdown renderer ────────────────────────────────────────────
+// Supports: ### h3 / ## h2 / # h1, ```code blocks```, **bold**, `inline code`,
+// --- hr, blank lines. Everything else renders as plain wrapped text.
+
+type MdKind = "h1" | "h2" | "h3" | "code" | "hr" | "empty" | "text";
+interface MdSeg { kind: MdKind; text: string }
+
+function parseMd(raw: string): MdSeg[] {
+  const segs: MdSeg[] = [];
+  let inCode = false;
+  for (const line of raw.split("\n")) {
+    const t = line.trimStart();
+    if (t.startsWith("```")) { inCode = !inCode; continue; }
+    if (inCode)              { segs.push({ kind: "code",  text: line }); continue; }
+    if (t.startsWith("### "))   { segs.push({ kind: "h3", text: t.slice(4) }); continue; }
+    if (t.startsWith("## "))    { segs.push({ kind: "h2", text: t.slice(3) }); continue; }
+    if (t.startsWith("# "))     { segs.push({ kind: "h1", text: t.slice(2) }); continue; }
+    if (t === "---" || t === "***") { segs.push({ kind: "hr",    text: "" }); continue; }
+    if (!t)                     { segs.push({ kind: "empty", text: "" }); continue; }
+    segs.push({ kind: "text", text: line });
+  }
+  return segs;
+}
+
+interface InlineTok { bold: boolean; code: boolean; text: string }
+
+function parseInline(line: string): InlineTok[] {
+  const toks: InlineTok[] = [];
+  let s = line;
+  while (s) {
+    const b = s.indexOf("**");
+    const c = s.indexOf("`");
+    const first = b === -1 ? c : c === -1 ? b : Math.min(b, c);
+    if (first === -1) { toks.push({ bold: false, code: false, text: s }); break; }
+    if (first > 0) { toks.push({ bold: false, code: false, text: s.slice(0, first) }); s = s.slice(first); continue; }
+    if (s.startsWith("**")) {
+      const e = s.indexOf("**", 2);
+      if (e === -1) { toks.push({ bold: false, code: false, text: s }); break; }
+      toks.push({ bold: true, code: false, text: s.slice(2, e) });
+      s = s.slice(e + 2);
+    } else {
+      const e = s.indexOf("`", 1);
+      if (e === -1) { toks.push({ bold: false, code: false, text: s }); break; }
+      toks.push({ bold: false, code: true, text: s.slice(1, e) });
+      s = s.slice(e + 1);
+    }
+  }
+  return toks;
+}
+
+function MdLine({ text, dimColor: codeColor }: { text: string; dimColor: string }) {
+  const toks = parseInline(text);
+  if (toks.length === 1 && !toks[0]!.bold && !toks[0]!.code) {
+    return <Text wrap="wrap">{text}</Text>;
+  }
+  return (
+    <Box flexDirection="row">
+      {toks.map((tok, i) => (
+        <Text key={i} bold={tok.bold} color={tok.code ? codeColor : undefined} wrap="wrap">
+          {tok.text}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+function MdBody({ text, p }: { text: string; p: Palette }) {
+  const segs = parseMd(text.length > 6000 ? text.slice(0, 5997) + "…" : text);
+  return (
+    <Box flexDirection="column">
+      {segs.map((seg, i) => {
+        switch (seg.kind) {
+          case "h1":    return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
+          case "h2":    return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
+          case "h3":    return <Text key={i} bold color={p.warn}>{seg.text}</Text>;
+          case "code":  return <Text key={i} color={p.dim}>{seg.text}</Text>;
+          case "hr":    return <Text key={i} dimColor>{"─".repeat(40)}</Text>;
+          case "empty": return <Text key={i}>{" "}</Text>;
+          default:      return <MdLine key={i} text={seg.text} dimColor={p.dim} />;
+        }
+      })}
+    </Box>
+  );
+}
+
 function Bubble({ m }: { m: Message }) {
   const p = usePalette();
   const level = m.level ?? "info";
@@ -294,17 +379,10 @@ function Bubble({ m }: { m: Message }) {
   }
   const who = m.agent === "user" ? "▶ you" : `◆ ${m.agent}`;
   const whoColor = m.agent === "user" ? p.accent : (level === "error" ? p.error : p.text);
-  // Preserve actual newlines by splitting — Ink's wrap="wrap" collapses \n to spaces
-  const body = m.text.length > 6000 ? m.text.slice(0, 5997) + "…" : m.text;
-  const lines = body.split("\n");
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={whoColor} bold>{who}</Text>
-      <Box flexDirection="column" marginLeft={2}>
-        {lines.map((line, i) => (
-          <Text key={i} wrap="wrap">{line}</Text>
-        ))}
-      </Box>
+      <Box marginLeft={2}><MdBody text={m.text} p={p} /></Box>
     </Box>
   );
 }
