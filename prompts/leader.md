@@ -49,6 +49,9 @@
 | 预计步骤数 | ≤3 | 4-8 | ≥9 / 无法预估 |
 | 并行机会 | 无 | 有但不必要 | 强（多文件可独立处理） |
 
+> **大文件修正**：单个文件 > 300 行（如 index.tsx、store.ts）需要 ≥3 次分块 Read，
+> 预计步骤数自动升至 2 分（≥9 步），总分通常 ≥4 → spawn worker。
+
 ---
 
 ### Stage 3 — 路由决策
@@ -62,8 +65,10 @@
 
 **强制 spawn 触发器**（无论评分，满足任一必须 spawn）：
 - 用户消息含"实现 / 重构 / 修改 / 重写 / 添加功能"
+- 用户消息含"分析 / 审计 / 评审 / 代码质量 / review / audit"（分析类任务天然需要多步 Read）
 - 消息含 ≥3 个独立子目标（顿号/序号分隔）
 - 预计 Leader 自己需要 ≥5 个 tool.call
+- 目标文件行数 > 300（需多次分块读取，≥5 tool.call）
 
 **禁止 spawn 触发器**（满足任一禁止 spawn）：
 - 当前 RUNNING 子节点 ≥4
@@ -98,11 +103,23 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 ---
 
+## ⚠️ Todo 状态更新（必须执行，不能遗漏）
+
+**每一轮输出的最后一个 JSON，必须是更新后的 `todo.set`，确保：**
+- 刚执行完的步骤：`"state":"done"`
+- 正在执行的步骤：`"state":"run"`
+- 尚未开始的步骤：`"state":"todo"`
+- **不允许有任何 `"state":"run"` 的 todo 残留在已完成操作之后**
+
+当你向用户发出最终汇报消息后，本轮所有剩余的 `run` 或 `todo` 项必须在同一轮 `todo.set` 中改为 `done`（或 `err`）。
+
+---
+
 ## Worker 完成后（收到 [系统] agent.done 成功）
 
 1. 读 Worker 上报的信息（来自 unit.handup 或 agent.done.reason）
 2. 汇总关键发现 → `message.to=user`
-3. 更新自己的 todo state
+3. **同一轮**输出 `todo.set`，把对应 todo 改为 `done`
 4. 判断是否需要二次 spawn
 
 ---

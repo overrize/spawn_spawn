@@ -85,11 +85,15 @@ function TitleBar({ tabs = ["[Tab]switch", "[P]ause", "[F]ork", "[C]onfig", "[q]
 }
 
 // ── 垂直分隔线 ────────────────────────────────────────────────────────────────
+// Height = terminal rows - 7 fixed rows (TitleBar=3 + InputBar=3 + StatusBar=1).
+// Using full `rows` causes overflow that wraps past terminal bottom and
+// reappears at TitleBar rows, creating a stray │ next to the title text.
 export function VDivider() {
   const rows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
+  const h = Math.max(1, rows - 7);
   return (
     <Box flexDirection="column" width={1} flexShrink={0}>
-      {Array.from({ length: rows }, (_, i) => <Text key={i} dimColor>│</Text>)}
+      {Array.from({ length: h }, (_, i) => <Text key={i} dimColor>│</Text>)}
     </Box>
   );
 }
@@ -264,7 +268,7 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
 // Supports: ### h3 / ## h2 / # h1, ```code blocks```, **bold**, `inline code`,
 // --- hr, blank lines. Everything else renders as plain wrapped text.
 
-type MdKind = "h1" | "h2" | "h3" | "code" | "hr" | "empty" | "text";
+type MdKind = "h1" | "h2" | "h3" | "code" | "hr" | "empty" | "table_row" | "text";
 interface MdSeg { kind: MdKind; text: string }
 
 function parseMd(raw: string): MdSeg[] {
@@ -279,6 +283,12 @@ function parseMd(raw: string): MdSeg[] {
     if (t.startsWith("# "))     { segs.push({ kind: "h1", text: t.slice(2) }); continue; }
     if (t === "---" || t === "***") { segs.push({ kind: "hr",    text: "" }); continue; }
     if (!t)                     { segs.push({ kind: "empty", text: "" }); continue; }
+    // Table separator |---|---| → skip (no visual noise)
+    if (/^\|[\s\-:|]+\|$/.test(t)) continue;
+    // Table data row | cell | cell | → dim styled
+    if (t.startsWith("|") && t.endsWith("|")) {
+      segs.push({ kind: "table_row", text: t }); continue;
+    }
     segs.push({ kind: "text", text: line });
   }
   return segs;
@@ -332,13 +342,14 @@ function MdBody({ text, p }: { text: string; p: Palette }) {
     <Box flexDirection="column">
       {segs.map((seg, i) => {
         switch (seg.kind) {
-          case "h1":    return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
-          case "h2":    return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
-          case "h3":    return <Text key={i} bold color={p.warn}>{seg.text}</Text>;
-          case "code":  return <Text key={i} color={p.dim}>{seg.text}</Text>;
-          case "hr":    return <Text key={i} dimColor>{"─".repeat(40)}</Text>;
-          case "empty": return <Text key={i}>{" "}</Text>;
-          default:      return <MdLine key={i} text={seg.text} dimColor={p.dim} />;
+          case "h1":        return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
+          case "h2":        return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
+          case "h3":        return <Text key={i} bold color={p.warn}>{seg.text}</Text>;
+          case "code":      return <Text key={i} color={p.dim}>{seg.text}</Text>;
+          case "hr":        return <Text key={i} dimColor>{"─".repeat(40)}</Text>;
+          case "empty":     return <Text key={i}>{" "}</Text>;
+          case "table_row": return <Text key={i} color={p.dim} wrap="wrap">{seg.text}</Text>;
+          default:          return <MdLine key={i} text={seg.text} dimColor={p.dim} />;
         }
       })}
     </Box>
