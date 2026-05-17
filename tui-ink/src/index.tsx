@@ -911,4 +911,33 @@ process.on("exit", () => {
   process.stdout.write("\x1b[?1000l\x1b[?1006l");
 });
 
+// ── Synchronized output — prevent lower-half flicker ───────────────────────
+// Ink's log-update writes each frame as one stream.write() call:
+//   stream.write(eraseLines(N) + newContent)
+// The terminal renders lines as they arrive, so the user sees old content
+// being erased top-to-bottom before new content fills in → visible flicker.
+//
+// DEC private mode 2026 (supported by Windows Terminal, kitty, iTerm2, etc.)
+// tells the terminal to buffer the entire write and flip the frame atomically.
+// Unknown terminals silently ignore the sequence, so this is safe everywhere.
+{
+  const _orig = process.stdout.write.bind(process.stdout);
+  let _inside = false;
+  // @ts-ignore — intentional write shim
+  process.stdout.write = function (chunk: any, ...rest: any[]): boolean {
+    if (_inside) return _orig(chunk, ...rest);
+    const s: string = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    // Ink frame writes always contain eraseLines (\x1b[1A\x1b[2K) or
+    // clearTerminal (\x1b[2J\x1b[H). Wrap those — and only those — in
+    // synchronized-output begin/end markers.
+    if (s.includes("\x1b[1A") || s.includes("\x1b[2J")) {
+      _inside = true;
+      const r = _orig(`\x1b[?2026h${s}\x1b[?2026l`, ...rest);
+      _inside = false;
+      return r;
+    }
+    return _orig(chunk, ...rest);
+  };
+}
+
 render(<App />, { stdin: filteredStdin as any });
