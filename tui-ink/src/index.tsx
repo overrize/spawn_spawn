@@ -339,15 +339,18 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       return;
     }
 
-    // Mirror agent.error from child to parent so the user sees it on the leader pane
+    // Mirror agent.error from child to parent — UI + parent LLM
     if (ev.type === "agent.error") {
       applyEvent(ev);
       pm.observe(ev);
       secretary.observe(ev);
-      applyEvent({
-        v: 1, type: "message", agent: e.child, to: e.parent,
-        text: `⚠ ${e.child} error: [${ev.code}] ${ev.detail ?? ""}`,
-      });
+      const parentAgent = agents.get(e.parent);
+      if (parentAgent instanceof HttpConvAgent) {
+        parentAgent.sendCommand({
+          type: "user.message",
+          text: `[系统-错误] ${e.child} 发生错误 [${ev.code}]${ev.detail ? ": " + ev.detail : ""}。\n请立即 message→user 说明情况，并提供选项让用户选择：\n① 重试（重新 spawn 同目标 worker）\n② 换策略（spawn 新 worker 用不同方法）\n③ 放弃该子任务，继续其他工作\n④ 人工介入（请用户手动操作后告知你）`,
+        });
+      }
       return;
     }
 
@@ -371,11 +374,17 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (ev.type === "agent.done") {
       const parentAgent = agents.get(e.parent);
       if (parentAgent instanceof HttpConvAgent) {
-        const status = ev.success ? "成功完成" : "失败";
-        parentAgent.sendCommand({
-          type: "user.message",
-          text: `[系统] ${e.child} 已${status}${ev.reason ? ": " + ev.reason : ""}。请继续推进你的任务。`,
-        });
+        if (ev.success) {
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[系统] ${e.child} 成功完成${ev.reason ? ": " + ev.reason : ""}。请继续推进你的任务。`,
+          });
+        } else {
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[系统-失败] ${e.child} 任务失败${ev.reason ? ": " + ev.reason : ""}。\n请立即 message→user 说明情况，并提供选项让用户选择：\n① 重试（重新 spawn 同目标 worker）\n② 换策略（spawn 新 worker 用不同方法）\n③ 放弃该子任务，继续其他工作\n④ 人工介入（请用户手动操作后告知你）`,
+          });
+        }
       }
     }
     if (ev.type === "unit.handup") {
