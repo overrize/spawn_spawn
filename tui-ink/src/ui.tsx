@@ -285,15 +285,26 @@ function Bubble({ m }: { m: Message }) {
     );
   }
   if (m.kind === "system") {
-    return <Box><Text color={errColor}>{m.text}</Text></Box>;
+    const sysLines = m.text.split("\n");
+    return (
+      <Box flexDirection="column">
+        {sysLines.map((l, i) => <Text key={i} color={errColor} wrap="wrap">{l}</Text>)}
+      </Box>
+    );
   }
   const who = m.agent === "user" ? "▶ you" : `◆ ${m.agent}`;
   const whoColor = m.agent === "user" ? p.accent : (level === "error" ? p.error : p.text);
-  const body = m.text.length > 2000 ? m.text.slice(0, 1997) + "…" : m.text;
+  // Preserve actual newlines by splitting — Ink's wrap="wrap" collapses \n to spaces
+  const body = m.text.length > 6000 ? m.text.slice(0, 5997) + "…" : m.text;
+  const lines = body.split("\n");
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={whoColor} bold>{who}</Text>
-      <Box marginLeft={2}><Text wrap="wrap">{body}</Text></Box>
+      <Box flexDirection="column" marginLeft={2}>
+        {lines.map((line, i) => (
+          <Text key={i} wrap="wrap">{line}</Text>
+        ))}
+      </Box>
     </Box>
   );
 }
