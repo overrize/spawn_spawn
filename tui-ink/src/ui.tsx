@@ -64,14 +64,32 @@ function stateColor(state: AgentRunState, p: Palette): string {
 
 // ── 头部 titlebar ───────────────────────────────────────────────────────────
 function TitleBar({ tabs = ["[Tab]switch", "[P]ause", "[F]ork", "[C]onfig", "[q]uit"] }: { tabs?: string[] }) {
+  const p = usePalette();
+  const pending = useStore((s) => s.pendingApprovals);
+  const first = pending[0];
   return (
     <Box borderStyle="single" borderColor="gray" paddingX={1}
          justifyContent="space-between">
       <Box>
         <Text dimColor>● ● ● </Text>
         <Text bold>multi-agent · inbox</Text>
+        {pending.length > 0 && (
+          <Text color={p.warn} bold>
+            {"  "}⚠ {first!.agent}: {first!.tool_name ?? "tool"} — y/n approve ({pending.length})
+          </Text>
+        )}
       </Box>
       <Text dimColor>{tabs.join("  ")}</Text>
+    </Box>
+  );
+}
+
+// ── 垂直分隔线 ────────────────────────────────────────────────────────────────
+export function VDivider() {
+  const rows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
+  return (
+    <Box flexDirection="column" width={1} flexShrink={0}>
+      {Array.from({ length: rows }, (_, i) => <Text key={i} dimColor>│</Text>)}
     </Box>
   );
 }
@@ -82,8 +100,7 @@ export function AgentsPane({ width }: { width: number }) {
   const sel = useStore((s) => s.selectedAgent);
 
   return (
-    <Box flexDirection="column" width={width} flexShrink={0} borderStyle="single"
-         borderColor="gray" borderTop={false} borderLeft={false} borderBottom={false}>
+    <Box flexDirection="column" width={width} flexShrink={0}>
       <Box paddingX={1} paddingY={0}>
         <Text dimColor>AGENTS </Text><Text dimColor>{agents.length}</Text>
       </Box>
@@ -189,7 +206,9 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const pending = useStore((s) => s.pendingApprovals.filter((p) => p.agent === s.selectedAgent));
   const minLevel = useStore((s) => s.minLevel);
 
-  const PAGE    = CONV_PAGE;
+  // Use terminal height to show as many messages as possible; fall back to CONV_PAGE
+  const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
+  const PAGE = Math.max(CONV_PAGE, termRows - 8);
   const end     = Math.max(0, messages.length - scrollOffset);
   const start   = Math.max(0, end - PAGE);
   const LEVEL_RANK: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -198,8 +217,7 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   );
 
   return (
-    <Box flexDirection="column" flexGrow={1} paddingX={1} borderStyle="single"
-         borderColor="gray" borderTop={false} borderBottom={false} borderLeft={false}>
+    <Box flexDirection="column" flexGrow={1} paddingX={1}>
       <Box justifyContent="space-between">
         <Box>
           <Text color={p.accent}>◆ </Text>
@@ -210,6 +228,8 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
       </Box>
 
       <Box flexDirection="column" marginTop={1} flexGrow={1}>
+        {/* spacer pushes messages to bottom of available space */}
+        <Box flexGrow={1} />
         {start > 0 && (
           <Text dimColor>↑ {start} older (scroll up)</Text>
         )}
@@ -269,10 +289,11 @@ function Bubble({ m }: { m: Message }) {
   }
   const who = m.agent === "user" ? "▶ you" : `◆ ${m.agent}`;
   const whoColor = m.agent === "user" ? p.accent : (level === "error" ? p.error : p.text);
+  const body = m.text.length > 2000 ? m.text.slice(0, 1997) + "…" : m.text;
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={whoColor} bold>{who}</Text>
-      <Box marginLeft={2}><Text>{truncate(m.text, 200)}</Text></Box>
+      <Box marginLeft={2}><Text wrap="wrap">{body}</Text></Box>
     </Box>
   );
 }
@@ -301,7 +322,7 @@ export function TodoPane({ width }: { width: number }) {
   const done = todos.filter((t) => t.state === "done").length;
 
   return (
-    <Box flexDirection="column" width={width} flexShrink={0} paddingX={1}>
+    <Box flexDirection="column" width={width} flexShrink={0} paddingLeft={1} paddingRight={1}>
       <Box justifyContent="space-between">
         <Text dimColor>TODO · {sel}</Text>
         <Text dimColor>{done}/{todos.length}</Text>
@@ -363,7 +384,7 @@ export function StatusBar({ demo }: { demo?: boolean }) {
       </Box>
       <Box>
         <Text dimColor>log:{minLevel}  </Text>
-        <Text dimColor>tab cycle · enter send · y/n approve · q quit</Text>
+        <Text dimColor>tab cycle · enter send · [/] scroll · y/n approve · q quit</Text>
       </Box>
     </Box>
   );
@@ -425,24 +446,29 @@ export function DagView({ maxHeight = 12 }: { maxHeight?: number }) {
 
 // ── 输入栏 ──────────────────────────────────────────────────────────────────
 export function InputBar({
-  value, onChange, onSubmit, hint,
+  value, onChange, onSubmit, hint, focused = true,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSubmit: (v: string) => void;
   hint?: string;
+  focused?: boolean;
 }) {
   const p = usePalette();
   return (
     <Box borderStyle="single" borderColor="gray" borderLeft={false} borderRight={false}
          paddingX={1}>
       <Text color={p.accent}>› </Text>
-      <TextInput
-        value={value}
-        onChange={onChange}
-        onSubmit={onSubmit}
-        placeholder={hint ?? "type a message · @agent to switch · /command"}
-      />
+      {focused ? (
+        <TextInput
+          value={value}
+          onChange={onChange}
+          onSubmit={onSubmit}
+          placeholder={hint ?? "type a message · @agent to switch · /command"}
+        />
+      ) : (
+        <Text dimColor>{hint ?? "y approve · n reject"}</Text>
+      )}
     </Box>
   );
 }

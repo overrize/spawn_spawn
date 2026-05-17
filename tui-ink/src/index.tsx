@@ -27,7 +27,7 @@ import { OpenCodeAgent } from "./adapters/opencode.js";
 import { HttpConvAgent } from "./adapters/httpAgent.js";
 import {
   TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar,
-  DagView, PaletteContext, PALETTES,
+  DagView, VDivider, PaletteContext, PALETTES,
 } from "./ui.js";
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
@@ -162,6 +162,7 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
   const leaderToolQueue: Array<Extract<TuiEvent, { type: "tool.call" }>> = [];
   let leaderActedThisTurn = false;
   let leaderContinuations = 0;
+  let leaderGaveUp = false;
 
   // Wire events — spawn is pre-checked BEFORE applyEvent to prevent ghost agents
   a.on("event", (e: TuiEvent) => {
@@ -200,7 +201,7 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
     // Auto-approved tool queue
     if (e.type === "tool.call") {
       leaderActedThisTurn = true;
-      const mustApprove = toolNeedsApproval(e.name);
+      const mustApprove = toolNeedsApproval(e.name, e.args as Record<string, unknown>);
       if (!mustApprove) leaderToolQueue.push(e);
     }
 
@@ -240,20 +241,39 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
           ).join("\n\n");
           a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
-      } else if (!leaderActedThisTurn && leaderContinuations < 3) {
+      } else if (leaderActedThisTurn) {
+        // Leader acted this turn — check for stale "run" todos that were never closed
+        const todos = getState().todosByAgent.get("leader") ?? [];
+        const hasRun  = todos.some((t) => t.state === "run");
+        const hasTodo = todos.some((t) => t.state === "todo");
+        if (hasRun && !hasTodo) {
+          // All pending work was claimed as "run" and leader just reported — auto-close them
+          const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
+          applyEvent({ v: 1, type: "todo.set", agent: "leader", items: closed as any });
+        }
+      } else if (!leaderActedThisTurn && !leaderGaveUp) {
         // Leader planned (todo.set) but didn't act — nudge it to continue
         const todos = getState().todosByAgent.get("leader") ?? [];
         const hasPending = todos.some((t) => t.state === "todo" || t.state === "run");
-        if (hasPending) {
+        if (hasPending && leaderContinuations < 3) {
           leaderContinuations++;
           setImmediate(() => {
             a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call 或 spawn，不要只规划。" });
           });
+        } else if (hasPending) {
+          // 3 nudges failed — alert user directly (leader has no parent)
+          leaderGaveUp = true;
+          const pendingTodos = todos
+            .filter((t) => t.state === "todo" || t.state === "run")
+            .map((t) => t.text)
+            .join("; ");
+          applyEvent({
+            v: 1, type: "message", agent: "leader", to: "user",
+            text: `⚠ leader 经过 3 次推进仍无有效行动。未完成项：${pendingTodos}。\n请选择：\n① 重试 — 输入新指令继续\n② 换策略 — 描述新方法\n③ 放弃 — 结束当前任务`,
+          });
         } else {
           leaderContinuations = 0;
         }
-      } else {
-        leaderContinuations = 0;
       }
     }
   });
@@ -328,6 +348,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   const toolQueue: Array<Extract<TuiEvent, { type: "tool.call" }>> = [];
   let workerActedThisTurn = false;
   let workerContinuations = 0;
+  let workerGaveUp = false;
+  let workerCorrectedThisTurn = false; // deduplicate illegal_message corrections per turn
 
   a.on("event", (ev: TuiEvent) => {
     // spawn: pre-check BEFORE applyEvent to prevent ghost agents in store
@@ -362,7 +384,30 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     }
 
     // Block illegal messages before they reach the store
-    if (ev.type === "message" && !checkMessageLegal(ev)) return;
+    if (ev.type === "message") {
+      const senderRole = getState().agents.get(ev.agent)?.role;
+      const recipientRole = ev.to !== "user" ? getState().agents.get(ev.to)?.role : undefined;
+      const isWorkerToUser = senderRole === "Worker" && ev.to === "user";
+      const isWorkerToWorker = senderRole === "Worker" && recipientRole === "Worker";
+      if (isWorkerToUser || isWorkerToWorker) {
+        workerActedThisTurn = true; // prevent auto-continuation nudge loop
+        if (!workerCorrectedThisTurn) {
+          workerCorrectedThisTurn = true;
+          applyEvent({
+            v: 1, type: "agent.error", agent: ev.agent, code: "illegal_message",
+            detail: `Worker ${ev.agent} 不能直接 message.to=${ev.to}（应 message.to=${e.parent}）。已拦截并发送纠正。`,
+          });
+          pm.observe(ev);
+          setImmediate(() => {
+            a.sendCommand({
+              type: "user.message",
+              text: `[系统-纠正] 你不能使用 message.to=${ev.to}。必须使用 message.to=${e.parent} 向上级汇报结果。请用正确格式立即汇报。`,
+            });
+          });
+        }
+        return;
+      }
+    }
     applyEvent(ev);
     pm.observe(ev);
     secretary.observe(ev);
@@ -408,14 +453,27 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     // Track turn start
     if (ev.type === "agent.state" && ev.state === "run") {
       workerActedThisTurn = false;
+      workerCorrectedThisTurn = false;
     }
 
     // 注册表是 needsApproval 的权威来源，防止 agent 伪造 false 绕过审批门
     if (ev.type === "tool.call") {
       workerActedThisTurn = true;
-      const mustApprove = toolNeedsApproval(ev.name);
-      if (!mustApprove) toolQueue.push(ev);
-      // mustApprove=true 的走 pendingApprovals → y/n 路径（store 已处理）
+      const mustApprove = toolNeedsApproval(ev.name, ev.args as Record<string, unknown>);
+      if (!mustApprove) {
+        toolQueue.push(ev);
+      } else {
+        // 需要审批 — 在 leader conv 里注入通知，用户在任意视图下都能看到
+        const argSummary = typeof ev.args === "object" && ev.args !== null
+          ? Object.entries(ev.args as Record<string, unknown>)
+              .map(([k, v]) => `${k}=${JSON.stringify(v)?.slice(0, 60)}`)
+              .join(", ")
+          : String(ev.args);
+        applyEvent({
+          v: 1, type: "message", agent: "leader", to: "user",
+          text: `⚠ [PM-审批] ${e.child} 等待审批: ${ev.name}(${argSummary})\n在输入框按 y 批准 · n 拒绝`,
+        });
+      }
     }
 
     // Sending a message counts as acting — same logic as in startLeader.
@@ -441,20 +499,41 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           ).join("\n\n");
           a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
-      } else if (!workerActedThisTurn && workerContinuations < 3) {
+      } else if (workerActedThisTurn) {
+        // Worker acted (sent message to parent or ran tool) — auto-close stale run todos
+        const todos = getState().todosByAgent.get(e.child) ?? [];
+        const hasRun  = todos.some((t) => t.state === "run");
+        const hasTodo = todos.some((t) => t.state === "todo");
+        if (hasRun && !hasTodo) {
+          const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
+          applyEvent({ v: 1, type: "todo.set", agent: e.child, items: closed as any });
+        }
+      } else if (!workerActedThisTurn && !workerGaveUp) {
         // Worker planned but didn't act — nudge to continue
         const todos = getState().todosByAgent.get(e.child) ?? [];
         const hasPending = todos.some((t) => t.state === "todo" || t.state === "run");
-        if (hasPending) {
+        if (hasPending && workerContinuations < 3) {
           workerContinuations++;
           setImmediate(() => {
             a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call，不要只规划。" });
           });
+        } else if (hasPending) {
+          // 3 nudges failed — escalate to parent so leader can decide
+          workerGaveUp = true;
+          const pendingTodos = todos
+            .filter((t) => t.state === "todo" || t.state === "run")
+            .map((t) => t.text)
+            .join("; ");
+          const parentAgent = agents.get(e.parent);
+          if (parentAgent instanceof HttpConvAgent) {
+            parentAgent.sendCommand({
+              type: "user.message",
+              text: `[系统-卡住] ${e.child} 经过 3 次推进仍无有效行动，任务可能超出能力范围。未完成项：${pendingTodos}。\n请立即 message→user 说明情况，并提供选项：\n① 重试（重新 spawn 同目标 worker）\n② 换策略（spawn 新 worker 用不同方法）\n③ 放弃该子任务，继续其他工作\n④ 人工介入`,
+            });
+          }
         } else {
           workerContinuations = 0;
         }
-      } else {
-        workerContinuations = 0;
       }
     }
   });
@@ -466,10 +545,20 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     secretary.observeMessage(m.role, m.content);
   });
 
-  // Set depth on the newly created agent so AgentRow can indent correctly
-  updateAgentInfo(e.child, { depth: parentDepth + 1 });
+  // Set depth and resolved model so AgentRow shows the actual model (not "{{WORKER_MODEL}}" or "?")
+  updateAgentInfo(e.child, { depth: parentDepth + 1, model: workerModel });
 
-  a.sendCommand({ type: "user.message", text: e.goal });
+  // Build initial message from goal + dispatch context so worker has full picture
+  const dispatchCtx = e.dispatch;
+  let initMsg = e.goal;
+  if (dispatchCtx) {
+    const parts: string[] = [`任务目标：${e.goal}`];
+    if (dispatchCtx.background) parts.push(`背景：${dispatchCtx.background}`);
+    if (dispatchCtx.constraints?.length) parts.push(`约束：${dispatchCtx.constraints.join("；")}`);
+    if (dispatchCtx.acceptance_criteria?.length) parts.push(`验收标准：${dispatchCtx.acceptance_criteria.join("；")}`);
+    initMsg = parts.join("\n");
+  }
+  a.sendCommand({ type: "user.message", text: initMsg });
 }
 
 // ── DEMO 模式 — 不调 claude,假发事件给你看 UI ──────────────────────────────
@@ -587,10 +676,11 @@ function App() {
         applyEvent({ v: 1, type: "message", agent: "leader", to: "user", text: `No memory found for ${id}` });
         return;
       }
-      // Kill existing instance if any
+      // Kill existing instance if any, reset scroll so the new session starts at bottom
       agents.get(id)?.kill?.();
+      selectAgent(id);
       applyEvent({ v: 1, type: "message", agent: "leader", to: "user",
-        text: `Resuming ${id} from last checkpoint: "${mem.tombstone.resume_hint ?? "unknown"}"` });
+        text: `Resuming ${id} from last checkpoint` });
       if (id === "leader") {
         // Find which child agents were alive at the time of the snapshot but
         // are NOT currently running — leader needs to know they're gone so it
@@ -780,6 +870,12 @@ function App() {
       }
     }
 
+    // Scroll shortcuts — [ scroll up, ] scroll down (when input empty)
+    if (!input) {
+      if (char === "[") { scrollBy(-1); return; }
+      if (char === "]") { scrollBy(1);  return; }
+    }
+
     // P/F/C shortcuts — only when not typing and no pending approvals
     if (!input && !pending.length) {
       if (char === "P") {
@@ -872,12 +968,15 @@ function App() {
         ) : (
           <Box flexGrow={1}>
             <AgentsPane width={22} />
+            <VDivider />
             <ConvPane scrollOffset={scrollOffset} />
+            <VDivider />
             <TodoPane width={32} />
           </Box>
         )}
         <InputBar
           key={completeTick.current}
+          focused={pending.length === 0}
           value={input}
           onChange={setInput}
           onSubmit={(v) => {
@@ -891,7 +990,7 @@ function App() {
           }}
           hint={
             pending.length > 0
-              ? "y approve · n reject · or keep typing"
+              ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
               : (() => {
                   const q = msgQueue.current.get(getState().selectedAgent) ?? [];
                   const selState = getState().agents.get(getState().selectedAgent)?.state;
@@ -934,22 +1033,13 @@ const banner = DEMO
 
 console.log(`\nmulti-agent TUI · ${banner}\n`);
 
-// ── filtered stdin ─────────────────────────────────────────────────────────
-// SGR mouse 序列由模块级过滤，避免漏入 Ink/TextInput
-const filteredStdin = new PassThrough();
-const mouseRe = /\x1b\[<(\d+);\d+;\d+[Mm]/g;
+// ── stdin passthrough (no mouse interception) ───────────────────────────────
+// 关掉所有鼠标追踪，还给终端原生文字选中能力。
+// 滚动改用键盘（[ / ]，见 useInput 处理）。
+process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
 
-process.stdin.on("data", (chunk: Buffer) => {
-  const str = chunk.toString();
-  let m: RegExpExecArray | null;
-  while ((m = mouseRe.exec(str)) !== null) {
-    const btn = parseInt(m[1]!);
-    if (btn === 64) scrollBy(1);
-    if (btn === 65) scrollBy(-1);
-  }
-  const cleaned = str.replace(mouseRe, "");
-  if (cleaned) filteredStdin.write(cleaned);
-});
+const filteredStdin = new PassThrough();
+process.stdin.pipe(filteredStdin, { end: false });
 
 Object.defineProperties(filteredStdin, {
   isTTY: { get: () => process.stdin.isTTY },
@@ -958,9 +1048,9 @@ Object.defineProperties(filteredStdin, {
   unref: { value: () => process.stdin.unref() },
 });
 
-process.stdout.write("\x1b[?1000h\x1b[?1006h");
+// Re-disable on exit in case the terminal re-enabled tracking during the session
 process.on("exit", () => {
-  process.stdout.write("\x1b[?1000l\x1b[?1006l");
+  process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
 });
 
 // ── Synchronized output — prevent lower-half flicker ───────────────────────
