@@ -213,6 +213,13 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
         const target = agents.get(e.to);
         if (target instanceof HttpConvAgent) {
           target.sendCommand({ type: "user.message", text: `[leader] ${e.text}` });
+        } else {
+          // Target agent doesn't exist (e.g. after /resume, workers are gone).
+          // Bounce back immediately so leader doesn't silently hang.
+          a.sendCommand({
+            type: "user.message",
+            text: `[系统] 消息无法送达：agent "${e.to}" 不存在或已结束。请重新 spawn 该 worker，或 message→user 说明情况让用户决定下一步。`,
+          });
         }
       }
     }
@@ -585,8 +592,26 @@ function App() {
       applyEvent({ v: 1, type: "message", agent: "leader", to: "user",
         text: `Resuming ${id} from last checkpoint: "${mem.tombstone.resume_hint ?? "unknown"}"` });
       if (id === "leader") {
+        // Find which child agents were alive at the time of the snapshot but
+        // are NOT currently running — leader needs to know they're gone so it
+        // can re-spawn or re-plan rather than messaging non-existent agents.
+        const deadWorkers = (mem.parent_chain ?? [])
+          .concat(
+            // also scan .spawn directory for children of leader
+            listUnfinishedAgents()
+              .filter((m) => m.parent_chain?.includes("leader"))
+              .map((m) => m.agent_id),
+          )
+          .filter((wid, i, arr) => arr.indexOf(wid) === i) // unique
+          .filter((wid) => !agents.has(wid));
+
+        const deadNote = deadWorkers.length > 0
+          ? `\n\n⚠️ 以下 worker 在上次会话中存在，当前已不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划，不要向它们发消息。`
+          : "";
+
+        const resumeHint = (mem.tombstone.resume_hint ?? "Resume from last checkpoint") + deadNote;
         leaderStarted.current = false;
-        startLeader(mem.tombstone.resume_hint ?? "Resume from last checkpoint", id);
+        startLeader(resumeHint, id);
         leaderStarted.current = true;
       } else {
         // Worker resume: re-send goal with memory context
