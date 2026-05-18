@@ -301,8 +301,8 @@ export const CONV_PAGE = 12;
 
 export function scrollBy(delta: number): void {
   const msgs = state.messagesByAgent.get(state.selectedAgent) ?? [];
-  const max = Math.max(0, msgs.length - CONV_PAGE);
-  if (max === 0) return; // all messages fit on screen — don't scroll
+  if (msgs.length === 0) return;
+  const max = msgs.length - 1; // hide at most n-1 messages so ≥1 always visible
   state.scrollOffset = Math.max(0, Math.min(max, state.scrollOffset + delta));
   notify();
 }

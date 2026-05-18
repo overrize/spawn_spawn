@@ -5,7 +5,7 @@
 import React, { createContext, useContext } from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
-import { useStore, approve, reject, switchSession, CONV_PAGE } from "./store.js";
+import { useStore, approve, reject, switchSession } from "./store.js";
 import type {
   AgentInfo, Message, TodoItem, AgentRunState,
 } from "./protocol.js";
@@ -210,15 +210,40 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const pending = useStore((s) => s.pendingApprovals.filter((p) => p.agent === s.selectedAgent));
   const minLevel = useStore((s) => s.minLevel);
 
-  // Use terminal height to show as many messages as possible; fall back to CONV_PAGE
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
-  const PAGE = Math.max(CONV_PAGE, termRows - 8);
-  const end     = Math.max(0, messages.length - scrollOffset);
-  const start   = Math.max(0, end - PAGE);
+  const termCols = typeof process !== "undefined" ? ((process.stdout as any).cols ?? 80) : 80;
+  const availRows = Math.max(4, termRows - 8);
+  // content width ≈ termCols - AgentsPane(22) - VDivider(1) - TodoPane(32) - VDivider(1) - paddingX(2)
+  const contentCols = Math.max(20, termCols - 58);
+
   const LEVEL_RANK: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
-  const visible = messages.slice(start, end).filter((m) =>
+  const filtered = messages.filter((m) =>
     (LEVEL_RANK[m.level ?? "info"] ?? 1) >= (LEVEL_RANK[minLevel] ?? 1)
   );
+
+  // Estimate terminal rows a message occupies (header line + wrapped content lines)
+  function estRows(m: Message): number {
+    if (m.kind === "tool_call" || m.kind === "tool_result") return 1;
+    let rows = 1; // header (who line)
+    for (const line of m.text.split("\n")) {
+      rows += Math.max(1, Math.ceil(Math.max(1, line.length) / contentCols));
+    }
+    return rows + 1; // +1 marginBottom
+  }
+
+  // Build visible window: work backwards skipping `scrollOffset` rows from the end
+  let skipped = 0;
+  let used = 0;
+  const window: Message[] = [];
+  let hasOlderAbove = false;
+  for (let i = filtered.length - 1; i >= 0; i--) {
+    const r = estRows(filtered[i]!);
+    if (skipped < scrollOffset) { skipped += r; continue; }
+    if (used + r > availRows) { hasOlderAbove = true; break; }
+    used += r;
+    window.unshift(filtered[i]!);
+  }
+  const visible = window;
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
@@ -234,8 +259,8 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
       <Box flexDirection="column" marginTop={1} flexGrow={1}>
         {/* spacer pushes messages to bottom of available space */}
         <Box flexGrow={1} />
-        {start > 0 && (
-          <Text dimColor>↑ {start} older (scroll up)</Text>
+        {hasOlderAbove && (
+          <Text dimColor>↑ more above · press [ to scroll up</Text>
         )}
         {visible.length === 0 && (
           <Text dimColor italic>no messages yet · type below to start</Text>
@@ -254,7 +279,7 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
         )}
 
         {scrollOffset > 0 && (
-          <Text dimColor>↓ newer (scroll down)</Text>
+          <Text dimColor>↓ newer below · press ] to scroll down</Text>
         )}
       </Box>
 
@@ -325,14 +350,15 @@ function MdLine({ text, dimColor: codeColor }: { text: string; dimColor: string 
   if (toks.length === 1 && !toks[0]!.bold && !toks[0]!.code) {
     return <Text wrap="wrap">{text}</Text>;
   }
+  // Use nested Text (not Box row) so the entire line wraps as one unit
   return (
-    <Box flexDirection="row">
+    <Text wrap="wrap">
       {toks.map((tok, i) => (
-        <Text key={i} bold={tok.bold} color={tok.code ? codeColor : undefined} wrap="wrap">
+        <Text key={i} bold={tok.bold} color={tok.code ? codeColor : undefined}>
           {tok.text}
         </Text>
       ))}
-    </Box>
+    </Text>
   );
 }
 
@@ -342,11 +368,11 @@ function MdBody({ text, p }: { text: string; p: Palette }) {
     <Box flexDirection="column">
       {segs.map((seg, i) => {
         switch (seg.kind) {
-          case "h1":        return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
-          case "h2":        return <Text key={i} bold color={p.accent}>{seg.text}</Text>;
-          case "h3":        return <Text key={i} bold color={p.warn}>{seg.text}</Text>;
-          case "code":      return <Text key={i} color={p.dim}>{seg.text}</Text>;
-          case "hr":        return <Text key={i} dimColor>{"─".repeat(40)}</Text>;
+          case "h1":        return <Text key={i} bold color={p.accent} wrap="wrap">{seg.text}</Text>;
+          case "h2":        return <Text key={i} bold color={p.accent} wrap="wrap">{seg.text}</Text>;
+          case "h3":        return <Text key={i} bold color={p.warn}   wrap="wrap">{seg.text}</Text>;
+          case "code":      return <Text key={i} color={p.dim}         wrap="wrap">{seg.text}</Text>;
+          case "hr":        return <Text key={i} dimColor>{"─".repeat(32)}</Text>;
           case "empty":     return <Text key={i}>{" "}</Text>;
           case "table_row": return <Text key={i} color={p.dim} wrap="wrap">{seg.text}</Text>;
           default:          return <MdLine key={i} text={seg.text} dimColor={p.dim} />;
@@ -484,7 +510,7 @@ export function StatusBar({ demo }: { demo?: boolean }) {
       </Box>
       <Box>
         <Text dimColor>log:{minLevel}  </Text>
-        <Text dimColor>tab cycle · enter send · [/] scroll · y/n approve · q quit</Text>
+        <Text dimColor>tab cycle · enter send · [ up  ] dn · y/n approve · q quit</Text>
       </Box>
     </Box>
   );

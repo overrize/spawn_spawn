@@ -890,10 +890,10 @@ function App() {
       }
     }
 
-    // Scroll shortcuts — [ scroll up, ] scroll down (when input empty)
+    // Scroll shortcuts — [ scroll up (older), ] scroll down (newer), when input empty
     if (!input) {
-      if (char === "[") { scrollBy(-1); return; }
-      if (char === "]") { scrollBy(1);  return; }
+      if (char === "[") { scrollBy(3);  return; } // older = hide 3 recent msgs
+      if (char === "]") { scrollBy(-3); return; } // newer = unhide 3 recent msgs
     }
 
     // P/F/C shortcuts — only when not typing and no pending approvals
