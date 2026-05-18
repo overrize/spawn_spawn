@@ -402,17 +402,27 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       const isWorkerToWorker = senderRole === "Worker" && recipientRole === "Worker";
       if (isWorkerToUser || isWorkerToWorker) {
         workerActedThisTurn = true; // prevent auto-continuation nudge loop
+        // Auto-forward to parent so the report is never lost, then correct.
+        const parentAgent = agents.get(e.parent);
+        if (parentAgent instanceof HttpConvAgent) {
+          const redirected = { ...ev, to: e.parent } as typeof ev;
+          applyEvent(redirected);      // store as worker→parent (visible in both panes)
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[${e.child}→${e.parent}] ${ev.text}`,
+          });
+        }
         if (!workerCorrectedThisTurn) {
           workerCorrectedThisTurn = true;
           applyEvent({
             v: 1, type: "agent.error", agent: ev.agent, code: "illegal_message",
-            detail: `Worker ${ev.agent} 不能直接 message.to=${ev.to}（应 message.to=${e.parent}）。已拦截并发送纠正。`,
+            detail: `Worker ${ev.agent} message.to=${ev.to} 违规 — 已自动转发至 ${e.parent} 并纠正。`,
           });
           pm.observe(ev);
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
-              text: `[系统-纠正] 你不能使用 message.to=${ev.to}。必须使用 message.to=${e.parent} 向上级汇报结果。请用正确格式立即汇报。`,
+              text: `[系统-纠正] message.to=${ev.to} 违规已被自动转发至 ${e.parent}。下次请直接使用 message.to=${e.parent}，然后 agent.done。`,
             });
           });
         }

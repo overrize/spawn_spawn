@@ -201,7 +201,7 @@ export function applyEvent(e: TuiEvent) {
         text: `${e.name}(${shortArgs(e.args)})`,
         tool_name: e.name, tool_args: e.args, tool_id: e.id,
         needs_approval: !!e.needs_approval, approved: !e.needs_approval,
-        level: e.needs_approval ? "warn" : "debug",
+        level: e.needs_approval ? "warn" : "info",
       };
       const list = state.messagesByAgent.get(e.agent) ?? [];
       list.push(m);
@@ -214,7 +214,7 @@ export function applyEvent(e: TuiEvent) {
         agent: e.agent, to: "user", kind: "tool_result",
         text: `→ ${e.ok ? "✓" : "✗"} ${e.output.slice(0, 160)}`,
         tool_id: e.id,
-        level: e.ok ? "debug" : "error",
+        level: e.ok ? "info" : "error",
       });
       break;
     case "spawn": {
