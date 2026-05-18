@@ -1035,13 +1035,23 @@ function App() {
             <ConvPane scrollOffset={scrollOffset} />
           </Box>
         ) : (
-          <Box flexGrow={1}>
-            <AgentsPane width={22} />
-            <VDivider />
-            <ConvPane scrollOffset={scrollOffset} />
-            <VDivider />
-            <TodoPane width={32} />
-          </Box>
+          // Responsive sidebar widths: shrink panes on narrow terminals so
+          // ConvPane always gets enough columns for readable text.
+          // At termCols=89: normal(22+32)→conv=30; responsive(14+22)→conv=48
+          (() => {
+            const tc = process.stdout.columns ?? 80;
+            const agW = tc >= 120 ? 22 : tc >= 90 ? 18 : 14;
+            const toW = tc >= 120 ? 32 : tc >= 90 ? 24 : 18;
+            return (
+              <Box flexGrow={1}>
+                <AgentsPane width={agW} />
+                <VDivider />
+                <ConvPane scrollOffset={scrollOffset} />
+                <VDivider />
+                <TodoPane width={toW} />
+              </Box>
+            );
+          })()
         )}
         <InputBar
           key={completeTick.current}

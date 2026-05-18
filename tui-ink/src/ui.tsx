@@ -2,14 +2,52 @@
 // agents | conversation (+todo sidebar) | input + status bar
 // 配色:paper 主题用 Ink 默认终端色;状态点用文字字形。
 
-import React, { createContext, useContext } from "react";
+import React, { createContext, useContext, useEffect, useRef } from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { useStore, approve, reject, switchSession } from "./store.js";
 import type {
   AgentInfo, Message, TodoItem, AgentRunState,
 } from "./protocol.js";
 import type { PaletteName } from "./config.js";
+
+// ── Layout debug logger ──────────────────────────────────────────────────────
+// Writes to OS temp dir so it never touches the project or TUI output.
+// Tail it with: tail -f <path printed on startup>
+const LAYOUT_LOG = path.join(os.tmpdir(), "tui-layout-debug.log");
+let _layoutLogPrinted = false;
+
+function layoutLog(msg: string) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try { fs.appendFileSync(LAYOUT_LOG, line); } catch { /* non-fatal */ }
+  if (!_layoutLogPrinted) {
+    _layoutLogPrinted = true;
+    // Print once to stderr (visible before TUI takes over)
+    process.stderr.write(`[layout-debug] logging to ${LAYOUT_LOG}\n`);
+  }
+}
+
+// FIXED_COLS = AgentsPane(22) + VDiv(1) + VDiv(1) + TodoPane(32) = 56
+const FIXED_COLS = 56;
+// CONV_OVERHEAD = paddingLeft(1) + scrollbar(1) + spare(1)
+const CONV_OVERHEAD = 3;
+
+function checkLayout(termCols: number, contentCols: number) {
+  const expectedContent = termCols - FIXED_COLS - CONV_OVERHEAD;
+  const clamped = contentCols < expectedContent; // hit Math.max(20,...) floor
+  const overflow = termCols < FIXED_COLS + 20;   // terminal too narrow for layout
+  if (clamped || overflow || contentCols !== expectedContent) {
+    layoutLog(
+      `LAYOUT termCols=${termCols} fixedCols=${FIXED_COLS} overhead=${CONV_OVERHEAD} ` +
+      `expectedContent=${expectedContent} actualContent=${contentCols}` +
+      (clamped  ? " [CLAMPED-AT-FLOOR]" : "") +
+      (overflow ? " [TERMINAL-TOO-NARROW]" : ""),
+    );
+  }
+}
 
 // ── 字形 ────────────────────────────────────────────────────────────────────
 const STATE_GLYPH: Record<AgentRunState, string> = {
@@ -354,8 +392,18 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const pendingRows = pending.length > 0 ? 5 : 0;
   // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1)
   const availRows = Math.max(4, termRows - 10 - pendingRows);
-  // content cols: subtract fixed panes (AgentsPane22 + VDiv1 + VDiv1 + TodoPane32 + paddingLeft1 + scrollbar1)
-  const contentCols = Math.max(20, termCols - 59);
+  // Responsive sidebar widths (must match index.tsx breakpoints exactly)
+  const agW = termCols >= 120 ? 22 : termCols >= 90 ? 18 : 14;
+  const toW = termCols >= 120 ? 32 : termCols >= 90 ? 24 : 18;
+  // content cols: termCols minus actual sidebar widths + dividers + CONV_OVERHEAD
+  const contentCols = Math.max(20, termCols - (agW + 1 + 1 + toW + CONV_OVERHEAD));
+
+  // Layout invariant check — logs to LAYOUT_LOG on every render where something is off
+  const prevLayout = useRef({ termCols: -1, contentCols: -1 });
+  if (prevLayout.current.termCols !== termCols || prevLayout.current.contentCols !== contentCols) {
+    prevLayout.current = { termCols, contentCols };
+    checkLayout(termCols, contentCols);
+  }
 
   const LEVEL_RANK: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
   const filtered = messages.filter((m) =>
@@ -636,6 +684,10 @@ export function StatusBar({ demo }: { demo?: boolean }) {
   const idle    = agents.filter((a) => a.state === "idle").length;
   const cost = useStore((s) => s.cost_usd);
   const minLevel = useStore((s) => s.minLevel);
+  const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
+  const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
+  const contentCols = Math.max(20, termCols - (FIXED_COLS + CONV_OVERHEAD));
+  const isDebug = minLevel === "debug";
   return (
     <Box paddingX={1} justifyContent="space-between">
       <Box>
@@ -644,6 +696,11 @@ export function StatusBar({ demo }: { demo?: boolean }) {
         {waiting > 0 && <Text color="yellow">⌛ {waiting} waiting  </Text>}
         <Text dimColor>$ {cost.toFixed(2)}</Text>
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
+        {isDebug && (
+          <Text color={contentCols <= 20 ? "red" : p.dim}>
+            {" "}cols={termCols}×{termRows} cont={contentCols}
+          </Text>
+        )}
       </Box>
       <Box>
         <Text dimColor>log:{minLevel}  </Text>
