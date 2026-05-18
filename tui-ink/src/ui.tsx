@@ -108,7 +108,7 @@ export function AgentsPane({ width }: { width: number }) {
       <Box paddingX={1} paddingY={0}>
         <Text dimColor>AGENTS </Text><Text dimColor>{agents.length}</Text>
       </Box>
-      <Box flexDirection="column" paddingX={1}>
+      <Box flexDirection="column" paddingX={1} overflowY="hidden" height={24}>
         {agents.length === 0 && (
           <Text dimColor italic>(none yet — press enter to spawn leader)</Text>
         )}
@@ -216,16 +216,56 @@ function stripInline(s: string): string {
   return s.replace(MD_INLINE, (_, b, c) => b ?? c ?? "");
 }
 
+// Terminal display width: CJK / fullwidth / emoji chars occupy 2 columns.
+function charWidth(cp: number): number {
+  if (
+    (cp >= 0x1100 && cp <= 0x115F) ||  // Hangul Jamo
+    (cp >= 0x2E80 && cp <= 0x303E) ||  // CJK Radicals + Kangxi
+    (cp >= 0x3040 && cp <= 0x33FF) ||  // Kana, Bopomofo, CJK compat
+    (cp >= 0x3400 && cp <= 0x9FFF) ||  // CJK Ext-A + Unified
+    (cp >= 0xA000 && cp <= 0xA4CF) ||  // Yi
+    (cp >= 0xAC00 && cp <= 0xD7AF) ||  // Hangul Syllables
+    (cp >= 0xF900 && cp <= 0xFAFF) ||  // CJK Compatibility Ideographs
+    (cp >= 0xFE10 && cp <= 0xFE6F) ||  // Vertical/CJK compat forms
+    (cp >= 0xFF00 && cp <= 0xFF60) ||  // Fullwidth Latin/punctuation
+    (cp >= 0xFFE0 && cp <= 0xFFE6) ||  // Fullwidth Signs
+    (cp >= 0x1F300 && cp <= 0x1FAFF)   // Emoji block
+  ) return 2;
+  return cp >= 0x20 ? 1 : 0;           // control chars → 0
+}
+
+function displayWidth(s: string): number {
+  let w = 0;
+  for (let i = 0; i < s.length; ) {
+    const cp = s.codePointAt(i) ?? 0;
+    w += charWidth(cp);
+    i += cp > 0xFFFF ? 2 : 1; // surrogate pair = 2 JS chars
+  }
+  return w;
+}
+
 function wrapAt(text: string, cols: number): string[] {
   if (!text) return [""];
-  if (text.length <= cols) return [text];
+  if (displayWidth(text) <= cols) return [text];
   const out: string[] = [];
   let rem = text;
-  while (rem.length > cols) {
-    let cut = rem.lastIndexOf(" ", cols);
-    if (cut < Math.floor(cols * 0.35)) cut = cols;
-    out.push(rem.slice(0, cut));
-    rem = rem.slice(cut).replace(/^ /, "");
+  while (displayWidth(rem) > cols) {
+    // Walk character by character tracking display columns
+    let w = 0;
+    let lastSpace = -1;
+    let hardCut = rem.length;
+    for (let i = 0; i < rem.length; ) {
+      const cp = rem.codePointAt(i) ?? 0;
+      const cw = charWidth(cp);
+      if (w + cw > cols) { hardCut = i; break; }
+      w += cw;
+      if (rem[i] === " ") lastSpace = i;
+      i += cp > 0xFFFF ? 2 : 1;
+    }
+    // Prefer word boundary if it's not too far back
+    const cut = lastSpace >= Math.floor(hardCut * 0.35) ? lastSpace : hardCut;
+    out.push(rem.slice(0, cut).trimEnd());
+    rem = rem.slice(cut === lastSpace ? cut + 1 : cut);
   }
   if (rem) out.push(rem);
   return out;
@@ -273,6 +313,32 @@ function messagesToLines(msgs: Message[], cols: number, p: Palette): RenderLine[
   return out;
 }
 
+// ── Scrollbar ────────────────────────────────────────────────────────────────
+function ScrollBar({ total, visible, offset }: { total: number; visible: number; offset: number }) {
+  const p = usePalette();
+  const barH = visible;
+  if (barH < 2 || total <= visible) return null;
+
+  const maxOff = total - visible;
+  const ratio  = maxOff > 0 ? offset / maxOff : 0; // 0 = newest, 1 = oldest
+  const thumbSize = Math.max(1, Math.round((visible / total) * barH));
+  // thumb moves from bottom (ratio=0/newest) to top (ratio=1/oldest)
+  const thumbTop  = Math.round(ratio * (barH - thumbSize));
+
+  const rows: string[] = [];
+  for (let i = 0; i < barH; i++) {
+    rows.push(i >= thumbTop && i < thumbTop + thumbSize ? "█" : "│");
+  }
+
+  return (
+    <Box flexDirection="column" width={1}>
+      {rows.map((ch, i) => (
+        <Text key={i} color={ch === "█" ? p.accent : p.dim}>{ch}</Text>
+      ))}
+    </Box>
+  );
+}
+
 // ── 中栏:conversation ──────────────────────────────────────────────────────
 export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const p = usePalette();
@@ -284,12 +350,12 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const minLevel = useStore((s) => s.minLevel);
 
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
-  const termCols = typeof process !== "undefined" ? ((process.stdout as any).cols ?? 80) : 80;
+  const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   const pendingRows = pending.length > 0 ? 5 : 0;
   // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1)
   const availRows = Math.max(4, termRows - 10 - pendingRows);
-  // content cols: subtract fixed panes (AgentsPane22 + VDiv1 + VDiv1 + TodoPane32 + paddingX2)
-  const contentCols = Math.max(20, termCols - 58);
+  // content cols: subtract fixed panes (AgentsPane22 + VDiv1 + VDiv1 + TodoPane32 + paddingLeft1 + scrollbar1)
+  const contentCols = Math.max(20, termCols - 59);
 
   const LEVEL_RANK: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
   const filtered = messages.filter((m) =>
@@ -318,7 +384,7 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const visible  = allLines.slice(winStart, winEnd);
 
   return (
-    <Box flexDirection="column" flexGrow={1} paddingX={1}>
+    <Box flexDirection="column" flexGrow={1} paddingLeft={1}>
       <Box justifyContent="space-between">
         <Box>
           <Text color={p.accent}>◆ </Text>
@@ -328,25 +394,31 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
         <Text dimColor> [P][F][C]</Text>
       </Box>
 
-      <Box flexDirection="column" marginTop={1} flexGrow={1}>
-        <Box flexGrow={1} />
+      <Box flexDirection="row" marginTop={1} flexGrow={1}>
+        {/* message content */}
+        <Box flexDirection="column" flexGrow={1}>
+          <Box flexGrow={1} />
 
-        {winStart > 0 && (
-          <Text dimColor>↑ {winStart} lines above · [ to scroll up</Text>
-        )}
-        {total === 0 && (
-          <Text dimColor italic>no messages yet · type below to start</Text>
-        )}
+          {winStart > 0 && (
+            <Text dimColor>↑ {winStart} lines above</Text>
+          )}
+          {total === 0 && (
+            <Text dimColor italic>no messages yet · type below to start</Text>
+          )}
 
-        {visible.map((line, i) => (
-          <Text key={i} bold={line.bold ?? false} color={line.color} dimColor={line.dim ?? false}>
-            {line.text || " "}
-          </Text>
-        ))}
+          {visible.map((line, i) => (
+            <Text key={i} bold={line.bold ?? false} color={line.color} dimColor={line.dim ?? false}>
+              {line.text || " "}
+            </Text>
+          ))}
 
-        {off > 0 && (
-          <Text dimColor>↓ {off} lines below · ] to scroll down</Text>
-        )}
+          {off > 0 && (
+            <Text dimColor>↓ {off} lines below</Text>
+          )}
+        </Box>
+
+        {/* scrollbar */}
+        <ScrollBar total={total} visible={availRows} offset={off} />
       </Box>
 
       {pending.length > 0 && <ApprovalCard m={pending[0]!} />}

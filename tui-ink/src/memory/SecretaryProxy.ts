@@ -164,9 +164,19 @@ export class SecretaryProxy extends EventEmitter {
   observeMessage(role: "user" | "assistant", content: string): void {
     if (this.destroyed) return;
     appendMessage(this.memory.agent_id, { role, content, ts: Date.now() });
-    // 更新 resume hint
-    this.memory.tombstone.resume_hint =
-      `Last ${role}: ${content.slice(0, 100)}`;
+    // 更新 resume hint — assistant turns are raw protocol JSON, extract prose only
+    if (role === "assistant") {
+      const prose = content.split("\n")
+        .filter((l) => !l.trim().startsWith("{"))
+        .join(" ")
+        .trim()
+        .slice(0, 120);
+      this.memory.tombstone.resume_hint = prose
+        ? `Last assistant: ${prose}`
+        : "Last assistant: (protocol-only turn)";
+    } else {
+      this.memory.tombstone.resume_hint = `Last user: ${content.slice(0, 120)}`;
+    }
     this.memory.updated_at = Date.now();
   }
 

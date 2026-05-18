@@ -109,16 +109,26 @@ const Bash: ToolDef = {
   needsApproval: true,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
-    const cmd = String(a.command ?? a.cmd ?? "");
+    const rawCmd = String(a.command ?? a.cmd ?? "");
     const timeout = typeof a.timeout === "number" ? a.timeout : 60_000;
-    if (!cmd) return err("missing command");
-    const banned = isBanned(cmd);
+    if (!rawCmd) return err("missing command");
+    const banned = isBanned(rawCmd);
     if (banned) return err(`Banned command: "${banned}". Use a Worker tool for network access instead.`);
+    // On Windows CMD defaults to the system OEM code page (GBK on Chinese Windows).
+    // Prepend chcp 65001 so stdout/stderr are UTF-8 and we can decode correctly.
+    const cmd = process.platform === "win32" ? `chcp 65001 >nul 2>nul & ${rawCmd}` : rawCmd;
+    const decodeOutput = (buf: Buffer | string): string => {
+      if (typeof buf === "string") return buf;
+      return buf.toString("utf8");
+    };
     try {
-      const out = String(execSync(cmd, { encoding: "utf8", timeout, cwd: process.cwd(), shell: true as any }));
+      const raw = execSync(cmd, { encoding: "buffer", timeout, cwd: process.cwd(), shell: true as any });
+      const out = decodeOutput(raw as unknown as Buffer);
       return ok(middleTruncate(out || "(no output)"));
     } catch (e: any) {
-      const out = [e.stdout, e.stderr].filter(Boolean).join("\n").trim();
+      const stdout = e.stdout ? decodeOutput(e.stdout) : "";
+      const stderr = e.stderr ? decodeOutput(e.stderr) : "";
+      const out = [stdout, stderr].filter(Boolean).join("\n").trim();
       return { ok: false, output: middleTruncate(out || e.message || "command failed", 10_000) };
     }
   },
@@ -210,6 +220,8 @@ export function getToolsForRole(role: AgentRole): ToolDef[] {
   return ALL_TOOLS.filter((t) => t.roles.has(role));
 }
 
+const MAX_TOOL_OUTPUT = 12_000; // chars; keep single result small to control context growth
+
 /** 执行工具 — 替换原 index.tsx 里的 switch-case */
 export async function executeTool(name: string, args: unknown): Promise<ToolResult> {
   const tool = TOOL_REGISTRY.get(name);
@@ -220,18 +232,29 @@ export async function executeTool(name: string, args: unknown): Promise<ToolResu
     };
   }
   try {
-    return await tool.execute((args ?? {}) as Record<string, unknown>);
+    const result = await tool.execute((args ?? {}) as Record<string, unknown>);
+    return { ...result, output: middleTruncate(result.output, MAX_TOOL_OUTPUT) };
   } catch (e: any) {
     return { ok: false, output: `Error in ${name}: ${e.message?.slice(0, 500) ?? "unknown"}` };
   }
 }
 
+// Bash commands that modify filesystem or run installs/git writes — require approval
+const BASH_DESTRUCTIVE =
+  /(?:^|[;&|`]|\$\()\s*(?:rm|del|rmdir|rd|mv|cp|move|copy|mkdir|md|touch|chmod|chown|git\s+(?:commit|push|reset|checkout|branch\s+-[Dd])|npm\s+(?:install|run|ci)|yarn\s+add|pip\s+install|apt|brew|choco)|\s*>>?[^>=]/i;
+
 /**
  * 检查工具是否需要审批（注册表是权威来源，防止 agent 篡改 needs_approval）
- * 借鉴 claude_leack ToolPermissionContext.blocks() 的思路做推断式校验
+ * Bash 例外：根据命令内容判断是否具有破坏性，只读命令自动放行。
  */
-export function toolNeedsApproval(name: string): boolean {
-  return TOOL_REGISTRY.get(name)?.needsApproval ?? true; // 未知工具默认需要审批
+export function toolNeedsApproval(name: string, args?: unknown): boolean {
+  const tool = TOOL_REGISTRY.get(name);
+  if (!tool) return true; // 未知工具默认需要审批
+  if (name === "Bash" && args && typeof args === "object" && args !== null) {
+    const cmd = String((args as Record<string, unknown>).command ?? (args as Record<string, unknown>).cmd ?? "");
+    return BASH_DESTRUCTIVE.test(cmd);
+  }
+  return tool.needsApproval;
 }
 
 /** 生成注入 system prompt 的工具表格 */

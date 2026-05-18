@@ -14,7 +14,7 @@
 //   --prompts=<dir>   directory holding _base.md / leader.md / ... (default ../prompts)
 
 import React, { useEffect, useRef, useState } from "react";
-import { render, useApp, useInput, Box, Text } from "ink";
+import { render, useApp, useInput, useStdin, Box, Text } from "ink";
 import { PassThrough } from "node:stream";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -659,6 +659,7 @@ interface CmdDef {
 
 function App() {
   const { exit } = useApp();
+  const { stdin, isRawModeSupported } = useStdin();
   const [input, setInput] = useState("");
   const agentList = useStore((s) => Array.from(s.agents.keys()));
   const sel = useStore((s) => s.selectedAgent);
@@ -854,6 +855,44 @@ function App() {
       });
     }
   }, []);
+
+  // 鼠标滚轮: 启用 SGR 鼠标上报，解析 \x1b[<64;…M (up) / \x1b[<65;…M (down)
+  // Monkey-patch process.stdin.emit so mouse sequences are consumed and stripped
+  // BEFORE Ink's input handler sees them (Ink would otherwise print them as garbage).
+  useEffect(() => {
+    if (!isRawModeSupported) return;
+    process.stdout.write("\x1b[?1000h\x1b[?1006h");
+    const MOUSE_RE = /\x1b\[<(\d+);\d+;\d+[Mm]/g;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const origEmit = (process.stdin as any).emit as (...a: unknown[]) => boolean;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdin as any).emit = function (event: string, ...args: unknown[]) {
+      if (event === "data") {
+        const chunk = args[0] as Buffer | string;
+        const s = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
+        MOUSE_RE.lastIndex = 0;
+        let hasMouse = false;
+        let m: RegExpExecArray | null;
+        while ((m = MOUSE_RE.exec(s)) !== null) {
+          hasMouse = true;
+          if (m[1] === "64") scrollBy(3);   // wheel up → older
+          if (m[1] === "65") scrollBy(-3);  // wheel down → newer
+        }
+        if (hasMouse) {
+          // Strip mouse sequences; if nothing is left, swallow entirely
+          const filtered = s.replace(/\x1b\[<\d+;\d+;\d+[Mm]/g, "");
+          if (!filtered) return false;
+          return origEmit.call(process.stdin, event, Buffer.from(filtered, "binary"));
+        }
+      }
+      return origEmit.call(process.stdin, event, ...args);
+    };
+    return () => {
+      process.stdout.write("\x1b[?1000l\x1b[?1006l");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdin as any).emit = origEmit;
+    };
+  }, [isRawModeSupported]);
 
   // 全局快捷键
   useInput((char, key) => {

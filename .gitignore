@@ -19,6 +19,15 @@ coverage/
 *.png
 *.html
 
+# Design / handoff documents (local only, not for repo)
+docs/
+HANDOFF.md
+ARCHITECTURE.md
+ARCHITECTURE-VIZ.html
+REVIEW.md
+AGENTS.md
+wireframes/
+
 # OS
 .DS_Store
 Thumbs.db

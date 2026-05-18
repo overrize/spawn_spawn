@@ -60,6 +60,18 @@ export class HttpConvAgent extends EventEmitter {
     this._abort?.abort();
   }
 
+  private static _isRetryable(err: any): boolean {
+    const msg: string = err?.message ?? "";
+    return (
+      err?.code === "ECONNRESET" ||
+      msg.includes("socket hang up") ||
+      msg.includes("ECONNRESET") ||
+      msg.includes("ETIMEDOUT") ||
+      msg.includes("ECONNREFUSED") ||
+      msg.includes("request timeout")
+    );
+  }
+
   async send(text: string): Promise<void> {
     if (this._busy) return;
     this._busy = true;
@@ -73,11 +85,36 @@ export class HttpConvAgent extends EventEmitter {
       state: "run", sub: "thinking…",
     } as TuiEvent);
 
+    const MAX_RETRIES = 3;
+    let lastErr: any;
+    let fullText = "";
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const delaySec = attempt * 2;
+        process.stderr.write(`[${this.cfg.id}] network error, retry ${attempt}/${MAX_RETRIES} in ${delaySec}s…\n`);
+        this.emit("event", {
+          v: 1, type: "agent.state", agent: this.cfg.id,
+          state: "run", sub: `retry ${attempt}/${MAX_RETRIES}…`,
+        } as TuiEvent);
+        await new Promise((r) => setTimeout(r, delaySec * 1000));
+      }
+      try {
+        const pc = this.cfg.providerCfg;
+        fullText = pc.provider === "anthropic"
+          ? await this._callAnthropic()
+          : await this._callOpenAI();
+        lastErr = null;
+        break; // success
+      } catch (err: any) {
+        if (err.name === "AbortError") return;
+        lastErr = err;
+        if (!HttpConvAgent._isRetryable(err) || attempt >= MAX_RETRIES) break;
+      }
+    }
+
     try {
-      const pc = this.cfg.providerCfg;
-      const fullText = pc.provider === "anthropic"
-        ? await this._callAnthropic()
-        : await this._callOpenAI();
+      if (lastErr) throw lastErr;
 
       this.messages.push({ role: "assistant", content: fullText });
       // S2: notify SecretaryProxy for message persistence
@@ -164,13 +201,32 @@ export class HttpConvAgent extends EventEmitter {
     }
   }
 
+  // Trim history to avoid oversized requests. Keeps first message (initial context) +
+  // the most recent messages. Drops the oldest middle messages first.
+  private _trimmedHistory(): typeof this.messages {
+    const MAX_CHARS = 80_000;
+    const msgs = this.messages;
+    let total = msgs.reduce((s, m) => s + m.content.length, 0);
+    if (total <= MAX_CHARS) return msgs;
+    // Always keep index 0 (initial user task) and never drop the last 4 messages.
+    const result = [...msgs];
+    let i = 1;
+    while (total > MAX_CHARS && i < result.length - 4) {
+      total -= result[i]!.content.length;
+      result.splice(i, 1);
+      // Don't advance i — splice shifts everything down
+    }
+    process.stderr.write(`[${this.cfg.id}] history trimmed to ${result.length} msgs (${total} chars)\n`);
+    return result;
+  }
+
   private async _callAnthropic(): Promise<string> {
     const pc = this.cfg.providerCfg;
     const body = JSON.stringify({
       model: pc.model,
       max_tokens: 8192,
       ...(this.cfg.systemPrompt ? { system: this.cfg.systemPrompt } : {}),
-      messages: this.messages,
+      messages: this._trimmedHistory(),
       stream: true,
     });
 
@@ -211,7 +267,7 @@ export class HttpConvAgent extends EventEmitter {
       max_tokens: 8192,
       messages: [
         ...sysMsg,
-        ...this.messages.map((m) => ({ role: m.role, content: m.content })),
+        ...this._trimmedHistory().map((m) => ({ role: m.role, content: m.content })),
       ],
       stream: true,
     });
