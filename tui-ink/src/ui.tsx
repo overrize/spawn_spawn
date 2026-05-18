@@ -2,8 +2,9 @@
 // agents | conversation (+todo sidebar) | input + status bar
 // 配色:paper 主题用 Ink 默认终端色;状态点用文字字形。
 
-import React, { createContext, useContext, useEffect, useRef } from "react";
-import { Box, Text } from "ink";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { Box, Text, measureElement } from "ink";
+import type { DOMElement } from "ink";
 import TextInput from "ink-text-input";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -392,18 +393,30 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const pendingRows = pending.length > 0 ? 5 : 0;
   // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1)
   const availRows = Math.max(4, termRows - 10 - pendingRows);
-  // Responsive sidebar widths (must match index.tsx breakpoints exactly)
+
+  // Measure the actual rendered width of the ConvPane content box (post-layout).
+  // This is the ground truth — process.stdout.columns can report wrong values on
+  // Windows (buffer width != window width) or in piped environments (undefined).
+  const contentBoxRef = useRef<DOMElement>(null);
+  const [measuredCols, setMeasuredCols] = useState(60);
+  useEffect(() => {
+    if (!contentBoxRef.current) return;
+    try {
+      const { width } = measureElement(contentBoxRef.current);
+      // width = full inner box width; subtract 1 for scrollbar
+      const actual = Math.max(20, width - 1);
+      if (actual !== measuredCols) {
+        setMeasuredCols(actual);
+        checkLayout(termCols, actual);
+      }
+    } catch { /* measureElement unavailable in test env */ }
+  });
+  // On first render use termCols-based estimate; subsequent renders use measured value.
   const agW = termCols >= 120 ? 22 : termCols >= 90 ? 18 : 14;
   const toW = termCols >= 120 ? 32 : termCols >= 90 ? 24 : 18;
-  // content cols: termCols minus actual sidebar widths + dividers + CONV_OVERHEAD
-  const contentCols = Math.max(20, termCols - (agW + 1 + 1 + toW + CONV_OVERHEAD));
-
-  // Layout invariant check — logs to LAYOUT_LOG on every render where something is off
-  const prevLayout = useRef({ termCols: -1, contentCols: -1 });
-  if (prevLayout.current.termCols !== termCols || prevLayout.current.contentCols !== contentCols) {
-    prevLayout.current = { termCols, contentCols };
-    checkLayout(termCols, contentCols);
-  }
+  const contentCols = measuredCols !== 60
+    ? measuredCols
+    : Math.max(20, termCols - (agW + 1 + 1 + toW + CONV_OVERHEAD));
 
   const LEVEL_RANK: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
   const filtered = messages.filter((m) =>
@@ -443,8 +456,8 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
       </Box>
 
       <Box flexDirection="row" marginTop={1} flexGrow={1}>
-        {/* message content */}
-        <Box flexDirection="column" flexGrow={1}>
+        {/* message content — ref used by measureElement to get actual column width */}
+        <Box flexDirection="column" flexGrow={1} ref={contentBoxRef}>
           <Box flexGrow={1} />
 
           {winStart > 0 && (
@@ -698,7 +711,7 @@ export function StatusBar({ demo }: { demo?: boolean }) {
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
         {isDebug && (
           <Text color={contentCols <= 20 ? "red" : p.dim}>
-            {" "}cols={termCols}×{termRows} cont={contentCols}
+            {" "}term={termCols}×{termRows} cont={contentCols}
           </Text>
         )}
       </Box>
