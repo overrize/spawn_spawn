@@ -300,10 +300,9 @@ export function applyEvent(e: TuiEvent) {
 export const CONV_PAGE = 12;
 
 export function scrollBy(delta: number): void {
-  const msgs = state.messagesByAgent.get(state.selectedAgent) ?? [];
-  if (msgs.length === 0) return;
-  const max = msgs.length - 1; // hide at most n-1 messages so ≥1 always visible
-  state.scrollOffset = Math.max(0, Math.min(max, state.scrollOffset + delta));
+  // Upper clamp is handled by ConvPane (it knows total line count).
+  // Here just prevent negative so ] at bottom doesn't go past 0.
+  state.scrollOffset = Math.max(0, state.scrollOffset + delta);
   notify();
 }
 

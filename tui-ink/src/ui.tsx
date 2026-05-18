@@ -200,6 +200,79 @@ export function SessionsPane({ width }: { width: number }) {
   );
 }
 
+// ── Flat line buffer for smooth line-level scrolling ─────────────────────────
+// Converts messages → RenderLine[]. scrollOffset is a LINE index, not a message
+// index, giving true terminal-like continuous scrolling (content slides, not jumps).
+
+interface RenderLine {
+  text: string;
+  color?: string;
+  bold?: boolean;
+  dim?: boolean;
+}
+
+const MD_INLINE = /\*\*(.+?)\*\*|`([^`]+)`/g;
+function stripInline(s: string): string {
+  return s.replace(MD_INLINE, (_, b, c) => b ?? c ?? "");
+}
+
+function wrapAt(text: string, cols: number): string[] {
+  if (!text) return [""];
+  if (text.length <= cols) return [text];
+  const out: string[] = [];
+  let rem = text;
+  while (rem.length > cols) {
+    let cut = rem.lastIndexOf(" ", cols);
+    if (cut < Math.floor(cols * 0.35)) cut = cols;
+    out.push(rem.slice(0, cut));
+    rem = rem.slice(cut).replace(/^ /, "");
+  }
+  if (rem) out.push(rem);
+  return out;
+}
+
+function messagesToLines(msgs: Message[], cols: number, p: Palette): RenderLine[] {
+  const out: RenderLine[] = [];
+  for (const m of msgs) {
+    if (m.kind === "tool_call") {
+      const arg = truncate(JSON.stringify(m.tool_args ?? {}), 52);
+      out.push({ text: `► ${m.tool_name}(${arg})`, color: m.needs_approval ? p.warn : p.dim });
+      continue;
+    }
+    if (m.kind === "tool_result") {
+      const preview = m.text.replace(/\n/g, " ").slice(0, 120);
+      out.push({ text: `  ${preview}`, dim: true });
+      continue;
+    }
+    if (m.kind === "system") {
+      const c = m.level === "error" ? p.error : p.warn;
+      for (const raw of m.text.split("\n"))
+        for (const l of wrapAt(raw, cols)) out.push({ text: l, color: c });
+      out.push({ text: "" });
+      continue;
+    }
+    // Regular text message
+    const who = m.agent === "user" ? "▶ you" : `◆ ${m.agent}`;
+    const wc  = m.agent === "user" ? p.accent : (m.level === "error" ? p.error : p.text);
+    out.push({ text: who, color: wc, bold: true });
+    let inCode = false;
+    for (const raw of m.text.split("\n")) {
+      const t = raw.trimStart();
+      if (t.startsWith("```"))  { inCode = !inCode; continue; }
+      if (inCode)               { for (const l of wrapAt("  " + raw, cols)) out.push({ text: l, dim: true }); continue; }
+      if (t.startsWith("### ")) { for (const l of wrapAt("  " + stripInline(t.slice(4)), cols)) out.push({ text: l, color: p.warn,   bold: true }); continue; }
+      if (t.startsWith("## "))  { for (const l of wrapAt("  " + stripInline(t.slice(3)), cols)) out.push({ text: l, color: p.accent, bold: true }); continue; }
+      if (t.startsWith("# "))   { for (const l of wrapAt("  " + stripInline(t.slice(2)), cols)) out.push({ text: l, color: p.accent, bold: true }); continue; }
+      if (t === "---" || t === "***") { out.push({ text: "  " + "─".repeat(Math.min(32, cols - 4)), dim: true }); continue; }
+      if (!t) { out.push({ text: "" }); continue; }
+      if (/^\|[\s\-:|]+\|$/.test(t)) continue; // separator row
+      for (const l of wrapAt("  " + stripInline(raw), cols)) out.push({ text: l });
+    }
+    out.push({ text: "" }); // gap between messages
+  }
+  return out;
+}
+
 // ── 中栏:conversation ──────────────────────────────────────────────────────
 export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const p = usePalette();
@@ -207,13 +280,15 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const a = useStore((s) => s.agents.get(s.selectedAgent));
   const messages = useStore((s) => s.messagesByAgent.get(s.selectedAgent) ?? []);
   const step = useStore((s) => s.stepByAgent.get(s.selectedAgent));
-  const pending = useStore((s) => s.pendingApprovals.filter((p) => p.agent === s.selectedAgent));
+  const pending = useStore((s) => s.pendingApprovals.filter((pa) => pa.agent === s.selectedAgent));
   const minLevel = useStore((s) => s.minLevel);
 
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
   const termCols = typeof process !== "undefined" ? ((process.stdout as any).cols ?? 80) : 80;
-  const availRows = Math.max(4, termRows - 8);
-  // content width ≈ termCols - AgentsPane(22) - VDivider(1) - TodoPane(32) - VDivider(1) - paddingX(2)
+  const pendingRows = pending.length > 0 ? 5 : 0;
+  // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1)
+  const availRows = Math.max(4, termRows - 10 - pendingRows);
+  // content cols: subtract fixed panes (AgentsPane22 + VDiv1 + VDiv1 + TodoPane32 + paddingX2)
   const contentCols = Math.max(20, termCols - 58);
 
   const LEVEL_RANK: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -221,29 +296,26 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
     (LEVEL_RANK[m.level ?? "info"] ?? 1) >= (LEVEL_RANK[minLevel] ?? 1)
   );
 
-  // Estimate terminal rows a message occupies (header line + wrapped content lines)
-  function estRows(m: Message): number {
-    if (m.kind === "tool_call" || m.kind === "tool_result") return 1;
-    let rows = 1; // header (who line)
-    for (const line of m.text.split("\n")) {
-      rows += Math.max(1, Math.ceil(Math.max(1, line.length) / contentCols));
-    }
-    return rows + 1; // +1 marginBottom
-  }
+  // Flatten all messages into individual display lines
+  const msgLines = messagesToLines(filtered, contentCols, p);
 
-  // Build visible window: work backwards skipping `scrollOffset` rows from the end
-  let skipped = 0;
-  let used = 0;
-  const window: Message[] = [];
-  let hasOlderAbove = false;
-  for (let i = filtered.length - 1; i >= 0; i--) {
-    const r = estRows(filtered[i]!);
-    if (skipped < scrollOffset) { skipped += r; continue; }
-    if (used + r > availRows) { hasOlderAbove = true; break; }
-    used += r;
-    window.unshift(filtered[i]!);
-  }
-  const visible = window;
+  // Append live streaming indicator when agent is generating
+  const liveLines: RenderLine[] = (a?.state === "run" && scrollOffset === 0) ? [
+    { text: `◆ ${a?.name ?? sel}`, color: p.dim, bold: true },
+    { text: `  ${step || "generating…"} ◐`, dim: true },
+  ] : [];
+
+  const allLines = [...msgLines, ...liveLines];
+  const total    = allLines.length;
+
+  // Clamp offset: can't scroll past start of content
+  const maxOff = Math.max(0, total - availRows);
+  const off     = Math.min(scrollOffset, maxOff);
+
+  // Slice the visible window (newest content at bottom)
+  const winEnd   = Math.max(0, total - off);
+  const winStart = Math.max(0, winEnd - availRows);
+  const visible  = allLines.slice(winStart, winEnd);
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
@@ -257,33 +329,26 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
       </Box>
 
       <Box flexDirection="column" marginTop={1} flexGrow={1}>
-        {/* spacer pushes messages to bottom of available space */}
         <Box flexGrow={1} />
-        {hasOlderAbove && (
-          <Text dimColor>↑ more above · press [ to scroll up</Text>
+
+        {winStart > 0 && (
+          <Text dimColor>↑ {winStart} lines above · [ to scroll up</Text>
         )}
-        {visible.length === 0 && (
+        {total === 0 && (
           <Text dimColor italic>no messages yet · type below to start</Text>
         )}
-        {visible.map((m) => <Bubble key={m.id} m={m} />)}
 
-        {/* 流式内联气泡：agent 运行中时显示，TTFT 阶段也显示 */}
-        {a?.state === "run" && scrollOffset === 0 && (
-          <Box flexDirection="column" marginBottom={1} width="100%">
-            <Text color={p.dim} bold>◆ {a?.name ?? sel}</Text>
-            <Box marginLeft={2} flexShrink={1}>
-              <Text dimColor wrap="wrap">{step || "generating…"}</Text>
-              <Text color={p.accent}> ◐</Text>
-            </Box>
-          </Box>
-        )}
+        {visible.map((line, i) => (
+          <Text key={i} bold={line.bold ?? false} color={line.color} dimColor={line.dim ?? false}>
+            {line.text || " "}
+          </Text>
+        ))}
 
-        {scrollOffset > 0 && (
-          <Text dimColor>↓ newer below · press ] to scroll down</Text>
+        {off > 0 && (
+          <Text dimColor>↓ {off} lines below · ] to scroll down</Text>
         )}
       </Box>
 
-      {/* 待审批 */}
       {pending.length > 0 && <ApprovalCard m={pending[0]!} />}
     </Box>
   );
