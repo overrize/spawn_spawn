@@ -18,6 +18,7 @@ export interface DispatchSpec {
   max_turns?: number;
   memory_quota_kb?: number;
   seed_facts?: string[];
+  timeout_ms?: number;                 // 软超时：到期 PM 发 handup 纠正，不立即 kill
 }
 
 export interface TodoItem {
@@ -74,14 +75,15 @@ export type TuiEvent =
       role: "Secretary" | "Worker"; goal: string; model?: string;
       dispatch?: DispatchSpec; // S1: full dispatch spec
     }
-  | { v: 1; type: "agent.done"; agent: string; success: boolean; reason?: string }
+  | { v: 1; type: "agent.done"; agent: string; success: boolean; reason?: string; evidence?: string[] }
   | { v: 1; type: "agent.error"; agent: string; code: string; detail?: string; retry_in?: number }
   | { v: 1; type: "agent.state"; agent: string; state: AgentRunState; sub?: string }
   // S6: new protocol events
   | { v: 1; type: "unit.handup"; agent: string; parent: string;
       summary: string; artifacts: string[];
       facts_to_promote: string[]; decisions: string[];
-      failed_acceptance: string[] }
+      failed_acceptance: string[];
+      findings?: Array<{ level: "CRITICAL" | "WARNING" | "INFO"; text: string }> }
   | { v: 1; type: "memory.snapshot"; agent: string; path: string; size_kb: number }
   | { v: 1; type: "shutdown.start"; agent: string; reason: string }
   | { v: 1; type: "pm.alert"; severity: "warn" | "error";

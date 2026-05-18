@@ -13,7 +13,7 @@
 2. 串行执行，**绝不**同时发多个 tool.call
 3. 副作用工具（Write/Edit/Bash）→ `needs_approval: true`，等 tool.result
 4. 每完成一项 → 更新 todo state 为 `done`
-5. 所有 todo done → `message.to=leader` 一句话总结 + 关键发现 → `agent.done(success:true)`
+5. 所有 todo done → `message.to=leader` 一句话总结 + 关键发现 → `agent.done(success:true, evidence:[...])`
 
 ---
 
@@ -33,9 +33,16 @@
 ### handup 输出格式
 
 ```
-{"v":1,"type":"unit.handup","agent":"{{AGENT_ID}}","parent":"{{PARENT_ID}}","summary":"已完成 X，但无法继续因为 Y","artifacts":["实际写入的文件"],"facts_to_promote":["关键发现 1","关键发现 2"],"decisions":[],"failed_acceptance":["原 goal 哪里没达成"],"suggested_subgoals":["子任务 A（一句话）","子任务 B（一句话）"]}
+{"v":1,"type":"unit.handup","agent":"{{AGENT_ID}}","parent":"{{PARENT_ID}}","summary":"已完成 X，但无法继续因为 Y","artifacts":["实际写入的文件"],"facts_to_promote":["关键发现 1","关键发现 2"],"decisions":[],"failed_acceptance":["原 goal 哪里没达成"],"suggested_subgoals":["子任务 A（一句话）","子任务 B（一句话）"],"findings":[{"level":"CRITICAL","text":"发现 SQL 注入漏洞于 src/db.ts:42"},{"level":"WARNING","text":"缺少输入校验，src/api.ts:17"},{"level":"INFO","text":"注释风格不一致"}]}
 {"v":1,"type":"agent.done","agent":"{{AGENT_ID}}","success":false,"reason":"scope_exceeded"}
 ```
+
+`findings` 字段（可选但推荐填写）：
+- `CRITICAL` — 必须立即处理（安全漏洞、数据丢失风险）
+- `WARNING` — 应处理但不阻塞（逻辑隐患、性能问题）
+- `INFO` — 可选改进（代码风格、文档缺失）
+
+Leader 会根据 findings 级别决定是否立即二次 spawn。
 
 handup 后**立刻** agent.done，不要继续推进。Leader 会决定是否二次 spawn。
 
@@ -68,5 +75,11 @@ handup 后**立刻** agent.done，不要继续推进。Leader 会决定是否二
 {"v":1,"type":"todo.set","items":[{"id":"t1","state":"done","text":"读 src/auth/login.ts"},{"id":"t2","state":"run","text":"扫描 hardcoded secrets"},{"id":"t3","state":"todo","text":"汇报结果"}]}
 {"v":1,"type":"step","text":"分析内容"}
 {"v":1,"type":"message","to":"leader","text":"发现第 42 行 const SECRET = \"abc123\"，第 87 行 password = \"admin\""}
-{"v":1,"type":"agent.done","agent":"{{AGENT_ID}}","success":true,"reason":"找到 2 处 hardcoded secrets，已汇报"}
+{"v":1,"type":"agent.done","agent":"{{AGENT_ID}}","success":true,"reason":"找到 2 处 hardcoded secrets，已汇报","evidence":["src/auth/login.ts:42 SECRET=\"abc123\"","src/auth/login.ts:87 password=\"admin\""]}
 ```
+
+`evidence` 字段（必填）：列出可观测证据（文件路径+行号、grep 输出片段、diff 行数），
+Leader 凭此判断 goal 是否真正达成，**不接受无证据的"已完成"声明**。
+
+`timeout_ms` 说明：如果 dispatch 设了 `timeout_ms`，到期时会收到 `[系统-超时]` 信号。
+收到后立刻 handup，不要继续当前任务。

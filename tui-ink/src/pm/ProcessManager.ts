@@ -24,6 +24,7 @@ interface AgentStats {
   role?: string;
   runtimeWarnSent: boolean;
   noProgressWarnSent: boolean;
+  timeoutNudgeSent: boolean;  // dispatch.timeout_ms 软超时纠正只发一次
 }
 
 const WARN_RUNTIME_MS = 30 * 60 * 1000;
@@ -172,12 +173,20 @@ export class ProcessManager extends EventEmitter {
         if (age > ERR_RUNTIME_MS) {
           this.emitAlert("error", "runtime_exceeded", agentId,
             `${agentId} 已运行 ${Math.round(age / 60000)}min，超过 60min 硬限制`);
-          // 发 kill 信号（agent.error）
           this.emit("kill", agentId);
         } else if (age > WARN_RUNTIME_MS && !stats.runtimeWarnSent) {
           this.emitAlert("warn", "runtime_warn", agentId,
             `${agentId} 已运行 ${Math.round(age / 60000)}min（超 30min）`);
           stats.runtimeWarnSent = true;
+        }
+
+        // dispatch.timeout_ms 软超时 — 只发一次 handup 纠正信号
+        const dispatchTimeout = info.dispatch?.timeout_ms;
+        if (dispatchTimeout && age > dispatchTimeout && !stats.timeoutNudgeSent) {
+          stats.timeoutNudgeSent = true;
+          this.emitAlert("warn", "dispatch_timeout", agentId,
+            `${agentId} 已超 dispatch.timeout_ms (${dispatchTimeout}ms)，发送 handup 纠正`);
+          this.emit("timeout", agentId);
         }
       }
 
@@ -292,6 +301,7 @@ export class ProcessManager extends EventEmitter {
         recentEventCount: 0,
         runtimeWarnSent: false,
         noProgressWarnSent: false,
+        timeoutNudgeSent: false,
       });
     }
     return this.stats.get(agentId)!;

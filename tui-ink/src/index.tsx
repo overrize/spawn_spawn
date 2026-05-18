@@ -105,6 +105,17 @@ pm.on("kill", (agentId: string) => {
   applyEvent({ v: 1, type: "agent.error", agent: agentId, code: "runtime_exceeded", detail: "PM killed: exceeded 60min hard limit" });
 });
 
+// dispatch.timeout_ms 软超时：PM 发纠正让 Worker 主动 handup，不直接 kill
+pm.on("timeout", (agentId: string) => {
+  const worker = agents.get(agentId);
+  if (worker instanceof HttpConvAgent) {
+    worker.sendCommand({
+      type: "user.message",
+      text: `[系统-超时] 你的 dispatch.timeout_ms 已到期。立刻输出 unit.handup（说明已完成的工作和未完成原因），然后 agent.done(success:false, reason:"timeout")。不要继续当前任务。`,
+    });
+  }
+});
+
 // ── 通信矩阵检查 — 违规消息替换为 agent.error，不投递给 user ────────────────
 function checkMessageLegal(ev: Extract<TuiEvent, { type: "message" }>): boolean {
   const senderRole = getState().agents.get(ev.agent)?.role;
@@ -427,9 +438,12 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       const parentAgent = agents.get(e.parent);
       if (parentAgent instanceof HttpConvAgent) {
         if (ev.success) {
+          const evidenceLines = ev.evidence?.length
+            ? "\n证据:\n" + ev.evidence.map((s) => `  - ${s}`).join("\n")
+            : "";
           parentAgent.sendCommand({
             type: "user.message",
-            text: `[系统] ${e.child} 成功完成${ev.reason ? ": " + ev.reason : ""}。请继续推进你的任务。`,
+            text: `[系统] ${e.child} 成功完成${ev.reason ? ": " + ev.reason : ""}。${evidenceLines}\n请继续推进你的任务。`,
           });
         } else {
           parentAgent.sendCommand({
@@ -442,9 +456,15 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (ev.type === "unit.handup") {
       const parentAgent = agents.get(e.parent);
       if (parentAgent instanceof HttpConvAgent) {
+        const findingLines = ev.findings?.length
+          ? "\n发现（按级别）:\n" + ev.findings.map((f) => `  [${f.level}] ${f.text}`).join("\n")
+          : "";
+        const failedLines = ev.failed_acceptance?.length
+          ? "\n未达成: " + ev.failed_acceptance.join("; ")
+          : "";
         parentAgent.sendCommand({
           type: "user.message",
-          text: `[${e.child} handup] 已完成: ${ev.summary}${ev.failed_acceptance?.length ? "\n未达成: " + ev.failed_acceptance.join("; ") : ""}`,
+          text: `[${e.child} handup] 已完成: ${ev.summary}${failedLines}${findingLines}`,
         });
       }
     }

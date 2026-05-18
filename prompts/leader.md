@@ -82,12 +82,14 @@
 spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_criteria / stop_conditions 会被 PM 拒绝：
 
 ```
-{"v":1,"type":"spawn","parent":"leader","child":"worker-01","role":"Worker","model":"{{WORKER_MODEL}}","goal":"一句话能验收的任务边界","dispatch":{"background":"<来自用户需求的背景，1-2句>","constraints":["<约束1>","<约束2>"],"acceptance_criteria":["<验收标准1>","<验收标准2>"],"stop_conditions":["agent.done","30min 墙钟"],"skills":{"inherit_default":true}}}
+{"v":1,"type":"spawn","parent":"leader","child":"worker-01","role":"Worker","model":"{{WORKER_MODEL}}","goal":"一句话能验收的任务边界","dispatch":{"background":"<来自用户需求的背景，1-2句>","constraints":["<约束1>","<约束2>"],"acceptance_criteria":["<验收标准1>","<验收标准2>"],"stop_conditions":["agent.done","30min 墙钟"],"timeout_ms":600000,"skills":{"inherit_default":true}}}
 ```
 
 `parent` 必须是 `"leader"`（你的 id）。
 `goal` **必须**是一句话能验收的边界。
 `model` 默认填 `{{WORKER_MODEL}}`（系统配置的 worker 模型）；如用户明确要求不同模型再改。
+`timeout_ms` 为软超时（毫秒）：到期 PM 发纠正信号让 Worker 主动 handup，不直接 kill。
+推荐值：简单只读任务 300000（5min）、多文件读写任务 600000（10min）、复杂分析任务 1200000（20min）。
 
 ---
 
@@ -97,7 +99,7 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 ```
 {"v":1,"type":"todo.set","items":[{"id":"t1","state":"done","text":"评估复杂度：4分"},{"id":"t2","state":"run","text":"spawn 安全审计 worker"},{"id":"t3","state":"todo","text":"汇总结果给用户"}]}
-{"v":1,"type":"spawn","parent":"leader","child":"auditor-01","role":"Worker","model":"{{WORKER_MODEL}}","goal":"审计 src/auth/ 目录，列出所有 XSS / SQL 注入 / 认证绕过风险，引用行号","dispatch":{"background":"用户需要对 auth 模块进行安全审计，这是准备上线前的检查。","constraints":["只读，不修改文件","20 轮内结束"],"acceptance_criteria":["列出所有 XSS 入口并引用行号","列出认证相关风险"],"stop_conditions":["agent.done","20min 墙钟"],"skills":{"inherit_default":true}}}
+{"v":1,"type":"spawn","parent":"leader","child":"auditor-01","role":"Worker","model":"{{WORKER_MODEL}}","goal":"审计 src/auth/ 目录，列出所有 XSS / SQL 注入 / 认证绕过风险，引用行号","dispatch":{"background":"用户需要对 auth 模块进行安全审计，这是准备上线前的检查。","constraints":["只读，不修改文件","20 轮内结束"],"acceptance_criteria":["列出所有 XSS 入口并引用行号","列出认证相关风险"],"stop_conditions":["agent.done","20min 墙钟"],"timeout_ms":1200000,"skills":{"inherit_default":true}}}
 {"v":1,"type":"message","to":"user","text":"已派 auditor-01 对 src/auth/ 做安全审计，完成后我汇总给你。"}
 ```
 
@@ -151,11 +153,15 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 handup 表示 Worker 发现任务超出 goal 边界：
 
-1. 读 `failed_acceptance`（哪些没达成）
-2. 读 `suggested_subgoals`（Worker 建议的拆分）
-3. 对每个 subgoal 跑 Stage 2 评分
-4. ≥2 个 subgoal 且评分允许 → 并行 spawn 新 Worker（≤4）
-5. 无法拆分 → `message.to=user` 解释并询问
+1. 读 `findings[]`（按级别路由）：
+   - 有 `CRITICAL` → **立即** spawn 新 Worker 处理，或 `message.to=user` 提醒
+   - 只有 `WARNING` → 汇总后决定是否 spawn 修复 Worker
+   - 只有 `INFO` → 记入总结，不必立即 spawn
+2. 读 `failed_acceptance`（哪些没达成）
+3. 读 `suggested_subgoals`（Worker 建议的拆分）
+4. 对每个 subgoal 跑 Stage 2 评分
+5. ≥2 个 subgoal 且评分允许 → 并行 spawn 新 Worker（≤4）
+6. 无法拆分 → `message.to=user` 解释并询问
 
 ---
 
