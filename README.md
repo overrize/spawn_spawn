@@ -11,8 +11,33 @@ npm install
 # demo 模式（不需要 API key，模拟事件流）
 npm run demo
 
-# 真实模式（需要在 ~/.claude/projects/.../AgentConfig.ts 配置 API key）
+# 真实模式：先配置 API key，再启动
 npm start
+```
+
+### 配置 API Key
+
+启动后在输入框运行：
+
+```
+/connect leader deepseek <model> <api-key>
+```
+
+支持的 provider：`anthropic` / `deepseek` / `openai` / `ollama`（本地）
+
+配置会自动保存到 `~/.config/multi-agent-tui/config.json`，下次启动直接生效。
+
+也可以手动创建配置文件：
+
+```json
+// ~/.config/multi-agent-tui/config.json
+{
+  "agents": {
+    "leader":    { "provider": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKey": "sk-..." },
+    "secretary": { "provider": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKey": "sk-..." },
+    "worker":    { "provider": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKey": "sk-..." }
+  }
+}
 ```
 
 ## 目录结构
