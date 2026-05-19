@@ -91,7 +91,10 @@ export type TuiEvent =
   | { v: 1; type: "proposal.new"; agent: string; proposal_id: string;
       target: "role_boundary" | "principles"; diff: string }
   | { v: 1; type: "proposal.decision"; proposal_id: string;
-      decision: "apply" | "reject"; reason?: string };
+      decision: "apply" | "reject"; reason?: string }
+  // leader → TUI: approve/reject a destructive Bash call from a worker
+  | { v: 1; type: "tool.approved"; id: string; reason?: string }
+  | { v: 1; type: "tool.rejected"; id: string; reason?: string };
 
 // TUI → agent  (写到 agent.stdin)
 export type AgentCommand =

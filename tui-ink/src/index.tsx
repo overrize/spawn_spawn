@@ -98,6 +98,15 @@ const agents = new Map<string, Agent | OpenCodeAgent | HttpConvAgent>();
 const secretaries = new Map<string, SecretaryProxy>(); // agentId → Secretary
 const pm = new ProcessManager();
 
+// Destructive Bash commands from workers are routed to leader for approval instead
+// of asking the user directly. Keyed by tool.call id.
+const leaderApprovalQueue = new Map<string, {
+  workerAgent: HttpConvAgent;
+  toolName: string;
+  toolArgs: unknown;
+  workerChildId: string;
+}>();
+
 // PM 事件转发到 TUI
 pm.on("event", (ev: TuiEvent) => applyEvent(ev));
 pm.on("kill", (agentId: string) => {
@@ -200,6 +209,26 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
 
     // Block illegal messages before they reach the store
     if (e.type === "message" && !checkMessageLegal(e)) return;
+
+    // Leader approves/rejects a destructive Bash command from a worker
+    if (e.type === "tool.approved" || e.type === "tool.rejected") {
+      const pending = leaderApprovalQueue.get(e.id);
+      if (pending) {
+        leaderApprovalQueue.delete(e.id);
+        if (e.type === "tool.approved") {
+          executeTool(pending.toolName, pending.toolArgs).then((r) => {
+            applyEvent({ v: 1, type: "tool.result", agent: pending.workerChildId, id: e.id, ok: r.ok, output: r.output });
+            pending.workerAgent.sendCommand({ type: "tool.result", id: e.id, ok: r.ok, output: r.output });
+          });
+        } else {
+          const reason = e.reason ?? "leader rejected";
+          applyEvent({ v: 1, type: "tool.result", agent: pending.workerChildId, id: e.id, ok: false, output: `Rejected: ${reason}` });
+          pending.workerAgent.sendCommand({ type: "tool.result", id: e.id, ok: false, output: `Rejected: ${reason}` });
+        }
+      }
+      return;
+    }
+
     applyEvent(e);
     pm.observe(e);
     secretary.observe(e);
@@ -486,23 +515,32 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       workerCorrectedThisTurn = false;
     }
 
-    // 注册表是 needsApproval 的权威来源，防止 agent 伪造 false 绕过审批门
+    // Registry is the authority for needsApproval — prevents agent from forging false.
+    // Destructive Bash commands are routed to leader instead of asking user directly.
     if (ev.type === "tool.call") {
       workerActedThisTurn = true;
       const mustApprove = toolNeedsApproval(ev.name, ev.args as Record<string, unknown>);
       if (!mustApprove) {
         toolQueue.push(ev);
       } else {
-        // 需要审批 — 在 leader conv 里注入通知，用户在任意视图下都能看到
-        const argSummary = typeof ev.args === "object" && ev.args !== null
-          ? Object.entries(ev.args as Record<string, unknown>)
-              .map(([k, v]) => `${k}=${JSON.stringify(v)?.slice(0, 60)}`)
-              .join(", ")
-          : String(ev.args);
-        applyEvent({
-          v: 1, type: "message", agent: "leader", to: "user",
-          text: `⚠ [PM-审批] ${e.child} 等待审批: ${ev.name}(${argSummary})\n在输入框按 y 批准 · n 拒绝`,
-        });
+        const cmd = typeof ev.args === "object" && ev.args !== null
+          ? String((ev.args as Record<string, unknown>).command ?? (ev.args as Record<string, unknown>).cmd ?? "")
+          : "";
+        const leaderAgent = agents.get("leader");
+        if (leaderAgent instanceof HttpConvAgent) {
+          // Store in queue so leader's approval/rejection can resolve the tool.result
+          leaderApprovalQueue.set(ev.id, {
+            workerAgent: a, toolName: ev.name, toolArgs: ev.args, workerChildId: e.child,
+          });
+          leaderAgent.sendCommand({
+            type: "user.message",
+            text: `[系统-Bash审批 id=${ev.id}] ${e.child} 请求执行破坏性命令（goal: ${e.goal}）:\n\`${cmd}\`\n\n如在 goal 边界内，回复:\n{"v":1,"type":"tool.approved","id":"${ev.id}"}\n否则:\n{"v":1,"type":"tool.rejected","id":"${ev.id}","reason":"越界原因"}`,
+          });
+        } else {
+          // No leader available — reject immediately so worker doesn't hang
+          applyEvent({ v: 1, type: "tool.result", agent: e.child, id: ev.id, ok: false, output: "No leader available to approve this command" });
+          a.sendCommand({ type: "tool.result", id: ev.id, ok: false, output: "No leader available to approve this command" });
+        }
       }
     }
 
@@ -884,16 +922,8 @@ function App() {
     const a = agents.get(target);
     if (!a) return;
 
-    const agentInfo = getState().agents.get(target);
-    if (a instanceof HttpConvAgent && agentInfo?.state === "run") {
-      // Agent is busy — queue the message (show immediately, send when idle)
-      const q = msgQueue.current.get(target) ?? [];
-      q.push(body);
-      msgQueue.current.set(target, q);
-      bumpQueue();
-      return;
-    }
-
+    // HttpConvAgent has its own internal _queue and drains one message per turn,
+    // so we always call sendCommand immediately — no React-level blocking needed.
     a.sendCommand({ type: "user.message", text: body });
   };
 
@@ -910,31 +940,81 @@ function App() {
     }
   }, []);
 
-  // 鼠标滚轮: 启用 SGR 鼠标上报，解析 \x1b[<64;…M (up) / \x1b[<65;…M (down)
-  // Monkey-patch process.stdin.emit so mouse sequences are consumed and stripped
-  // BEFORE Ink's input handler sees them (Ink would otherwise print them as garbage).
+  // 鼠标滚轮 + 粘贴处理:
+  //   \x1b[?1000h\x1b[?1006h — SGR 鼠标上报
+  //   \x1b[?2004h            — bracketed paste mode
+  //
+  // Monkey-patch process.stdin.emit so escape sequences are consumed BEFORE
+  // Ink's input handler sees them (Ink would otherwise print them as garbage).
+  //
+  // Paste problem: in raw mode each \r/\n fires as Enter → only the last line
+  // survives. Bracketed paste wraps content in \x1b[200~...\x1b[201~; we
+  // collapse newlines to spaces. Long pastes can arrive in multiple chunks, so
+  // we accumulate with a stateful buffer rather than hoping for a single chunk.
+  //
+  // X10 mouse fallback: if the terminal downgrades from SGR (\x1b[<...M) to
+  // X10 format (\x1b[M + 3 raw bytes), strip those too.
   useEffect(() => {
     if (!isRawModeSupported) return;
-    process.stdout.write("\x1b[?1000h\x1b[?1006h");
-    const MOUSE_RE = /\x1b\[<(\d+);\d+;\d+[Mm]/g;
+    process.stdout.write("\x1b[?1000h\x1b[?1006h\x1b[?2004h");
+    const MOUSE_SGR_RE = /\x1b\[<(\d+);\d+;\d+[Mm]/g;
+    // X10: \x1b[M + exactly 3 bytes (button, col, row — all offset by 32)
+    const MOUSE_X10_RE = /\x1b\[M[\x00-\xff]{3}/g;
+
+    // Stateful paste accumulator — handles paste split across data chunks
+    let inPaste = false;
+    let pasteBuf = "";
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const origEmit = (process.stdin as any).emit as (...a: unknown[]) => boolean;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (process.stdin as any).emit = function (event: string, ...args: unknown[]) {
       if (event === "data") {
         const chunk = args[0] as Buffer | string;
-        const s = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
-        MOUSE_RE.lastIndex = 0;
+        const raw = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        const utf8 = raw.toString("utf8");
+        const bin  = raw.toString("binary"); // for ANSI escape matching
+
+        // ── Bracketed paste ───────────────────────────────────────────────
+        if (inPaste || utf8.includes("\x1b[200~")) {
+          if (!inPaste) {
+            // First chunk: skip past the opening marker
+            pasteBuf = utf8.slice(utf8.indexOf("\x1b[200~") + 6);
+            inPaste = true;
+          } else {
+            pasteBuf += utf8;
+          }
+          const endIdx = pasteBuf.indexOf("\x1b[201~");
+          if (endIdx !== -1) {
+            // End marker arrived — flush
+            const pasted = pasteBuf.slice(0, endIdx).replace(/[\r\n]+/g, " ").trimEnd();
+            inPaste = false;
+            pasteBuf = "";
+            if (!pasted) return false;
+            return origEmit.call(process.stdin, event, Buffer.from(pasted, "utf8"));
+          }
+          // End marker not yet seen — swallow this chunk and wait for more
+          return false;
+        }
+
+        // ── SGR mouse ─────────────────────────────────────────────────────
+        MOUSE_SGR_RE.lastIndex = 0;
         let hasMouse = false;
         let m: RegExpExecArray | null;
-        while ((m = MOUSE_RE.exec(s)) !== null) {
+        while ((m = MOUSE_SGR_RE.exec(bin)) !== null) {
           hasMouse = true;
           if (m[1] === "64") scrollBy(3);   // wheel up → older
           if (m[1] === "65") scrollBy(-3);  // wheel down → newer
         }
         if (hasMouse) {
-          // Strip mouse sequences; if nothing is left, swallow entirely
-          const filtered = s.replace(/\x1b\[<\d+;\d+;\d+[Mm]/g, "");
+          const filtered = bin.replace(/\x1b\[<\d+;\d+;\d+[Mm]/g, "");
+          if (!filtered) return false;
+          return origEmit.call(process.stdin, event, Buffer.from(filtered, "binary"));
+        }
+
+        // ── X10 mouse fallback ────────────────────────────────────────────
+        if (MOUSE_X10_RE.test(bin)) {
+          const filtered = bin.replace(MOUSE_X10_RE, "");
           if (!filtered) return false;
           return origEmit.call(process.stdin, event, Buffer.from(filtered, "binary"));
         }
@@ -942,7 +1022,8 @@ function App() {
       return origEmit.call(process.stdin, event, ...args);
     };
     return () => {
-      process.stdout.write("\x1b[?1000l\x1b[?1006l");
+      process.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?2004l");
+      inPaste = false; pasteBuf = "";
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (process.stdin as any).emit = origEmit;
     };
@@ -1125,10 +1206,8 @@ function App() {
             pending.length > 0
               ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
               : (() => {
-                  const q = msgQueue.current.get(getState().selectedAgent) ?? [];
                   const selState = getState().agents.get(getState().selectedAgent)?.state;
-                  if (selState === "run") return q.length > 0 ? `working… · ${q.length} queued` : "working…";
-                  return undefined;
+                  return selState === "run" ? "working… (message queued)" : undefined;
                 })()
           }
         />

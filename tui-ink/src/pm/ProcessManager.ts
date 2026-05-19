@@ -24,13 +24,10 @@ interface AgentStats {
   toolPathCounter: Map<string, number>;
   recentEventCount: number;
   role?: string;
-  runtimeWarnSent: boolean;
   noProgressWarnSent: boolean;
   timeoutNudgeSent: boolean;  // dispatch.timeout_ms 软超时纠正只发一次
 }
 
-const WARN_RUNTIME_MS = 30 * 60 * 1000;
-const ERR_RUNTIME_MS  = 60 * 60 * 1000;
 const NO_PROGRESS_MS  = 5 * 60 * 1000;
 const LOOP_WINDOW     = 100;
 const LOOP_THRESHOLD  = 10;
@@ -184,15 +181,6 @@ export class ProcessManager extends EventEmitter {
       if (stats.startTime) {
         // Effective age excludes time spent waiting for user approval
         const age = now - stats.startTime - stats.pausedMs;
-        if (age > ERR_RUNTIME_MS) {
-          this.emitAlert("error", "runtime_exceeded", agentId,
-            `${agentId} 已运行 ${Math.round(age / 60000)}min（不含等待审批），超过 60min 硬限制`);
-          this.emit("kill", agentId);
-        } else if (age > WARN_RUNTIME_MS && !stats.runtimeWarnSent) {
-          this.emitAlert("warn", "runtime_warn", agentId,
-            `${agentId} 已运行 ${Math.round(age / 60000)}min（不含等待审批，超 30min）`);
-          stats.runtimeWarnSent = true;
-        }
 
         // dispatch.timeout_ms 软超时 — 只发一次 handup 纠正信号
         const dispatchTimeout = info.dispatch?.timeout_ms;
@@ -315,7 +303,6 @@ export class ProcessManager extends EventEmitter {
         lastSnapshotTs: 0,
         toolPathCounter: new Map(),
         recentEventCount: 0,
-        runtimeWarnSent: false,
         noProgressWarnSent: false,
         timeoutNudgeSent: false,
       });

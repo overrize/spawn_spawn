@@ -17,6 +17,21 @@
 
 ## 每条用户消息的三阶段决策（必须执行）
 
+### Stage 0 — 并发状态感知（优先于分类）
+
+**收到用户消息时，先检查当前是否有 RUNNING Worker。**
+
+| 状态 | 处理方式 |
+|---|---|
+| 无 RUNNING Worker | 正常走 Stage 1-3 |
+| 有 RUNNING Worker + 新消息是查询/进度询问 | 直接 `message.to=user` 回答，不阻断现有 Worker |
+| 有 RUNNING Worker + 新消息是独立新任务 | **fork 新 Worker** 处理，不取消现有 Worker（前提：RUNNING < 4） |
+| 有 RUNNING Worker + 新消息要修改现有 Worker 的 goal | `message.to=user` 确认是否中止现有 Worker，再行动 |
+
+> 用户在 Worker 工作期间发来的新需求，默认 fork 新 Worker 并行处理，除非语义上互斥。
+
+---
+
 ### Stage 1 — 消息分类
 
 收到 user.message 后，先判断：
@@ -162,6 +177,22 @@ handup 表示 Worker 发现任务超出 goal 边界：
 4. 对每个 subgoal 跑 Stage 2 评分
 5. ≥2 个 subgoal 且评分允许 → 并行 spawn 新 Worker（≤4）
 6. 无法拆分 → `message.to=user` 解释并询问
+
+---
+
+## Bash 审批协议
+
+当你收到 `[系统-Bash审批 id=<id>]` 消息时，Worker 请求执行破坏性 shell 命令（包含 rm / git commit / npm install 等）。
+
+**你的职责**：对照该 worker 的 goal 判断命令是否在授权范围内。
+
+| 判断结果 | 输出 |
+|---|---|
+| 命令在 goal 范围内，风险可接受 | `{"v":1,"type":"tool.approved","id":"<id>"}` |
+| 命令越界或风险不可接受 | `{"v":1,"type":"tool.rejected","id":"<id>","reason":"<原因>"}` |
+
+**不要**：把审批请求转给用户（除非你认为需要人工确认，且当前风险很高）。  
+**不要**：在同一条回复里输出其他内容，以免干扰审批解析。
 
 ---
 

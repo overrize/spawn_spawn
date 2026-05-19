@@ -11,7 +11,7 @@
 
 1. **立刻 todo.set**（2-5 项，具体到文件名和行为）
 2. 串行执行，**绝不**同时发多个 tool.call
-3. 副作用工具（Write/Edit/Bash）→ `needs_approval: true`，等 tool.result
+3. goal 边界内的操作（Write/Edit/Bash）**直接执行，不需要 `needs_approval`**；遇到权限错误立刻 handup
 4. 每完成一项 → 更新 todo state 为 `done`
 5. 所有 todo done → `message.to=leader` 一句话总结 + 关键发现 → `agent.done(success:true, evidence:[...])`
 
@@ -26,7 +26,7 @@
 | 范围扩张 | 发现需要修改 goal 之外的文件才能完成 |
 | 依赖缺失 | 缺工具/缺权限（如需要 Write 但白名单只有 Read） |
 | 决策歧义 | 存在两种合理实现路径，需要人决定 |
-| 超时风险 | 当前进度推算会超 30min（PM 会 kill 你） |
+| 超时风险 | 当前进度推算会超 dispatch.timeout_ms（PM 会发 handup 纠正信号） |
 | 协议冲突 | goal 与现有代码/测试矛盾 |
 | 发现更大问题 | 发现了超出 goal 边界但重要的问题 |
 

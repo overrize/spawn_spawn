@@ -11,6 +11,8 @@ const VALID_TYPES = new Set([
   // S6 events
   "unit.handup", "memory.snapshot", "shutdown.start",
   "pm.alert", "proposal.new", "proposal.decision",
+  // Bash approval protocol: leader approves/rejects destructive worker commands
+  "tool.approved", "tool.rejected",
 ]);
 const LOG = !!process.env.LOG_EVENTS;
 
@@ -405,6 +407,7 @@ export class HttpConvAgent extends EventEmitter {
       });
 
       stream.on("end", () => {
+        if (idleTimer) clearTimeout(idleTimer);
         // Flush any remaining SSE event that lacked a trailing \n\n
         for (const line of buf.split("\n")) {
           const trimmed = line.trim();
@@ -416,7 +419,10 @@ export class HttpConvAgent extends EventEmitter {
         }
         resolve(fullText);
       });
-      stream.on("error", reject);
+      stream.on("error", (err) => {
+        if (idleTimer) clearTimeout(idleTimer);
+        reject(err);
+      });
     });
   }
 }

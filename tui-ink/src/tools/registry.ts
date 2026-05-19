@@ -50,7 +50,7 @@ const Write: ToolDef = {
   name: "Write",
   description: "写文件（覆盖/新建，自动建目录）",
   argsSchema: "path(str), content(str)",
-  needsApproval: true,
+  needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
     const p = String(a.file_path ?? a.path ?? "");
@@ -66,7 +66,7 @@ const Edit: ToolDef = {
   name: "Edit",
   description: "精确字符串替换，old_string 必须唯一",
   argsSchema: "path(str), old_string(str), new_string(str)",
-  needsApproval: true,
+  needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
     const p = String(a.file_path ?? a.path ?? "");
@@ -106,7 +106,7 @@ const Bash: ToolDef = {
   name: "Bash",
   description: "执行 shell 命令（状态持久，环境变量跨调用保留）",
   argsSchema: "command(str), timeout?(ms default:60000)",
-  needsApproval: true,
+  needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
     const rawCmd = String(a.command ?? a.cmd ?? "");
