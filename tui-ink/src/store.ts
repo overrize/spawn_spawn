@@ -228,9 +228,11 @@ export function applyEvent(e: TuiEvent) {
         text: `⑂ spawn ${e.child} (${e.role}) — ${e.goal}`,
         level: "info",
       });
-      // Auto-focus the new child so errors and output are immediately visible
-      state.selectedAgent = e.child;
-      state.scrollOffset = 0;
+      // Auto-focus the new child only if currently focused on parent
+      if (state.selectedAgent === e.parent) {
+        state.selectedAgent = e.child;
+        state.scrollOffset = 0;
+      }
       break;
     }
     case "agent.done": {

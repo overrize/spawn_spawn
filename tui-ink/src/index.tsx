@@ -609,45 +609,99 @@ function runDemo(initialPrompt: string) {
     },
   } as any);
 
-  // 立刻 plan
+  // 完整演示序列: Leader spawn → Worker 执行 → agent.done → Leader 汇总
+  // Phase 1: Leader 初始化
   setTimeout(() => ev({
     type: "todo.set",
     items: [
-      { id: "t1", state: "run",  text: "读 docs/login.html", progress: 30 },
-      { id: "t2", state: "todo", text: "提取 tokens" },
-      { id: "t3", state: "todo", text: "出 3 个 wireframe" },
-      { id: "t4", state: "todo", text: "汇总" },
+      { id: "l1", state: "run",  text: "spawn worker-1 读配置文件" },
+      { id: "l2", state: "todo", text: "spawn worker-2 改配置" },
+      { id: "l3", state: "todo", text: "汇总结果" },
     ],
   } as any), 200);
-  setTimeout(() => ev({ type: "step", text: "reading docs/login.html" } as any), 400);
+  setTimeout(() => ev({ type: "step", text: "启动两个 worker" } as any), 400);
+
+  // spawn worker-1
   setTimeout(() => ev({
-    type: "tool.call", id: "tc1", name: "Read",
-    args: { path: "docs/login.html" }, needs_approval: false,
-  } as any), 700);
+    type: "spawn", parent: "leader", child: "worker-1",
+    role: "Worker", goal: "读取 src/config.json 并报告配置含义", model: MODEL,
+  } as any), 600);
+
+  // spawn worker-2
   setTimeout(() => ev({
-    type: "tool.result", id: "tc1", ok: true, output: "1.2k tokens, 142 lines",
-  } as any), 1300);
+    type: "spawn", parent: "leader", child: "worker-2",
+    role: "Worker", goal: "修改 src/config.json 中 mode 字段为 production", model: MODEL,
+  } as any), 900);
+
+  // Phase 2: worker-1 执行
+  setTimeout(() => applyEvent({
+    v: 1, type: "todo.set", agent: "worker-1",
+    items: [
+      { id: "w1a", state: "run",  text: "读取 config.json" },
+      { id: "w1b", state: "todo", text: "分析并报告" },
+    ],
+  } as any), 1200);
+  setTimeout(() => applyEvent({
+    v: 1, type: "step", agent: "worker-1", text: "读取配置文件"
+  } as any), 1400);
+  setTimeout(() => applyEvent({
+    v: 1, type: "tool.call", agent: "worker-1", id: "tc-w1", name: "Read",
+    args: { path: "src/config.json" }, needs_approval: false,
+  } as any), 1600);
+  setTimeout(() => applyEvent({
+    v: 1, type: "tool.result", agent: "worker-1", id: "tc-w1",
+    ok: true, output: '{"mode":"development","port":3000,"debug":true}'
+  } as any), 2200);
+  setTimeout(() => applyEvent({
+    v: 1, type: "agent.done", agent: "worker-1", success: true,
+    reason: "成功读取配置：mode=development, port=3000, debug=true",
+  } as any), 2500);
+
+  // Phase 3: worker-2 执行
+  setTimeout(() => applyEvent({
+    v: 1, type: "todo.set", agent: "worker-2",
+    items: [
+      { id: "w2a", state: "run",  text: "修改 mode 为 production" },
+    ],
+  } as any), 2800);
+  setTimeout(() => applyEvent({
+    v: 1, type: "step", agent: "worker-2", text: "编辑 config.json"
+  } as any), 3000);
+  setTimeout(() => applyEvent({
+    v: 1, type: "tool.call", agent: "worker-2", id: "tc-w2", name: "Edit",
+    args: { path: "src/config.json", old_string: '"mode":"development"', new_string: '"mode":"production"' },
+    needs_approval: true,
+  } as any), 3200);
+  setTimeout(() => applyEvent({
+    v: 1, type: "tool.result", agent: "worker-2", id: "tc-w2",
+    ok: true, output: "替换成功"
+  } as any), 3800);
+  setTimeout(() => applyEvent({
+    v: 1, type: "agent.done", agent: "worker-2", success: true,
+    reason: "成功将 mode 从 development 改为 production",
+  } as any), 4100);
+
+  // Phase 4: Leader 汇总
   setTimeout(() => ev({
     type: "todo.set",
     items: [
-      { id: "t1", state: "done", text: "读 docs/login.html" },
-      { id: "t2", state: "run",  text: "提取 tokens", progress: 50 },
-      { id: "t3", state: "todo", text: "出 3 个 wireframe" },
-      { id: "t4", state: "todo", text: "汇总" },
+      { id: "l1", state: "done", text: "spawn worker-1 读配置文件" },
+      { id: "l2", state: "done", text: "spawn worker-2 改配置" },
+      { id: "l3", state: "run",  text: "汇总结果", progress: 50 },
     ],
-  } as any), 1500);
-  setTimeout(() => ev({
-    type: "spawn", parent: "leader", child: "coder-01",
-    role: "Worker", goal: "实现 LoginForm.tsx", model: MODEL,
-  } as any), 2100);
-  setTimeout(() => ev({
-    type: "tool.call", agent: "coder-01", id: "tc2", name: "Write",
-    args: { path: "src/LoginForm.tsx", content: "…" }, needs_approval: true,
-  } as any), 3000);
+  } as any), 4400);
+  setTimeout(() => ev({ type: "step", text: "汇总两个 worker 结果" } as any), 4600);
   setTimeout(() => ev({
     type: "message", agent: "leader", to: "user",
-    text: `好,我已经 spawn 了 coder-01 在写 Login 组件。\n等待你审批它的第一次 Write。\n(你输入的:${initialPrompt})`,
-  } as any), 3400);
+    text: `✅ 并行任务完成\n` +
+      `- worker-1: 读取 src/config.json 成功（mode=development, port=3000, debug=true）\n` +
+      `- worker-2: 已将 mode 修改为 production\n` +
+      `\n配置已从开发模式切换为生产模式，端口 3000 不变，debug 标记仍为 true（可自行关闭）。`,
+  } as any), 4800);
+  setTimeout(() => ev({
+    type: "agent.done", success: true,
+    reason: "完整演示了 Leader→spawn→Worker→tool→agent.done→汇总 流程",
+  } as any), 5100);
 }
 
 // ── App ─────────────────────────────────────────────────────────────────────

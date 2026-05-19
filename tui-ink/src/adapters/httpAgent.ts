@@ -364,6 +364,20 @@ export class HttpConvAgent extends EventEmitter {
     return new Promise((resolve, reject) => {
       let fullText = "";
       let buf = "";
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const IDLE_TIMEOUT_MS = 60_000;
+
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          stream.removeAllListeners("data");
+          stream.removeAllListeners("end");
+          stream.removeAllListeners("error");
+          reject(new Error("stream idle timeout"));
+        }, IDLE_TIMEOUT_MS);
+      };
+
+      resetIdleTimer();
 
       stream.on("data", (chunk: Buffer) => {
         buf += chunk.toString();
@@ -385,6 +399,7 @@ export class HttpConvAgent extends EventEmitter {
                 v: 1, type: "step", agent: this.cfg.id, text: "generating…",
               } as TuiEvent);
             }
+            resetIdleTimer();
           }
         }
       });
