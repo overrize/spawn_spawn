@@ -17,27 +17,36 @@ npm start
 
 ### 配置 API Key
 
-启动后在输入框运行：
+**推荐方式：复制模板文件**
+
+```bash
+# Linux / macOS
+mkdir -p ~/.config/multi-agent-tui
+cp tui-ink/config.example.json ~/.config/multi-agent-tui/config.json
+# 然后编辑 config.json，填入你的 apiKey
+
+# Windows
+mkdir %USERPROFILE%\.config\multi-agent-tui
+copy tui-ink\config.example.json %USERPROFILE%\.config\multi-agent-tui\config.json
+```
+
+配置文件路径：`~/.config/multi-agent-tui/config.json`
+
+支持的 provider：
+
+| preset | baseUrl |
+|---|---|
+| `anthropic` | https://api.anthropic.com（原生格式） |
+| `deepseek` | https://api.deepseek.com |
+| `openai` | https://api.openai.com |
+| `ollama` | http://localhost:11434（本地，apiKey 填任意值） |
+
+**也可以在 TUI 内用命令配置**（逐角色设置，自动写入文件）：
 
 ```
-/connect leader deepseek <model> <api-key>
-```
-
-支持的 provider：`anthropic` / `deepseek` / `openai` / `ollama`（本地）
-
-配置会自动保存到 `~/.config/multi-agent-tui/config.json`，下次启动直接生效。
-
-也可以手动创建配置文件：
-
-```json
-// ~/.config/multi-agent-tui/config.json
-{
-  "agents": {
-    "leader":    { "provider": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKey": "sk-..." },
-    "secretary": { "provider": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKey": "sk-..." },
-    "worker":    { "provider": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKey": "sk-..." }
-  }
-}
+/connect leader deepseek deepseek-chat sk-YOUR_KEY
+/connect worker deepseek deepseek-chat sk-YOUR_KEY
+/connect secretary deepseek deepseek-chat sk-YOUR_KEY
 ```
 
 ## 目录结构

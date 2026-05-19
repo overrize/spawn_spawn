@@ -1,0 +1,24 @@
+{
+  "agents": {
+    "leader": {
+      "provider": "openai",
+      "baseUrl": "https://api.deepseek.com",
+      "model": "deepseek-chat",
+      "apiKey": "sk-YOUR_KEY_HERE"
+    },
+    "secretary": {
+      "provider": "openai",
+      "baseUrl": "https://api.deepseek.com",
+      "model": "deepseek-chat",
+      "apiKey": "sk-YOUR_KEY_HERE"
+    },
+    "worker": {
+      "provider": "openai",
+      "baseUrl": "https://api.deepseek.com",
+      "model": "deepseek-chat",
+      "apiKey": "sk-YOUR_KEY_HERE"
+    }
+  },
+  "palette": "paper",
+  "layout": "v1"
+}
