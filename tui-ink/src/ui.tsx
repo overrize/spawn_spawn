@@ -142,16 +142,25 @@ export function AgentsPane({ width }: { width: number }) {
   const agents = useStore((s) => Array.from(s.agents.values()));
   const sel = useStore((s) => s.selectedAgent);
 
+  // Scroll the visible window so the selected agent is always on-screen.
+  // Each agent renders 2–5 rows; use 3 as a conservative estimate.
+  const availRows = Math.max(6, (process.stdout.rows ?? 24) - 5);
+  const maxVisible = Math.max(3, Math.floor(availRows / 3));
+  const selIdx = Math.max(0, agents.findIndex((a) => a.id === sel));
+  const scrollStart = Math.min(selIdx, Math.max(0, agents.length - maxVisible));
+  const visible = agents.slice(scrollStart, scrollStart + maxVisible);
+
   return (
     <Box flexDirection="column" width={width} flexShrink={0}>
       <Box paddingX={1} paddingY={0}>
         <Text dimColor>AGENTS </Text><Text dimColor>{agents.length}</Text>
+        {scrollStart > 0 && <Text dimColor> ↑{scrollStart}</Text>}
       </Box>
-      <Box flexDirection="column" paddingX={1} overflowY="hidden" height={14}>
+      <Box flexDirection="column" paddingX={1} overflowY="hidden" flexGrow={1}>
         {agents.length === 0 && (
           <Text dimColor italic>(none yet — press enter to spawn leader)</Text>
         )}
-        {agents.map((a) => (
+        {visible.map((a) => (
           <AgentRow key={a.id} a={a} selected={a.id === sel} />
         ))}
       </Box>
@@ -174,7 +183,7 @@ function AgentRow({ a, selected }: { a: AgentInfo; selected: boolean }) {
         <Text color={selected ? p.accent : undefined}>{selected ? "▎" : " "}</Text>
         <Text dimColor>{indent}</Text>
         <Text color={color}>{STATE_GLYPH[a.state]} </Text>
-        <Text bold={selected}>{truncate(a.name, 14)}</Text>
+        <Text bold={selected} inverse={selected}>{truncate(a.name, 14)}</Text>
         <Text dimColor> {a.role[0]}</Text>
       </Box>
       {a.sub && (
