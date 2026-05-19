@@ -788,20 +788,32 @@ export function InputBar({
   focused?: boolean;
 }) {
   const p = usePalette();
+  const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
+  // › (2) + paddingX*2 (2) + borders (0, borderLeft/Right=false) + counter (5 max)
+  const availInputCols = termCols - 9;
+  const isLong = displayWidth(value) > availInputCols;
+
   return (
     <Box borderStyle="single" borderColor="gray" borderLeft={false} borderRight={false}
          paddingX={1}>
       <Text color={p.accent}>› </Text>
       {focused ? (
-        <TextInput
-          value={value}
-          onChange={onChange}
-          onSubmit={onSubmit}
-          placeholder={hint ?? "type a message · @agent to switch · /command"}
-        />
+        // overflow="hidden" clips TextInput rendering at box boundary;
+        // prevents long pastes from spilling across terminal width
+        <Box flexGrow={1} overflow="hidden">
+          <TextInput
+            value={value}
+            onChange={onChange}
+            onSubmit={onSubmit}
+            placeholder={hint ?? "type a message · @agent to switch · /command"}
+          />
+        </Box>
       ) : (
-        <Text dimColor>{hint ?? "y approve · n reject"}</Text>
+        <Box flexGrow={1}>
+          <Text dimColor>{hint ?? "y approve · n reject"}</Text>
+        </Box>
       )}
+      {isLong && <Text dimColor>[{value.length}]</Text>}
     </Box>
   );
 }
