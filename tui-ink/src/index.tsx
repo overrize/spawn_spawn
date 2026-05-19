@@ -22,8 +22,6 @@ import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { Agent } from "./agent.js";
-import { OpenCodeAgent } from "./adapters/opencode.js";
 import { HttpConvAgent } from "./adapters/httpAgent.js";
 import {
   TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar,
@@ -94,7 +92,7 @@ function readIfExists(p: string): string {
 }
 
 // ── 全局单例 ───────────────────────────────────────────────────────────────
-const agents = new Map<string, Agent | OpenCodeAgent | HttpConvAgent>();
+const agents = new Map<string, HttpConvAgent>();
 const secretaries = new Map<string, SecretaryProxy>(); // agentId → Secretary
 const pm = new ProcessManager();
 
@@ -1041,17 +1039,11 @@ function App() {
         const toolId = m.tool_id!;
         approve(toolId);
         const agentInst = agents.get(m.agent);
-        if (agentInst instanceof HttpConvAgent) {
-          // Execute tool and send result back for HttpConvAgent
+        if (agentInst) {
           executeTool(m.tool_name ?? "", m.tool_args).then((r) => {
             applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: r.ok, output: r.output });
             agentInst.sendCommand({ type: "tool.result", id: toolId, ok: r.ok, output: r.output });
           });
-        } else if (agentInst) {
-          if (agentInst.pendingPermId === toolId) {
-            agentInst.proc?.stdin?.write("y\n");
-            agentInst.pendingPermId = null;
-          }
         }
         return;
       }
@@ -1060,15 +1052,10 @@ function App() {
         const toolId = m.tool_id!;
         reject(toolId);
         const agentInst = agents.get(m.agent);
-        if (agentInst instanceof HttpConvAgent) {
+        if (agentInst) {
           const errMsg = "Tool rejected by user";
           applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: false, output: errMsg });
           agentInst.sendCommand({ type: "tool.result", id: toolId, ok: false, output: errMsg });
-        } else if (agentInst) {
-          if (agentInst.pendingPermId === toolId) {
-            agentInst.proc?.stdin?.write("n\n");
-            agentInst.pendingPermId = null;
-          }
         }
         return;
       }
