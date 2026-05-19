@@ -147,7 +147,7 @@ export function AgentsPane({ width }: { width: number }) {
       <Box paddingX={1} paddingY={0}>
         <Text dimColor>AGENTS </Text><Text dimColor>{agents.length}</Text>
       </Box>
-      <Box flexDirection="column" paddingX={1} overflowY="hidden" height={24}>
+      <Box flexDirection="column" paddingX={1} overflowY="hidden" height={14}>
         {agents.length === 0 && (
           <Text dimColor italic>(none yet — press enter to spawn leader)</Text>
         )}

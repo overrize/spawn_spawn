@@ -17,6 +17,8 @@ export interface PMAlert {
 
 interface AgentStats {
   startTime: number;
+  pausedMs: number;           // 累计暂停在等待 approval 的毫秒数（不计入 age）
+  lastPauseStart: number;     // 本次进入 approval 等待的时刻（0 = 未暂停）
   lastProgressTs: number;     // 最后一次 step / todo.set
   lastSnapshotTs: number;     // 最后一次 memory.snapshot
   toolPathCounter: Map<string, number>;
@@ -168,15 +170,27 @@ export class ProcessManager extends EventEmitter {
       const info = state.agents.get(agentId);
       if (!info || info.state !== "run") continue;
 
+      // Track approval-wait windows so they don't count against the timeout.
+      const waitingForApproval = state.pendingApprovals.some((p) => p.agent === agentId);
+      if (waitingForApproval) {
+        if (!stats.lastPauseStart) stats.lastPauseStart = now;
+        continue; // skip all time checks while user hasn't responded
+      } else if (stats.lastPauseStart) {
+        // User just approved/rejected — bank the paused duration
+        stats.pausedMs += now - stats.lastPauseStart;
+        stats.lastPauseStart = 0;
+      }
+
       if (stats.startTime) {
-        const age = now - stats.startTime;
+        // Effective age excludes time spent waiting for user approval
+        const age = now - stats.startTime - stats.pausedMs;
         if (age > ERR_RUNTIME_MS) {
           this.emitAlert("error", "runtime_exceeded", agentId,
-            `${agentId} 已运行 ${Math.round(age / 60000)}min，超过 60min 硬限制`);
+            `${agentId} 已运行 ${Math.round(age / 60000)}min（不含等待审批），超过 60min 硬限制`);
           this.emit("kill", agentId);
         } else if (age > WARN_RUNTIME_MS && !stats.runtimeWarnSent) {
           this.emitAlert("warn", "runtime_warn", agentId,
-            `${agentId} 已运行 ${Math.round(age / 60000)}min（超 30min）`);
+            `${agentId} 已运行 ${Math.round(age / 60000)}min（不含等待审批，超 30min）`);
           stats.runtimeWarnSent = true;
         }
 
@@ -185,7 +199,7 @@ export class ProcessManager extends EventEmitter {
         if (dispatchTimeout && age > dispatchTimeout && !stats.timeoutNudgeSent) {
           stats.timeoutNudgeSent = true;
           this.emitAlert("warn", "dispatch_timeout", agentId,
-            `${agentId} 已超 dispatch.timeout_ms (${dispatchTimeout}ms)，发送 handup 纠正`);
+            `${agentId} 有效运行时间超 dispatch.timeout_ms (${dispatchTimeout}ms)，发送 handup 纠正`);
           this.emit("timeout", agentId);
         }
       }
@@ -295,6 +309,8 @@ export class ProcessManager extends EventEmitter {
     if (!this.stats.has(agentId)) {
       this.stats.set(agentId, {
         startTime: 0,
+        pausedMs: 0,
+        lastPauseStart: 0,
         lastProgressTs: Date.now(),
         lastSnapshotTs: 0,
         toolPathCounter: new Map(),
