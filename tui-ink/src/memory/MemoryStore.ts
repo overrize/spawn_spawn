@@ -3,6 +3,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
 import type { AgentMemory } from "./types.js";
 
 function memoryDir(): string {
@@ -73,6 +74,21 @@ export function loadMessages(
   } catch { return []; }
 }
 
+/** 通过 7-char session_hash 查找 AgentMemory */
+export function loadMemoryByHash(hash: string): AgentMemory | null {
+  try {
+    ensureMemoryDir();
+    for (const f of fs.readdirSync(memoryDir())) {
+      if (!f.endsWith(".json") || f.endsWith(".tmp")) continue;
+      try {
+        const m = JSON.parse(fs.readFileSync(path.join(memoryDir(), f), "utf8")) as AgentMemory;
+        if (m.session_hash === hash) return m;
+      } catch { /* skip corrupt file */ }
+    }
+    return null;
+  } catch { return null; }
+}
+
 /** 扫描所有 tombstone.final_status === null 的 agent（未正常退出）*/
 export function listUnfinishedAgents(): AgentMemory[] {
   try {
@@ -101,7 +117,7 @@ export function appendReminder(text: string, ts: number): void {
 /** 构建一个全新 AgentMemory 对象（spawn 时初始化） */
 export function createMemory(opts: {
   agentId: string;
-  agentType: "LEADER" | "SECRETARY" | "WORKER";
+  agentType: "PM" | "LEADER" | "SECRETARY" | "WORKER";
   parentChain: string[];
   depth: number;
   model: string;
@@ -113,14 +129,22 @@ export function createMemory(opts: {
     stop_conditions: string[];
   };
 }): AgentMemory {
+  const created_at = Date.now();
+  const session_hash = crypto
+    .createHash("sha256")
+    .update(`${opts.agentId}_${created_at}`)
+    .digest("hex")
+    .slice(0, 7);
+
   return {
     schema_version: 1,
     agent_id: opts.agentId,
     agent_type: opts.agentType,
+    session_hash,
     parent_chain: opts.parentChain,
     depth: opts.depth,
-    created_at: Date.now(),
-    updated_at: Date.now(),
+    created_at,
+    updated_at: created_at,
     identity: { role_name: opts.roleName, skills: [], model: opts.model },
     dispatch: opts.dispatch ?? {
       background: "",

@@ -35,7 +35,7 @@ import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
 import type { PaletteName, ProviderConfig } from "./config.js";
 import { SecretaryProxy } from "./memory/SecretaryProxy.js";
-import { createMemory, loadMemory, listUnfinishedAgents } from "./memory/MemoryStore.js";
+import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents } from "./memory/MemoryStore.js";
 import { ProcessManager } from "./pm/ProcessManager.js";
 import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/registry.js";
 import type { AgentRole } from "./tools/registry.js";
@@ -56,9 +56,10 @@ function buildSystemPrompt(
   agentId: string,
   goal?: string,
   resumedMemoryId?: string,
+  promptFile?: string, // override default: "pm", "leader", "worker", etc.
 ): string {
   const base = readIfExists(path.join(PROMPTS_DIR, "_base.md"));
-  const rolePrompt = readIfExists(path.join(PROMPTS_DIR, `${role.toLowerCase()}.md`));
+  const rolePrompt = readIfExists(path.join(PROMPTS_DIR, `${promptFile ?? role.toLowerCase()}.md`));
   let tpl = `${base}\n\n---\n\n${rolePrompt}`;
 
   // S3: inject RESUMED CONTEXT when resuming from memory
@@ -146,44 +147,111 @@ function checkMessageLegal(ev: Extract<TuiEvent, { type: "message" }>): boolean 
 }
 
 
-function startLeader(initialPrompt: string, resumedMemoryId?: string) {
-  if (DEMO) { return runDemo(initialPrompt); }
+// ── 找离 childId 最近的 Leader 祖先，用于 Bash 审批路由 ──────────────────────
+function findApproverLeader(childId: string): HttpConvAgent | null {
+  let cur = childId;
+  for (let i = 0; i < 10; i++) {
+    const info = getState().agents.get(cur);
+    if (!info?.parent) {
+      // Reached root without finding a leader parent — PM is the fallback
+      const root = agents.get("pm");
+      return root instanceof HttpConvAgent ? root : null;
+    }
+    cur = info.parent;
+    const parentAgent = agents.get(cur);
+    const parentInfo = getState().agents.get(cur);
+    if (parentAgent instanceof HttpConvAgent &&
+        (parentInfo?.role === "Leader" || cur === "pm")) {
+      return parentAgent;
+    }
+  }
+  return null;
+}
+
+// ── 通用 Leader 启动函数（PM depth=0 和 Tech Lead depth≥1 共用）────────────
+interface LeaderOpts {
+  id: string;
+  parentId?: string;
+  goal?: string;
+  model?: string;
+  depth?: number;
+  parentChain?: string[];
+  dispatch?: Extract<TuiEvent, { type: "spawn" }>["dispatch"];
+  resumedMemoryId?: string;
+  promptFile?: string;      // "pm" for root, "leader" for tech leads
+  firstMessage?: string;    // override initial LLM message (used when PM first starts)
+}
+
+function startLeaderAgent(opts: LeaderOpts): void {
+  if (DEMO && !opts.parentId) { return runDemo(opts.firstMessage ?? "demo"); }
+  if (agents.has(opts.id)) return;
 
   const cfg = loadConfig();
-  const leaderModel = cfg.agents.leader.model ?? MODEL;
-  const systemPrompt = buildSystemPrompt("Leader", "leader", undefined, resumedMemoryId);
+  const model = opts.model ?? cfg.agents.leader.model ?? MODEL;
+  const isRoot = !opts.parentId;
+  const promptFile = opts.promptFile ?? (isRoot ? "pm" : "leader");
 
+  // Compute depth and parent chain from store when not provided
+  const depth = opts.depth ?? (() => {
+    if (isRoot) return 0;
+    let d = 0; let cur = opts.parentId!;
+    for (let i = 0; i < 10; i++) {
+      const info = getState().agents.get(cur);
+      if (!info?.parent) break; d++; cur = info.parent;
+    }
+    return d + 1;
+  })();
+
+  const parentChain: string[] = opts.parentChain ?? (() => {
+    if (isRoot) return [];
+    const chain: string[] = [];
+    let cur = opts.parentId!;
+    for (let i = 0; i < 10; i++) {
+      chain.unshift(cur);
+      const info = getState().agents.get(cur);
+      if (!info?.parent) break;
+      cur = info.parent;
+    }
+    return chain;
+  })();
+
+  const systemPrompt = buildSystemPrompt("Leader", opts.id, opts.goal, opts.resumedMemoryId, promptFile);
   const a = new HttpConvAgent({
-    id: "leader",
+    id: opts.id,
     role: "Leader",
-    providerCfg: cfg.agents.leader,
+    providerCfg: { ...cfg.agents.leader, model },
     systemPrompt,
-    resumeFrom: resumedMemoryId,
+    resumeFrom: opts.resumedMemoryId,
   });
-  agents.set("leader", a);
+  agents.set(opts.id, a);
 
-  // S2: Secretary for Leader
-  const existingMem = resumedMemoryId ? loadMemory("leader") : null;
+  // Secretary — always auto-created alongside this Leader, lifecycle-bound
+  const existingMem = opts.resumedMemoryId ? loadMemory(opts.id) : null;
   const mem = existingMem ?? createMemory({
-    agentId: "leader",
-    agentType: "LEADER",
-    parentChain: [],
-    depth: 0,
-    model: leaderModel,
-    roleName: "Leader",
-    dispatch: { background: "Root orchestrator", constraints: [], acceptance_criteria: [], stop_conditions: ["user.quit"] },
+    agentId: opts.id,
+    agentType: isRoot ? "PM" : "LEADER",
+    parentChain,
+    depth,
+    model,
+    roleName: isRoot ? "PM" : "Leader",
+    dispatch: opts.dispatch ?? {
+      background: opts.goal ?? (isRoot ? "Root PM orchestrator" : "Leader orchestrator"),
+      constraints: [],
+      acceptance_criteria: [],
+      stop_conditions: ["user.quit"],
+    },
   });
   const secretary = new SecretaryProxy(mem);
-  secretaries.set("leader", secretary);
+  secretaries.set(opts.id, secretary);
 
-  // Tool queue for auto-approved tools (same pattern as startWorker)
-  const leaderToolQueue: Array<Extract<TuiEvent, { type: "tool.call" }>> = [];
-  let leaderActedThisTurn = false;
-  let leaderContinuations = 0;
-  let leaderGaveUp = false;
+  // Per-turn state
+  const toolQueue: Array<Extract<TuiEvent, { type: "tool.call" }>> = [];
+  let actedThisTurn = false;
+  let continuations = 0;
+  let gaveUp = false;
 
-  // Wire events — spawn is pre-checked BEFORE applyEvent to prevent ghost agents
   a.on("event", (e: TuiEvent) => {
+    // Spawn — pre-check then dispatch to correct handler
     if (e.type === "spawn") {
       const parentRole = getState().agents.get(e.parent)?.role;
       const check = pm.preCheckSpawn(e, parentRole);
@@ -191,24 +259,22 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
         applyEvent({ v: 1, type: "agent.error", agent: e.parent, code: check.code, detail: check.detail });
         return;
       }
-      leaderActedThisTurn = true;
+      actedThisTurn = true;
       applyEvent(e);
       pm.observe(e);
       secretary.observe(e);
-      startWorker(e);
+      startWorker(e); // routes Leader role to startLeaderAgent internally
       return;
     }
 
-    // Mirror leader's own agent.error to conv
     if (e.type === "agent.error") {
       applyEvent(e); pm.observe(e); secretary.observe(e);
       return;
     }
 
-    // Block illegal messages before they reach the store
     if (e.type === "message" && !checkMessageLegal(e)) return;
 
-    // Leader approves/rejects a destructive Bash command from a worker
+    // Approve/reject destructive Bash from a child agent
     if (e.type === "tool.approved" || e.type === "tool.rejected") {
       const pending = leaderApprovalQueue.get(e.id);
       if (pending) {
@@ -231,102 +297,182 @@ function startLeader(initialPrompt: string, resumedMemoryId?: string) {
     pm.observe(e);
     secretary.observe(e);
 
-    // Track turn start
     if (e.type === "agent.state" && e.state === "run") {
-      leaderActedThisTurn = false;
+      actedThisTurn = false;
     }
 
-    // Auto-approved tool queue
     if (e.type === "tool.call") {
-      leaderActedThisTurn = true;
-      const mustApprove = toolNeedsApproval(e.name, e.args as Record<string, unknown>);
-      if (!mustApprove) leaderToolQueue.push(e);
+      actedThisTurn = true;
+      if (!toolNeedsApproval(e.name, e.args as Record<string, unknown>)) {
+        toolQueue.push(e);
+      }
+      // Leaders' own destructive Bash: root PM has no parent to ask, just execute
     }
 
-    // Sending a message counts as acting — prevents auto-continuation from
-    // re-nudging the leader immediately after it sends a coordination message.
-    // Also forward leader→worker messages to the target worker's LLM.
     if (e.type === "message") {
-      leaderActedThisTurn = true;
+      actedThisTurn = true;
       if (e.to !== "user") {
         const target = agents.get(e.to);
         if (target instanceof HttpConvAgent) {
-          target.sendCommand({ type: "user.message", text: `[leader] ${e.text}` });
+          target.sendCommand({ type: "user.message", text: `[${opts.id}] ${e.text}` });
         } else {
-          // Target agent doesn't exist (e.g. after /resume, workers are gone).
-          // Bounce back immediately so leader doesn't silently hang.
           a.sendCommand({
             type: "user.message",
-            text: `[系统] 消息无法送达：agent "${e.to}" 不存在或已结束。请重新 spawn 该 worker，或 message→user 说明情况让用户决定下一步。`,
+            text: `[系统] 消息无法送达：agent "${e.to}" 不存在或已结束。请重新 spawn，或 message→user 说明情况。`,
           });
         }
       }
     }
 
-    // Agent idle → drain tool queue OR auto-continue if todos are pending
+    // Tech Lead completion — notify parent PM + ingest memory upward
+    if (e.type === "agent.done" && opts.parentId) {
+      const pmSec = secretaries.get("pm");
+      if (pmSec) pmSec.ingestChildMemory(secretary.getMemory() as any);
+      const parentAgent = agents.get(opts.parentId);
+      if (parentAgent instanceof HttpConvAgent) {
+        if (e.success) {
+          const evidenceLines = e.evidence?.length
+            ? "\n证据:\n" + e.evidence.map((s) => `  - ${s}`).join("\n") : "";
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[系统] ${opts.id} 成功完成${e.reason ? ": " + e.reason : ""}。${evidenceLines}\n请继续推进你的任务。`,
+          });
+        } else {
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[系统-失败] ${opts.id} 任务失败${e.reason ? ": " + e.reason : ""}。\n请立即 message→user 说明情况，并提供选项：\n① 重试 ② 换策略 ③ 放弃 ④ 人工介入`,
+          });
+        }
+      }
+    }
+
+    // unit.handup — forward to parent
+    if (e.type === "unit.handup" && opts.parentId) {
+      const parentAgent = agents.get(opts.parentId);
+      if (parentAgent instanceof HttpConvAgent) {
+        const findingLines = e.findings?.length
+          ? "\n发现:\n" + e.findings.map((f) => `  [${f.level}] ${f.text}`).join("\n") : "";
+        const failedLines = e.failed_acceptance?.length
+          ? "\n未达成: " + e.failed_acceptance.join("; ") : "";
+        parentAgent.sendCommand({
+          type: "user.message",
+          text: `[${opts.id} handup] 已完成: ${e.summary}${failedLines}${findingLines}`,
+        });
+      }
+    }
+
+    // Idle — drain tool queue or nudge
     if (e.type === "agent.state" && e.state === "idle") {
-      if (leaderToolQueue.length > 0) {
-        const batch = leaderToolQueue.splice(0);
+      if (toolQueue.length > 0) {
+        const batch = toolQueue.splice(0);
         setImmediate(async () => {
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
           for (let i = 0; i < batch.length; i++) {
             const { id } = batch[i]!;
             const { ok, output } = results[i]!;
-            applyEvent({ v: 1, type: "tool.result", agent: "leader", id, ok, output });
+            applyEvent({ v: 1, type: "tool.result", agent: opts.id, id, ok, output });
           }
           const combined = batch.map((c, i) =>
             `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
           ).join("\n\n");
           a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
-      } else if (leaderActedThisTurn) {
-        // Leader acted this turn — check for stale "run" todos that were never closed
-        const todos = getState().todosByAgent.get("leader") ?? [];
-        const hasRun  = todos.some((t) => t.state === "run");
+      } else if (actedThisTurn) {
+        const todos = getState().todosByAgent.get(opts.id) ?? [];
+        const hasRun = todos.some((t) => t.state === "run");
         const hasTodo = todos.some((t) => t.state === "todo");
         if (hasRun && !hasTodo) {
-          // All pending work was claimed as "run" and leader just reported — auto-close them
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
-          applyEvent({ v: 1, type: "todo.set", agent: "leader", items: closed as any });
+          applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
         }
-      } else if (!leaderActedThisTurn && !leaderGaveUp) {
-        // Leader planned (todo.set) but didn't act — nudge it to continue
-        const todos = getState().todosByAgent.get("leader") ?? [];
+      } else if (!actedThisTurn && !gaveUp) {
+        const todos = getState().todosByAgent.get(opts.id) ?? [];
         const hasPending = todos.some((t) => t.state === "todo" || t.state === "run");
-        if (hasPending && leaderContinuations < 3) {
-          leaderContinuations++;
+        if (hasPending && continuations < 3) {
+          continuations++;
           setImmediate(() => {
             a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call 或 spawn，不要只规划。" });
           });
         } else if (hasPending) {
-          // 3 nudges failed — alert user directly (leader has no parent)
-          leaderGaveUp = true;
-          const pendingTodos = todos
-            .filter((t) => t.state === "todo" || t.state === "run")
-            .map((t) => t.text)
-            .join("; ");
-          applyEvent({
-            v: 1, type: "message", agent: "leader", to: "user",
-            text: `⚠ leader 经过 3 次推进仍无有效行动。未完成项：${pendingTodos}。\n请选择：\n① 重试 — 输入新指令继续\n② 换策略 — 描述新方法\n③ 放弃 — 结束当前任务`,
-          });
+          gaveUp = true;
+          const pendingTodos = todos.filter((t) => t.state === "todo" || t.state === "run").map((t) => t.text).join("; ");
+          if (opts.parentId) {
+            const parentAgent = agents.get(opts.parentId);
+            if (parentAgent instanceof HttpConvAgent) {
+              parentAgent.sendCommand({
+                type: "user.message",
+                text: `[系统-卡住] ${opts.id} 经过 3 次推进仍无有效行动。未完成项：${pendingTodos}。\n请立即 message→user 说明情况。`,
+              });
+            }
+          } else {
+            applyEvent({
+              v: 1, type: "message", agent: opts.id, to: "user",
+              text: `⚠ ${opts.id} 经过 3 次推进仍无有效行动。未完成项：${pendingTodos}。\n请选择：\n① 重试 — 输入新指令\n② 换策略 — 描述新方法\n③ 放弃 — 结束当前任务`,
+            });
+          }
         } else {
-          leaderContinuations = 0;
+          continuations = 0;
         }
       }
     }
   });
+
   secretary.on("event", (e: TuiEvent) => applyEvent(e));
 
-  // S2: persist messages
   a.on("_raw_message", (m: { role: "user" | "assistant"; content: string }) => {
     secretary.observeMessage(m.role, m.content);
   });
 
-  a.sendCommand({ type: "user.message", text: initialPrompt });
+  // Set depth in store for non-root leaders
+  if (!isRoot) {
+    updateAgentInfo(opts.id, { depth, model });
+  }
+
+  // Build and send initial message
+  let initMsg = opts.firstMessage;
+  if (!initMsg) {
+    if (opts.goal && opts.dispatch) {
+      const parts: string[] = [`任务目标：${opts.goal}`];
+      if (opts.dispatch.background) parts.push(`背景：${opts.dispatch.background}`);
+      if (opts.dispatch.constraints?.length) parts.push(`约束：${opts.dispatch.constraints.join("；")}`);
+      if (opts.dispatch.acceptance_criteria?.length) parts.push(`验收标准：${opts.dispatch.acceptance_criteria.join("；")}`);
+      initMsg = parts.join("\n");
+    } else {
+      initMsg = opts.goal ?? "等待用户指令";
+    }
+  }
+  a.sendCommand({ type: "user.message", text: initMsg });
 }
 
 function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   if (agents.has(e.child)) return;
+
+  // Leader role: delegate to startLeaderAgent (Tech Lead pattern)
+  if (e.role === "Leader") {
+    const parentInfo = getState().agents.get(e.parent);
+    const parentDepth = parentInfo?.depth ?? 0;
+    const parentChain: string[] = [];
+    let cur = e.parent;
+    for (let i = 0; i < 10; i++) {
+      parentChain.unshift(cur);
+      const info = getState().agents.get(cur);
+      if (!info?.parent) break;
+      cur = info.parent;
+    }
+    startLeaderAgent({
+      id: e.child,
+      parentId: e.parent,
+      goal: e.goal,
+      // Tech Lead always uses the configured leader model — ignore whatever
+      // the LLM put in the spawn JSON (models may hallucinate claude model names)
+      model: undefined,
+      depth: parentDepth + 1,
+      parentChain,
+      dispatch: e.dispatch,
+      promptFile: "leader",
+    });
+    return;
+  }
 
   const cfg = loadConfig();
   const workerModel = e.model ?? cfg.agents.worker.model;
@@ -524,20 +670,19 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         const cmd = typeof ev.args === "object" && ev.args !== null
           ? String((ev.args as Record<string, unknown>).command ?? (ev.args as Record<string, unknown>).cmd ?? "")
           : "";
-        const leaderAgent = agents.get("leader");
-        if (leaderAgent instanceof HttpConvAgent) {
-          // Store in queue so leader's approval/rejection can resolve the tool.result
+        const approverAgent = findApproverLeader(e.child);
+        const approverId = getState().agents.get(e.parent)?.id ?? e.parent;
+        if (approverAgent) {
           leaderApprovalQueue.set(ev.id, {
             workerAgent: a, toolName: ev.name, toolArgs: ev.args, workerChildId: e.child,
           });
-          leaderAgent.sendCommand({
+          approverAgent.sendCommand({
             type: "user.message",
             text: `[系统-Bash审批 id=${ev.id}] ${e.child} 请求执行破坏性命令（goal: ${e.goal}）:\n\`${cmd}\`\n\n如在 goal 边界内，回复:\n{"v":1,"type":"tool.approved","id":"${ev.id}"}\n否则:\n{"v":1,"type":"tool.rejected","id":"${ev.id}","reason":"越界原因"}`,
           });
         } else {
-          // No leader available — reject immediately so worker doesn't hang
-          applyEvent({ v: 1, type: "tool.result", agent: e.child, id: ev.id, ok: false, output: "No leader available to approve this command" });
-          a.sendCommand({ type: "tool.result", id: ev.id, ok: false, output: "No leader available to approve this command" });
+          applyEvent({ v: 1, type: "tool.result", agent: e.child, id: ev.id, ok: false, output: `No approver leader found for ${approverId}` });
+          a.sendCommand({ type: "tool.result", id: ev.id, ok: false, output: `No approver leader found for ${approverId}` });
         }
       }
     }
@@ -629,7 +774,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
 
 // ── DEMO 模式 — 不调 claude,假发事件给你看 UI ──────────────────────────────
 function runDemo(initialPrompt: string) {
-  const id = "leader";
+  const id = "pm";
   const ev = (e: Partial<TuiEvent> & { type: TuiEvent["type"] }) =>
     applyEvent({ v: 1, agent: id, ...(e as any) });
 
@@ -657,17 +802,22 @@ function runDemo(initialPrompt: string) {
   } as any), 200);
   setTimeout(() => ev({ type: "step", text: "启动两个 worker" } as any), 400);
 
-  // spawn worker-1
+  // spawn tech-lead (PM → TL → workers pattern)
   setTimeout(() => ev({
-    type: "spawn", parent: "leader", child: "worker-1",
-    role: "Worker", goal: "读取 src/config.json 并报告配置含义", model: MODEL,
+    type: "spawn", parent: "pm", child: "tl-demo",
+    role: "Leader", goal: "管理配置文件读取和修改任务", model: MODEL,
   } as any), 600);
 
-  // spawn worker-2
-  setTimeout(() => ev({
-    type: "spawn", parent: "leader", child: "worker-2",
-    role: "Worker", goal: "修改 src/config.json 中 mode 字段为 production", model: MODEL,
+  // TL spawns workers
+  setTimeout(() => applyEvent({
+    v: 1, type: "spawn", agent: "tl-demo", parent: "tl-demo", child: "worker-1",
+    role: "Worker", goal: "读取 src/config.json 并报告配置含义", model: MODEL,
   } as any), 900);
+
+  setTimeout(() => applyEvent({
+    v: 1, type: "spawn", agent: "tl-demo", parent: "tl-demo", child: "worker-2",
+    role: "Worker", goal: "修改 src/config.json 中 mode 字段为 production", model: MODEL,
+  } as any), 1100);
 
   // Phase 2: worker-1 执行
   setTimeout(() => applyEvent({
@@ -728,7 +878,7 @@ function runDemo(initialPrompt: string) {
   } as any), 4400);
   setTimeout(() => ev({ type: "step", text: "汇总两个 worker 结果" } as any), 4600);
   setTimeout(() => ev({
-    type: "message", agent: "leader", to: "user",
+    type: "message", agent: "pm", to: "user",
     text: `✅ 并行任务完成\n` +
       `- worker-1: 读取 src/config.json 成功（mode=development, port=3000, debug=true）\n` +
       `- worker-2: 已将 mode 修改为 production\n` +
@@ -790,50 +940,75 @@ function App() {
 
   const COMMANDS: CmdDef[] = [
     { name: "pause",   desc: "kill the selected agent",     handler: () => { const sel = getState().selectedAgent; agents.get(sel)?.kill(); } },
-    { name: "resume",  desc: "/resume [agentId] — resume from memory", handler: (args) => {
-      const id = args[0] ?? "leader";
-      const mem = loadMemory(id);
-      if (!mem) {
-        applyEvent({ v: 1, type: "message", agent: "leader", to: "user", text: `No memory found for ${id}` });
+    { name: "sessions", desc: "列出所有未完成会话及 session hash", handler: () => {
+      const sessions = listUnfinishedAgents();
+      if (sessions.length === 0) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: "✅ 无未完成会话" });
         return;
       }
-      // Kill existing instance if any, reset scroll so the new session starts at bottom
+      const lines = sessions.map((m) => {
+        const hash = m.session_hash ?? "???????";
+        const when = new Date(m.created_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+        const goal = m.dispatch.background.slice(0, 55);
+        return `[${hash}] ${m.agent_id.slice(0, 20)} | ${goal} | ${when}`;
+      }).join("\n");
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `📋 未完成会话 (${sessions.length}):\n${lines}\n\n/resume <agentId|hash> 恢复` });
+    } },
+    { name: "fanout", desc: "/fanout [N] — 查看/设置最大并发子节点数 (1-16)", handler: (args) => {
+      if (!args[0]) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `当前 maxFanout=${pm.getMaxFanout()}，用 /fanout <N> 修改（1-16）` });
+        return;
+      }
+      const n = parseInt(args[0], 10);
+      if (isNaN(n) || n < 1 || n > 16) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: "maxFanout 必须在 1-16 之间" });
+        return;
+      }
+      pm.setFanout(n);
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `maxFanout 已更新为 ${n}` });
+    } },
+    { name: "resume",  desc: "/resume [agentId|hash] — resume from memory", handler: (args) => {
+      const input = args[0] ?? "pm";
+      const mem = loadMemory(input) ?? loadMemoryByHash(input);
+      if (!mem) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: `未找到 "${input}" 的记忆。输入 /sessions 查看可用会话。` });
+        return;
+      }
+      const id = mem.agent_id;
       agents.get(id)?.kill?.();
       selectAgent(id);
-      applyEvent({ v: 1, type: "message", agent: "leader", to: "user",
-        text: `Resuming ${id} from last checkpoint` });
-      if (id === "leader") {
-        // Find which child agents were alive at the time of the snapshot but
-        // are NOT currently running — leader needs to know they're gone so it
-        // can re-spawn or re-plan rather than messaging non-existent agents.
-        const deadWorkers = (mem.parent_chain ?? [])
-          .concat(
-            // also scan .spawn directory for children of leader
-            listUnfinishedAgents()
-              .filter((m) => m.parent_chain?.includes("leader"))
-              .map((m) => m.agent_id),
-          )
-          .filter((wid, i, arr) => arr.indexOf(wid) === i) // unique
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `Resuming ${id} (hash: ${mem.session_hash ?? "?"}) from last checkpoint` });
+      const isRootAgent = mem.agent_type === "PM" || id === "pm";
+      if (isRootAgent) {
+        const deadWorkers = listUnfinishedAgents()
+          .filter((m) => m.parent_chain?.includes(id))
+          .map((m) => m.agent_id)
           .filter((wid) => !agents.has(wid));
-
         const deadNote = deadWorkers.length > 0
-          ? `\n\n⚠️ 以下 worker 在上次会话中存在，当前已不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划，不要向它们发消息。`
+          ? `\n\n⚠️ 以下 agent 在上次会话中存在，当前已不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划。`
           : "";
-
         const resumeHint = (mem.tombstone.resume_hint ?? "Resume from last checkpoint") + deadNote;
-        leaderStarted.current = false;
-        startLeader(resumeHint, id);
-        leaderStarted.current = true;
+        pmStarted.current = false;
+        startLeaderAgent({ id, firstMessage: resumeHint, resumedMemoryId: id, promptFile: isRootAgent ? "pm" : "leader" });
+        pmStarted.current = true;
+      } else if (mem.agent_type === "LEADER") {
+        const parentId = mem.parent_chain[mem.parent_chain.length - 1] ?? "pm";
+        const spawnEv: Extract<TuiEvent, { type: "spawn" }> = {
+          v: 1, type: "spawn", parent: parentId, child: id,
+          role: "Leader", goal: mem.dispatch.background, dispatch: mem.dispatch,
+        };
+        applyEvent(spawnEv);
+        startWorker(spawnEv);
       } else {
-        // Worker resume: re-send goal with memory context
-        const parentId = mem.parent_chain[mem.parent_chain.length - 1] ?? "leader";
-        applyEvent({ v: 1, type: "message", agent: "leader", to: "user",
+        const parentId = mem.parent_chain[mem.parent_chain.length - 1] ?? "pm";
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
           text: `Resuming worker ${id} (parent: ${parentId}, goal: ${mem.dispatch.background.slice(0, 80)})` });
         const spawnEv: Extract<TuiEvent, { type: "spawn" }> = {
           v: 1, type: "spawn", parent: parentId, child: id,
           role: mem.identity.role_name === "SECRETARY" ? "Secretary" : "Worker",
-          goal: mem.dispatch.background,
-          dispatch: mem.dispatch,
+          goal: mem.dispatch.background, dispatch: mem.dispatch,
         };
         applyEvent(spawnEv);
         startWorker(spawnEv);
@@ -849,38 +1024,19 @@ function App() {
       const base = PROVIDER_PRESETS[preset] ?? { provider: "openai" as const, baseUrl: preset };
       const cfg: ProviderConfig = { ...base, model, apiKey };
       saveAgentConfig(role as "leader" | "secretary" | "worker", cfg);
-      updateAgentInfo(role, { model });
-      if (role === "leader") {
-        agents.get("leader")?.kill?.();
-        const a = new HttpConvAgent({ id: "leader", role: "Leader", providerCfg: cfg, systemPrompt: buildSystemPrompt("Leader", "leader") });
-        agents.set("leader", a);
-        a.on("event", (ev: TuiEvent) => {
-          applyEvent(ev);
-          pm.observe(ev);
-          secretaries.get("leader")?.observe(ev);
-          if (ev.type === "spawn") {
-            const parentRole = getState().agents.get(ev.parent)?.role;
-            const check = pm.preCheckSpawn(ev, parentRole);
-            if (!check.ok) { applyEvent({ v: 1, type: "agent.error", agent: ev.parent, code: check.code, detail: check.detail }); return; }
-            startWorker(ev);
-          }
-        });
-        a.on("_raw_message", (m: { role: "user" | "assistant"; content: string }) => {
-          secretaries.get("leader")?.observeMessage(m.role, m.content);
-        });
-      }
-      applyEvent({ v: 1, type: "message", agent: "leader", to: "user",
+      if (role === "leader") updateAgentInfo("pm", { model });
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
         text: `${role} 已连接 ${preset} / ${model} ✓`, } as TuiEvent);
     } },
-    { name: "pm",      desc: "/pm [ack <code>] — PM 告警面板", handler: (args) => {
+    { name: "alerts",  desc: "/alerts [ack <code>] — PM 告警面板", handler: (args) => {
       if (args[0] === "ack" && args[1]) { pm.ackAlert(args[1]); return; }
       const alerts = pm.getUnacked();
       if (alerts.length === 0) {
-        applyEvent({ v: 1, type: "message", agent: "leader", to: "user", text: "✅ PM: 无未确认告警" });
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: "✅ 无未确认告警" });
         return;
       }
       const text = alerts.map((a) => `[${a.severity}] ${a.code} @ ${a.agent}: ${a.detail}`).join("\n");
-      applyEvent({ v: 1, type: "message", agent: "leader", to: "user", text: `📊 PM 告警 (${alerts.length} 条):\n${text}\n\n/pm ack <code> 确认` });
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `📊 告警 (${alerts.length} 条):\n${text}\n\n/alerts ack <code> 确认` });
     } },
     { name: "quit",    desc: "exit the TUI",                handler: () => process.exit(0) },
   ];
@@ -896,7 +1052,7 @@ function App() {
     ? COMMANDS.filter((c) => c.name.startsWith(input.slice(1).split(/\s+/)[0]!))
     : [];
 
-  const leaderStarted = useRef(false);
+  const pmStarted = useRef(false);
 
   const dispatchUser = (raw: string) => {
     const text = raw.trim();
@@ -909,10 +1065,10 @@ function App() {
     let body = text;
     if (m) { target = m[1]!; body = m[2]!; selectAgent(target); }
 
-    if (target === "leader" && !leaderStarted.current) {
-      userMessage("leader", body);
-      leaderStarted.current = true;
-      startLeader(body);
+    if (target === "pm" && !pmStarted.current) {
+      userMessage("pm", body);
+      pmStarted.current = true;
+      startLeaderAgent({ id: "pm", firstMessage: body, promptFile: "pm" });
       return;
     }
 
@@ -925,15 +1081,18 @@ function App() {
     a.sendCommand({ type: "user.message", text: body });
   };
 
-  // 启动: 注册 leader 占位 + 检查未完成会话
+  // 启动: 注册 PM + process-monitor 占位，检查未完成会话
   useEffect(() => {
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "idle", sub: "waiting for first message", model: loadConfig().agents.leader.model });
+    const cfg = loadConfig();
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle", sub: "waiting for first message", model: cfg.agents.leader.model });
+    // process-monitor: visual representation of the TypeScript ProcessManager in the agent tree
+    ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "run", sub: "supervising", model: "internal" });
     // S3: notify user of unfinished sessions
     const unfinished = listUnfinishedAgents();
     if (unfinished.length > 0) {
-      const names = unfinished.map((m) => m.agent_id).join(", ");
-      applyEvent({ v: 1, type: "message", agent: "leader", to: "user",
-        text: `📋 发现 ${unfinished.length} 个未完成会话: ${names}\n输入 /resume [agentId] 恢复，或直接发消息开始新会话。`,
+      const lines = unfinished.map((m) => `[${m.session_hash ?? "???????"}] ${m.agent_id}`).join(", ");
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `📋 发现 ${unfinished.length} 个未完成会话: ${lines}\n/sessions 查看详情，/resume <hash|agentId> 恢复。`,
       });
     }
   }, []);
@@ -1077,9 +1236,15 @@ function App() {
       }
       if (char === "F") {
         const selId = getState().selectedAgent;
-        const child = `worker-${Date.now().toString(36).slice(-4)}`;
+        const selInfo = getState().agents.get(selId);
+        // F forks a Tech Lead from PM, or a Worker from a Tech Lead
+        const isLeaderLevel = !selInfo?.parent || selId === "pm";
+        const child = isLeaderLevel
+          ? `tl-${Date.now().toString(36).slice(-4)}`
+          : `worker-${Date.now().toString(36).slice(-4)}`;
+        const role: "Leader" | "Worker" = isLeaderLevel ? "Leader" : "Worker";
         const spawnEv: Extract<TuiEvent, { type: "spawn" }> = {
-          v: 1, type: "spawn", parent: selId, child, role: "Worker",
+          v: 1, type: "spawn", parent: selId, child, role,
           goal: "(awaiting instructions — type your task)",
           dispatch: { background: `Forked from ${selId} by user`, constraints: [],
             acceptance_criteria: ["agent.done"], stop_conditions: ["agent.done"] },

@@ -31,13 +31,14 @@ interface AgentStats {
 const NO_PROGRESS_MS  = 5 * 60 * 1000;
 const LOOP_WINDOW     = 100;
 const LOOP_THRESHOLD  = 10;
-const MAX_DEPTH       = 3;
-const MAX_FANOUT      = 4;
+const MAX_DEPTH       = 4;
+const DEFAULT_FANOUT  = 4;
 
 export class ProcessManager extends EventEmitter {
   private stats = new Map<string, AgentStats>();
   private alerts: PMAlert[] = [];
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private maxFanout = DEFAULT_FANOUT;
 
   constructor() {
     super();
@@ -47,6 +48,12 @@ export class ProcessManager extends EventEmitter {
   }
 
   // ── 同步阻断（在 startWorker 入口调用）─────────────────────────────────────
+
+  setFanout(n: number): void {
+    this.maxFanout = Math.max(1, Math.min(16, n));
+  }
+
+  getMaxFanout(): number { return this.maxFanout; }
 
   preCheckSpawn(
     ev: Extract<TuiEvent, { type: "spawn" }>,
@@ -58,6 +65,18 @@ export class ProcessManager extends EventEmitter {
     if (parentRole === "Worker") {
       return this.reject("worker_cannot_spawn", ev.parent,
         `Worker ${ev.parent} 尝试 spawn —— Worker 只能 handup，由 Leader 决定是否二次 spawn`);
+    }
+
+    // 深度 0 (PM) 只能 spawn Leader 或 Secretary — 不能直接 spawn Worker
+    const parentDepthNow = this.getDepth(ev.parent);
+    if (parentDepthNow === 0 && ev.role === "Worker") {
+      return this.reject("pm_cannot_spawn_worker", ev.parent,
+        `PM (depth=0) 不能直接 spawn Worker — 先 spawn Tech Lead (role:"Leader")，再由 Tech Lead spawn Worker`);
+    }
+    // depth ≥ 2 不能 spawn Leader
+    if (parentDepthNow >= 2 && ev.role === "Leader") {
+      return this.reject("depth_role_violation", ev.parent,
+        `depth=${parentDepthNow} 的 agent 不能 spawn Leader（只有 PM 可以）`);
     }
 
     // dispatch 必须携带且字段完整
@@ -85,11 +104,11 @@ export class ProcessManager extends EventEmitter {
         `spawn ${ev.child}: 深度 ${parentDepth + 1} 超过最大允许深度 ${MAX_DEPTH}`);
     }
 
-    // 扇出限制
+    // 扇出限制（使用可配置的 maxFanout）
     const runningChildren = this.countRunningChildren(ev.parent);
-    if (runningChildren >= MAX_FANOUT) {
+    if (runningChildren >= this.maxFanout) {
       return this.reject("fanout_exceeded", ev.parent,
-        `spawn ${ev.child}: ${ev.parent} 已有 ${runningChildren} 个 RUNNING 子节点（上限 ${MAX_FANOUT}）`);
+        `spawn ${ev.child}: ${ev.parent} 已有 ${runningChildren} 个 RUNNING 子节点（上限 ${this.maxFanout}）`);
     }
 
     // 重复 goal 检测

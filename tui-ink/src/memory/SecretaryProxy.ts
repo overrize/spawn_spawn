@@ -182,6 +182,31 @@ export class SecretaryProxy extends EventEmitter {
 
   getMemory(): Readonly<AgentMemory> { return this.memory; }
 
+  /**
+   * PM-Secretary calls this when a child Leader (Tech Lead) completes.
+   * Pulls the TL's top facts/decisions up into PM's working_set so PM
+   * has cross-task context without reading every child file.
+   */
+  ingestChildMemory(childMem: AgentMemory): void {
+    if (this.destroyed) return;
+    for (const f of childMem.working_set.facts.slice(-5)) {
+      this.addFact({
+        id: `f${++this.factSeq}`,
+        text: `[${childMem.agent_id}] ${f.text}`,
+        src: `handup:${childMem.agent_id}`,
+        ts: Date.now(),
+      });
+    }
+    for (const d of childMem.working_set.decisions.slice(-3)) {
+      this.addDecision({
+        id: `d${++this.decisionSeq}`,
+        text: `[${childMem.agent_id}] ${d.text}`,
+        rationale: d.rationale,
+        ts: Date.now(),
+      });
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
     this.stopTimer();

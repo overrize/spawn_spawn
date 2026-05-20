@@ -72,7 +72,7 @@ export type TuiEvent =
   | { v: 1; type: "message"; agent: string; to: string; text: string }
   | {
       v: 1; type: "spawn"; parent: string; child: string;
-      role: "Secretary" | "Worker"; goal: string; model?: string;
+      role: "Secretary" | "Worker" | "Leader"; goal: string; model?: string;
       dispatch?: DispatchSpec; // S1: full dispatch spec
     }
   | { v: 1; type: "agent.done"; agent: string; success: boolean; reason?: string; evidence?: string[] }

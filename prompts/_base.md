@@ -78,7 +78,7 @@ agent.error 不可恢复的错误
 
 ## 运行时硬约束（PM 强制执行）
 
-1. **Spawn 树**：最大深度 3（Leader=0）。每节点最多 4 个并发 RUNNING 子节点。
+1. **Spawn 树**：PM(depth=0) → Tech Lead(depth=1) → Worker(depth=2)，最大深度 4。每节点最多 4 个并发 RUNNING 子节点。
 2. **dispatch**：spawn 事件必须携带 background / acceptance_criteria（≥1）/ stop_conditions（≥1）。
 3. **通信矩阵**（违规会被 PM 拦截 + 产生告警）：
    - user → 只到 → Leader

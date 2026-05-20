@@ -64,8 +64,9 @@ beforeEach(() => _resetForTest());
 describe("ProcessManager — preCheckSpawn", () => {
   it("Worker 尝试 spawn → worker_cannot_spawn 拒绝", () => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
-    ensureAgent({ id: "w1", name: "w1", role: "Worker", state: "run", parent: "leader" });
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
+    ensureAgent({ id: "w1", name: "w1", role: "Worker", state: "run", parent: "tl-01" });
 
     const ev: Extract<TuiEvent, { type: "spawn" }> = {
       v: 1, type: "spawn", parent: "w1", child: "w1-child",
@@ -82,10 +83,12 @@ describe("ProcessManager — preCheckSpawn", () => {
 
   it("缺少 dispatch → dispatch_missing 拒绝", () => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
+    // Tech Lead (depth=1) can spawn Workers — use tl-01 under pm
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
 
     const ev = {
-      v: 1 as const, type: "spawn" as const, parent: "leader", child: "w1",
+      v: 1 as const, type: "spawn" as const, parent: "tl-01", child: "w1",
       role: "Worker" as const, goal: "task",
       // dispatch 故意缺失
     } as Extract<TuiEvent, { type: "spawn" }>;
@@ -97,10 +100,11 @@ describe("ProcessManager — preCheckSpawn", () => {
 
   it("dispatch background 为空 → dispatch_missing_background 拒绝", () => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
 
     const ev: Extract<TuiEvent, { type: "spawn" }> = {
-      v: 1, type: "spawn", parent: "leader", child: "w1",
+      v: 1, type: "spawn", parent: "tl-01", child: "w1",
       role: "Worker", goal: "task",
       dispatch: { background: "", constraints: [], acceptance_criteria: ["done"], stop_conditions: ["agent.done"] },
     };
@@ -112,10 +116,11 @@ describe("ProcessManager — preCheckSpawn", () => {
 
   it("acceptance_criteria 为空数组 → dispatch_missing_acceptance 拒绝", () => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
 
     const ev: Extract<TuiEvent, { type: "spawn" }> = {
-      v: 1, type: "spawn", parent: "leader", child: "w1",
+      v: 1, type: "spawn", parent: "tl-01", child: "w1",
       role: "Worker", goal: "task",
       dispatch: { background: "bg", constraints: [], acceptance_criteria: [], stop_conditions: ["agent.done"] },
     };
@@ -127,11 +132,12 @@ describe("ProcessManager — preCheckSpawn", () => {
 
   it("深度超限 → depth_exceeded 拒绝", () => {
     const pm = new ProcessManager();
-    // Leader(0) → w1(1) → w2(2) → w3(3) → w4 would be depth 4 > max 3
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
-    ensureAgent({ id: "w1", name: "w1", role: "Worker", state: "run", parent: "leader" });
-    ensureAgent({ id: "w2", name: "w2", role: "Worker", state: "run", parent: "w1" });
-    ensureAgent({ id: "w3", name: "w3", role: "Worker", state: "run", parent: "w2" });
+    // pm(0) → tl(1) → w1(2) → w2(3) → w3(4) > MAX_DEPTH=4 → reject
+    ensureAgent({ id: "pm",  name: "pm",  role: "Leader", state: "run" });
+    ensureAgent({ id: "tl",  name: "tl",  role: "Leader", state: "run", parent: "pm" });
+    ensureAgent({ id: "w1",  name: "w1",  role: "Worker", state: "run", parent: "tl" });
+    ensureAgent({ id: "w2",  name: "w2",  role: "Worker", state: "run", parent: "w1" });
+    ensureAgent({ id: "w3",  name: "w3",  role: "Worker", state: "run", parent: "w2" });
 
     const ev: Extract<TuiEvent, { type: "spawn" }> = {
       v: 1, type: "spawn", parent: "w3", child: "w4",
@@ -146,14 +152,15 @@ describe("ProcessManager — preCheckSpawn", () => {
 
   it("fan-out 超限 → fanout_exceeded 拒绝", () => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
-    // 4 already running children
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
+    // 4 already running children of tl-01
     for (let i = 1; i <= 4; i++) {
-      ensureAgent({ id: `w${i}`, name: `w${i}`, role: "Worker", state: "run", parent: "leader" });
+      ensureAgent({ id: `w${i}`, name: `w${i}`, role: "Worker", state: "run", parent: "tl-01" });
     }
 
     const ev: Extract<TuiEvent, { type: "spawn" }> = {
-      v: 1, type: "spawn", parent: "leader", child: "w5",
+      v: 1, type: "spawn", parent: "tl-01", child: "w5",
       role: "Worker", goal: "task",
       dispatch: { background: "bg", constraints: [], acceptance_criteria: ["done"], stop_conditions: ["agent.done"] },
     };
@@ -165,10 +172,11 @@ describe("ProcessManager — preCheckSpawn", () => {
 
   it("dispatch 完整且深度/fan-out 合法 → ok", () => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
 
     const ev: Extract<TuiEvent, { type: "spawn" }> = {
-      v: 1, type: "spawn", parent: "leader", child: "worker-01",
+      v: 1, type: "spawn", parent: "tl-01", child: "worker-01",
       role: "Worker", goal: "分析 README",
       dispatch: {
         background: "用户需要了解项目结构",
@@ -448,10 +456,12 @@ describe("HttpConvAgent — mock SSE 服务器集成", () => {
 describe("PM + SecretaryProxy 协同", () => {
   it("完整 spawn → memory 创建 → agent.done → tombstone 链路", (_, done) => {
     const pm = new ProcessManager();
-    ensureAgent({ id: "leader", name: "leader", role: "Leader", state: "run" });
+    // Use PM → Tech Lead → Worker hierarchy
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "run" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run", parent: "pm" });
 
     const spawnEv: Extract<TuiEvent, { type: "spawn" }> = {
-      v: 1, type: "spawn", parent: "leader", child: "w-full",
+      v: 1, type: "spawn", parent: "tl-01", child: "w-full",
       role: "Worker", goal: "读取配置文件",
       dispatch: {
         background: "需要读取项目配置",
@@ -461,7 +471,7 @@ describe("PM + SecretaryProxy 协同", () => {
       },
     };
 
-    // PM 验证通过
+    // PM 验证通过（Tech Lead depth=1 可以 spawn Worker）
     const check = pm.preCheckSpawn(spawnEv, "Leader");
     assert.equal(check.ok, true, "spawn 应被 PM 允许");
 
@@ -471,8 +481,8 @@ describe("PM + SecretaryProxy 协同", () => {
     const mem = createMemory({
       agentId: "w-full",
       agentType: "WORKER",
-      parentChain: ["leader"],
-      depth: 1,
+      parentChain: ["pm", "tl-01"],
+      depth: 2,
       model: "test",
       roleName: "Worker",
       dispatch: spawnEv.dispatch,

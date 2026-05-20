@@ -38,7 +38,8 @@ export interface Tombstone {
 export interface AgentMemory {
   schema_version: 1;
   agent_id: string;
-  agent_type: "LEADER" | "SECRETARY" | "WORKER";
+  agent_type: "PM" | "LEADER" | "SECRETARY" | "WORKER";
+  session_hash?: string;  // 7-char hex for /resume <hash>
   parent_chain: string[];
   depth: number;
   created_at: number;

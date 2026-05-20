@@ -25,7 +25,7 @@ interface State {
 
 const state: State = {
   agents: new Map(),
-  selectedAgent: "leader",
+  selectedAgent: "pm",
   messagesByAgent: new Map(),
   todosByAgent: new Map(),
   stepByAgent: new Map(),
@@ -201,7 +201,7 @@ export function applyEvent(e: TuiEvent) {
         text: `${e.name}(${shortArgs(e.args)})`,
         tool_name: e.name, tool_args: e.args, tool_id: e.id,
         needs_approval: !!e.needs_approval, approved: !e.needs_approval,
-        level: e.needs_approval ? "warn" : "info",
+        level: e.needs_approval ? "warn" : "debug",
       };
       const list = state.messagesByAgent.get(e.agent) ?? [];
       list.push(m);
@@ -214,7 +214,7 @@ export function applyEvent(e: TuiEvent) {
         agent: e.agent, to: "user", kind: "tool_result",
         text: `→ ${e.ok ? "✓" : "✗"} ${e.output.slice(0, 160)}`,
         tool_id: e.id,
-        level: e.ok ? "info" : "error",
+        level: e.ok ? "debug" : "error",
       });
       break;
     case "spawn": {
@@ -317,7 +317,7 @@ function shortArgs(args: unknown): string {
 
 export function _resetForTest(): void {
   state.agents.clear();
-  state.selectedAgent = "leader";
+  state.selectedAgent = "pm";
   state.messagesByAgent.clear();
   state.todosByAgent.clear();
   state.stepByAgent.clear();
