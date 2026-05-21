@@ -35,7 +35,7 @@ import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
 import type { PaletteName, ProviderConfig } from "./config.js";
 import { SecretaryProxy } from "./memory/SecretaryProxy.js";
-import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, memoryPath, messagesPath } from "./memory/MemoryStore.js";
+import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, deleteAgentMemory } from "./memory/MemoryStore.js";
 import { ProcessManager } from "./pm/ProcessManager.js";
 import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/registry.js";
 import type { AgentRole } from "./tools/registry.js";
@@ -344,9 +344,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           });
         }
       }
-      // Cleanup: delete memory files on normal completion (no resume needed)
-      try { fs.unlinkSync(memoryPath(opts.id)); } catch { /* already gone */ }
-      try { fs.unlinkSync(messagesPath(opts.id)); } catch { /* already gone */ }
+      deleteAgentMemory(opts.id);
     }
 
     // unit.handup — forward to parent
@@ -638,9 +636,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           });
         }
       }
-      // Cleanup: delete worker memory files on completion
-      try { fs.unlinkSync(memoryPath(e.child)); } catch { /* already gone */ }
-      try { fs.unlinkSync(messagesPath(e.child)); } catch { /* already gone */ }
+      deleteAgentMemory(e.child);
     }
     if (ev.type === "unit.handup") {
       const parentAgent = agents.get(e.parent);

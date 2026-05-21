@@ -104,6 +104,12 @@ export function listUnfinishedAgents(): AgentMemory[] {
   } catch { return []; }
 }
 
+/** agent.done 后删除 memory 文件（completed sessions don't need to persist） */
+export function deleteAgentMemory(agentId: string): void {
+  try { fs.unlinkSync(memoryPath(agentId)); } catch { /* already gone */ }
+  try { fs.unlinkSync(messagesPath(agentId)); } catch { /* already gone */ }
+}
+
 /** 追加 btw 提醒到 reminders.json */
 export function appendReminder(text: string, ts: number): void {
   ensureMemoryDir();
