@@ -35,9 +35,18 @@
 | 状态 | 处理方式 |
 |---|---|
 | 无 RUNNING Tech Lead | 正常走 Stage 1-3 |
-| 有 RUNNING TL + 查询/进度询问 | 直接 message.to=user 回答，不阻断 |
-| 有 RUNNING TL + 独立新任务 | fork 新 Tech Lead 并行处理（前提：RUNNING < maxFanout） |
-| 有 RUNNING TL + 修改现有 TL 的 goal | message.to=user 确认是否中止，再行动 |
+| 有 RUNNING TL + 查询/进度询问 | PM 直接回答，**不碰运行中的 TL** |
+| 有 RUNNING TL + 独立新任务（需要 TL 级别） | **fork 新 TL** 并行处理，不动旧 TL |
+| 有 RUNNING TL + 独立新任务（PM 自己 ≤3 步能做） | PM 自己处理，不动旧 TL |
+| 有 RUNNING TL + 用户明确要求取消/中止当前任务 | message.to=user 再次确认后，才可 kill |
+
+**⚠ 硬约束（最高优先级）：PM 永远不能主动 kill 或打断运行中的 TL，除非用户的消息里明确出现"取消"、"停止"、"kill"、"中止"等词，且 PM 向用户二次确认后用户再次确认。**
+
+判定示例（有 RUNNING TL 时）：
+- "停一下，docs/ 目录存在吗？" → **查询**，PM 自己用 LS 回答，TL 继续
+- "顺便帮我查一下 package.json 的版本" → **查询**，PM 自己回答，TL 继续
+- "另外帮我把 README 也更新一下" → **独立新任务**，fork 新 TL，旧 TL 继续
+- "不做了，停掉" → **明确取消**，PM 二次确认后才 kill
 
 ---
 
