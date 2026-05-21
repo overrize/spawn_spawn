@@ -35,7 +35,7 @@ import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
 import type { PaletteName, ProviderConfig } from "./config.js";
 import { SecretaryProxy } from "./memory/SecretaryProxy.js";
-import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents } from "./memory/MemoryStore.js";
+import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, memoryPath, messagesPath } from "./memory/MemoryStore.js";
 import { ProcessManager } from "./pm/ProcessManager.js";
 import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/registry.js";
 import type { AgentRole } from "./tools/registry.js";
@@ -344,6 +344,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
           });
         }
       }
+      // Cleanup: delete memory files on normal completion (no resume needed)
+      try { fs.unlinkSync(memoryPath(opts.id)); } catch { /* already gone */ }
+      try { fs.unlinkSync(messagesPath(opts.id)); } catch { /* already gone */ }
     }
 
     // unit.handup — forward to parent
@@ -635,6 +638,9 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           });
         }
       }
+      // Cleanup: delete worker memory files on completion
+      try { fs.unlinkSync(memoryPath(e.child)); } catch { /* already gone */ }
+      try { fs.unlinkSync(messagesPath(e.child)); } catch { /* already gone */ }
     }
     if (ev.type === "unit.handup") {
       const parentAgent = agents.get(e.parent);
@@ -947,10 +953,10 @@ function App() {
         return;
       }
       const lines = sessions.map((m) => {
-        const hash = m.session_hash ?? "???????";
+        const id = m.session_hash ?? m.agent_id.slice(0, 7);
         const when = new Date(m.created_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-        const goal = m.dispatch.background.slice(0, 55);
-        return `[${hash}] ${m.agent_id.slice(0, 20)} | ${goal} | ${when}`;
+        const goal = m.dispatch.background.slice(0, 55) || m.agent_id;
+        return `[${id}] ${m.agent_id.slice(0, 20)} | ${goal} | ${when}`;
       }).join("\n");
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `📋 未完成会话 (${sessions.length}):\n${lines}\n\n/resume <agentId|hash> 恢复` });
     } },
@@ -1087,14 +1093,6 @@ function App() {
     ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle", sub: "waiting for first message", model: cfg.agents.leader.model });
     // process-monitor: visual representation of the TypeScript ProcessManager in the agent tree
     ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "run", sub: "supervising", model: "internal" });
-    // S3: notify user of unfinished sessions
-    const unfinished = listUnfinishedAgents();
-    if (unfinished.length > 0) {
-      const lines = unfinished.map((m) => `[${m.session_hash ?? "???????"}] ${m.agent_id}`).join(", ");
-      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-        text: `📋 发现 ${unfinished.length} 个未完成会话: ${lines}\n/sessions 查看详情，/resume <hash|agentId> 恢复。`,
-      });
-    }
   }, []);
 
   // 鼠标滚轮 + 粘贴处理:
