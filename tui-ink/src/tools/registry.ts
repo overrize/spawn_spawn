@@ -151,6 +151,9 @@ const Grep: ToolDef = {
       const out = String(execSync(cmd, { encoding: "utf8", timeout: 10_000, cwd: process.cwd() }));
       return ok(out.slice(0, 20_000) || "(no matches)");
     } catch (e: any) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        return err("ripgrep (rg) not found — install it or use Bash with 'findstr' / 'Select-String' instead");
+      }
       return ok((String(e.stdout ?? "")).slice(0, 20_000) || "(no matches)");
     }
   },
@@ -173,6 +176,9 @@ const Glob: ToolDef = {
       const sorted = out.trim().split("\n").filter(Boolean).sort().join("\n");
       return ok(sorted.slice(0, 20_000) || "(no files)");
     } catch (e: any) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        return err("ripgrep (rg) not found — install it or use Bash with 'dir /s' (Windows) / 'find' (Unix) instead");
+      }
       return ok((String(e.stdout ?? "")).slice(0, 20_000) || "(no files)");
     }
   },
