@@ -9,8 +9,9 @@ import * as os from "node:os";
 
 import { executeTool, toolNeedsApproval, getToolsForRole } from "../tools/registry.js";
 import {
-  createMemory, saveMemory, deleteAgentMemory, appendMessage, loadMessages,
-  memoryPath, messagesPath, ensureMemoryDir, MESSAGES_WINDOW,
+  createMemory, saveMemory, deleteAgentMemory,
+  startSession, appendMessage, loadMessages, loadSessions,
+  memoryPath, messagesPath, sessionsPath, ensureMemoryDir, MAX_SESSIONS,
 } from "../memory/MemoryStore.js";
 
 let tmpDir: string;
@@ -170,41 +171,71 @@ describe("executeTool — unknown tool", () => {
   });
 });
 
-// ── appendMessage — sliding window ──────────────────────────────────────────
+// ── Session-based message history ───────────────────────────────────────────
 
-describe("appendMessage — sliding window (depth=" + MESSAGES_WINDOW + ")", () => {
-  it("keeps all messages while under the window", () => {
-    for (let i = 0; i < MESSAGES_WINDOW; i++) {
-      appendMessage("win-agent", { role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}`, ts: i });
+describe("session history — all messages preserved within session", () => {
+  it("startSession creates a new session entry", () => {
+    startSession("sess-basic", "abc1234");
+    const sessions = loadSessions("sess-basic");
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].session_hash, "abc1234");
+    assert.equal(sessions[0].messages.length, 0);
+  });
+
+  it("appendMessage keeps ALL messages within a session (no truncation)", () => {
+    startSession("sess-full", "hash01");
+    const N = 20;
+    for (let i = 0; i < N; i++) {
+      appendMessage("sess-full", { role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}`, ts: i });
     }
-    const msgs = loadMessages("win-agent");
-    assert.equal(msgs.length, MESSAGES_WINDOW);
+    const msgs = loadMessages("sess-full");
+    assert.equal(msgs.length, N, "all messages must be preserved within a session");
     assert.equal(msgs[0].content, "msg-0");
+    assert.equal(msgs[N - 1].content, `msg-${N - 1}`);
   });
 
-  it("evicts oldest when window is exceeded", () => {
-    const extra = 3;
-    for (let i = 0; i < MESSAGES_WINDOW + extra; i++) {
-      appendMessage("win-evict", { role: "user", content: `msg-${i}`, ts: i });
+  it(`evicts oldest session when more than MAX_SESSIONS (${MAX_SESSIONS}) start`, () => {
+    const id = "sess-evict";
+    for (let s = 0; s < MAX_SESSIONS + 2; s++) {
+      startSession(id, `hash-${s}`);
+      appendMessage(id, { role: "user", content: `session-${s}-msg`, ts: s });
     }
-    const msgs = loadMessages("win-evict");
-    assert.equal(msgs.length, MESSAGES_WINDOW, "file must not grow beyond window");
-    assert.equal(msgs[0].content, `msg-${extra}`, "oldest evicted, newest retained");
-    assert.equal(msgs[msgs.length - 1].content, `msg-${MESSAGES_WINDOW + extra - 1}`);
+    const sessions = loadSessions(id);
+    assert.equal(sessions.length, MAX_SESSIONS, "must not exceed MAX_SESSIONS");
+    assert.equal(sessions[0].session_hash, "hash-2", "oldest two sessions evicted");
+    assert.equal(sessions[MAX_SESSIONS - 1].session_hash, `hash-${MAX_SESSIONS + 1}`);
   });
 
-  it("is idempotent on empty file", () => {
-    appendMessage("win-empty", { role: "user", content: "first", ts: 0 });
-    const msgs = loadMessages("win-empty");
+  it("loadMessages returns most recent session's messages only", () => {
+    startSession("sess-load", "s1");
+    appendMessage("sess-load", { role: "user", content: "from-s1", ts: 1 });
+    startSession("sess-load", "s2");
+    appendMessage("sess-load", { role: "user", content: "from-s2", ts: 2 });
+
+    const msgs = loadMessages("sess-load");
     assert.equal(msgs.length, 1);
-    assert.equal(msgs[0].content, "first");
+    assert.equal(msgs[0].content, "from-s2", "should return current session only");
+  });
+
+  it("deleteAgentMemory removes .json but keeps .sessions.json for resume", () => {
+    ensureMemoryDir();
+    const mem = createMemory({ agentId: "sess-del", agentType: "LEADER",
+      parentChain: ["pm"], depth: 1, model: "deepseek-v4-pro", roleName: "Leader" });
+    saveMemory("sess-del", mem);
+    startSession("sess-del", mem.session_hash!);
+    appendMessage("sess-del", { role: "user", content: "task", ts: 1 });
+
+    deleteAgentMemory("sess-del");
+
+    assert.equal(fs.existsSync(memoryPath("sess-del")),    false, ".json deleted");
+    assert.ok   (fs.existsSync(sessionsPath("sess-del")),         ".sessions.json kept for resume");
   });
 });
 
 // ── deleteAgentMemory ────────────────────────────────────────────────────────
 
 describe("deleteAgentMemory — agent.done cleanup", () => {
-  it("removes .json and .messages.jsonl after completion", () => {
+  it("removes working-set .json but keeps .sessions.json for resume", () => {
     ensureMemoryDir();
     const mem = createMemory({
       agentId: "tl-cleanup-test",
@@ -215,18 +246,16 @@ describe("deleteAgentMemory — agent.done cleanup", () => {
       roleName: "Leader",
     });
     saveMemory("tl-cleanup-test", mem);
-    fs.appendFileSync(
-      messagesPath("tl-cleanup-test"),
-      JSON.stringify({ role: "assistant", content: "done", ts: Date.now() }) + "\n",
-    );
+    startSession("tl-cleanup-test", mem.session_hash!);
+    appendMessage("tl-cleanup-test", { role: "user", content: "task done", ts: Date.now() });
 
-    assert.ok(fs.existsSync(memoryPath("tl-cleanup-test")),     ".json must exist before cleanup");
-    assert.ok(fs.existsSync(messagesPath("tl-cleanup-test")), ".jsonl must exist before cleanup");
+    assert.ok(fs.existsSync(memoryPath("tl-cleanup-test")),    ".json must exist before cleanup");
+    assert.ok(fs.existsSync(sessionsPath("tl-cleanup-test")), ".sessions.json must exist before cleanup");
 
     deleteAgentMemory("tl-cleanup-test");
 
-    assert.equal(fs.existsSync(memoryPath("tl-cleanup-test")),     false, ".json should be deleted");
-    assert.equal(fs.existsSync(messagesPath("tl-cleanup-test")), false, ".jsonl should be deleted");
+    assert.equal(fs.existsSync(memoryPath("tl-cleanup-test")),   false, ".json deleted");
+    assert.ok   (fs.existsSync(sessionsPath("tl-cleanup-test")),        ".sessions.json kept for resume");
   });
 
   it("is idempotent — no throw when files already gone", () => {
