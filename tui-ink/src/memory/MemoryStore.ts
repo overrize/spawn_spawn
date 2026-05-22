@@ -42,7 +42,7 @@ export function saveMemory(agentId: string, mem: AgentMemory): void {
     fs.renameSync(tmp, p);  // atomic on Unix; best-effort on Windows
   } catch {
     // Windows fallback: rename can fail with EPERM (e.g. AV scanner holds)
-    fs.writeFileSync(p, content, "utf8");
+    try { fs.writeFileSync(p, content, "utf8"); } catch { /* best-effort */ }
     try { fs.unlinkSync(tmp); } catch { /* ignore stale tmp */ }
   }
 }
@@ -53,12 +53,14 @@ export function appendMessage(
 ): void {
   ensureMemoryDir();
   const p = messagesPath(agentId);
-  fs.appendFileSync(p, JSON.stringify(msg) + "\n", "utf8");
   try {
-    const fd = fs.openSync(p, "r");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-  } catch { /* best-effort */ }
+    fs.appendFileSync(p, JSON.stringify(msg) + "\n", "utf8");
+    try {
+      const fd = fs.openSync(p, "r");
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+    } catch { /* best-effort fsync */ }
+  } catch { /* EPERM / locked file on Windows — memory write is best-effort */ }
 }
 
 export function loadMessages(
