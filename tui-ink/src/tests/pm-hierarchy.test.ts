@@ -601,16 +601,15 @@ describe("Tech Lead — spawn event.model 不应影响实际使用的模型", ()
     // 直接验证 startLeaderAgent 里的解析式：
     //   const model = opts.model ?? cfg.agents.leader.model ?? MODEL
     const configuredModel = "deepseek-v4-pro";
-    const fallbackModel   = "claude-sonnet-4-5"; // 命令行默认
+    const fallbackModel   = "claude-sonnet-4-5";
 
-    // 修复前（传了 e.model）
-    const bugResult   = "claude-sonnet-4-5" ?? configuredModel ?? fallbackModel;
-    // 修复后（传 undefined）
-    const fixedResult = (undefined as string | undefined) ?? configuredModel ?? fallbackModel;
+    // 用函数包裹使 TypeScript 无法静态推断入参是否为 undefined
+    const resolve = (optsModel: string | undefined): string =>
+      optsModel ?? configuredModel ?? fallbackModel;
 
-    assert.equal(bugResult,   "claude-sonnet-4-5",
+    assert.equal(resolve("claude-sonnet-4-5"), "claude-sonnet-4-5",
       "修复前：spawn event model 覆盖了配置");
-    assert.equal(fixedResult, "deepseek-v4-pro",
+    assert.equal(resolve(undefined), "deepseek-v4-pro",
       "修复后：undefined 回退到配置 model");
   });
 
