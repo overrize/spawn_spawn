@@ -47,6 +47,9 @@ export function saveMemory(agentId: string, mem: AgentMemory): void {
   }
 }
 
+/** Sliding window size: only the last N messages are kept on disk. */
+export const MESSAGES_WINDOW = 5;
+
 export function appendMessage(
   agentId: string,
   msg: { role: "user" | "assistant"; content: string; ts: number },
@@ -54,12 +57,16 @@ export function appendMessage(
   ensureMemoryDir();
   const p = messagesPath(agentId);
   try {
-    fs.appendFileSync(p, JSON.stringify(msg) + "\n", "utf8");
+    const windowed = [...loadMessages(agentId), msg].slice(-MESSAGES_WINDOW);
+    const content = windowed.map((m) => JSON.stringify(m)).join("\n") + "\n";
+    const tmp = `${p}.tmp`;
     try {
-      const fd = fs.openSync(p, "r");
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-    } catch { /* best-effort fsync */ }
+      fs.writeFileSync(tmp, content, "utf8");
+      fs.renameSync(tmp, p);
+    } catch {
+      try { fs.writeFileSync(p, content, "utf8"); } catch { /* best-effort */ }
+      try { fs.unlinkSync(tmp); } catch { /* stale tmp */ }
+    }
   } catch { /* EPERM / locked file on Windows — memory write is best-effort */ }
 }
 

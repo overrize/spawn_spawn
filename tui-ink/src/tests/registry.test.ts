@@ -9,8 +9,8 @@ import * as os from "node:os";
 
 import { executeTool, toolNeedsApproval, getToolsForRole } from "../tools/registry.js";
 import {
-  createMemory, saveMemory, deleteAgentMemory,
-  memoryPath, messagesPath, ensureMemoryDir,
+  createMemory, saveMemory, deleteAgentMemory, appendMessage, loadMessages,
+  memoryPath, messagesPath, ensureMemoryDir, MESSAGES_WINDOW,
 } from "../memory/MemoryStore.js";
 
 let tmpDir: string;
@@ -167,6 +167,37 @@ describe("executeTool — unknown tool", () => {
     assert.equal(r.ok, false);
     assert.ok(r.output.includes("Unknown tool"));
     assert.ok(r.output.includes("Read"));
+  });
+});
+
+// ── appendMessage — sliding window ──────────────────────────────────────────
+
+describe("appendMessage — sliding window (depth=" + MESSAGES_WINDOW + ")", () => {
+  it("keeps all messages while under the window", () => {
+    for (let i = 0; i < MESSAGES_WINDOW; i++) {
+      appendMessage("win-agent", { role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}`, ts: i });
+    }
+    const msgs = loadMessages("win-agent");
+    assert.equal(msgs.length, MESSAGES_WINDOW);
+    assert.equal(msgs[0].content, "msg-0");
+  });
+
+  it("evicts oldest when window is exceeded", () => {
+    const extra = 3;
+    for (let i = 0; i < MESSAGES_WINDOW + extra; i++) {
+      appendMessage("win-evict", { role: "user", content: `msg-${i}`, ts: i });
+    }
+    const msgs = loadMessages("win-evict");
+    assert.equal(msgs.length, MESSAGES_WINDOW, "file must not grow beyond window");
+    assert.equal(msgs[0].content, `msg-${extra}`, "oldest evicted, newest retained");
+    assert.equal(msgs[msgs.length - 1].content, `msg-${MESSAGES_WINDOW + extra - 1}`);
+  });
+
+  it("is idempotent on empty file", () => {
+    appendMessage("win-empty", { role: "user", content: "first", ts: 0 });
+    const msgs = loadMessages("win-empty");
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].content, "first");
   });
 });
 
