@@ -451,6 +451,66 @@ describe("HttpConvAgent — mock SSE 服务器集成", () => {
   });
 });
 
+// ── Resume token-budget truncation ────────────────────────────────────────────
+
+describe("HttpConvAgent — resume token-budget truncation", () => {
+  const providerCfg = { provider: "openai" as const, model: "test", apiKey: "test" };
+
+  it("loads all messages when under budget (small session)", () => {
+    const mem = createMemory({ agentId: "budget-small", agentType: "WORKER",
+      parentChain: [], depth: 1, model: "test", roleName: "Worker" });
+    const sec = new SecretaryProxy(mem);
+    sec.observeMessage("user", "short message");
+    sec.observeMessage("assistant", "short response");
+    sec.destroy();
+
+    const agent = new HttpConvAgent({ id: "rb-small", role: "Worker", providerCfg, resumeFrom: "budget-small" });
+    const messages = (agent as any).messages as Array<{ role: string; content: string }>;
+    assert.equal(messages.length, 2, "all messages preserved when under budget");
+    assert.equal(messages[0]!.content, "short message");
+  });
+
+  it("truncates oldest messages when total exceeds 60K chars", () => {
+    const mem = createMemory({ agentId: "budget-big", agentType: "WORKER",
+      parentChain: [], depth: 1, model: "test", roleName: "Worker" });
+    const sec = new SecretaryProxy(mem);
+    // 10 pairs × 8K chars each = 160K total — well over 60K budget
+    for (let i = 0; i < 10; i++) {
+      sec.observeMessage("user",      `u${i}: ${"x".repeat(7990)}`);
+      sec.observeMessage("assistant", `a${i}: ${"y".repeat(7990)}`);
+    }
+    sec.destroy();
+
+    const agent = new HttpConvAgent({ id: "rb-big", role: "Worker", providerCfg, resumeFrom: "budget-big" });
+    const messages = (agent as any).messages as Array<{ role: string; content: string }>;
+    const total = messages.reduce((s: number, m: { content: string }) => s + m.content.length, 0);
+
+    assert.ok(total <= 60_000, `total chars ${total} should be ≤ 60000`);
+    assert.ok(messages.length < 20,  "should be fewer than the original 20 messages");
+    assert.ok(messages.length >= 4,  "at least last 4 messages always kept");
+    // Newest messages are preserved — last assistant message was a9
+    assert.ok(messages[messages.length - 1]!.content.startsWith("a9:"), "newest message preserved");
+  });
+
+  it("always keeps last 4 messages even when they alone exceed budget", () => {
+    const mem = createMemory({ agentId: "budget-oversized", agentType: "WORKER",
+      parentChain: [], depth: 1, model: "test", roleName: "Worker" });
+    const sec = new SecretaryProxy(mem);
+    // 6 messages × 20K chars = 120K — last 4 alone = 80K > 60K budget
+    for (let i = 0; i < 6; i++) {
+      sec.observeMessage(i % 2 === 0 ? "user" : "assistant", `m${i}:${"z".repeat(19994)}`);
+    }
+    sec.destroy();
+
+    const agent = new HttpConvAgent({ id: "rb-over", role: "Worker", providerCfg, resumeFrom: "budget-oversized" });
+    const messages = (agent as any).messages as Array<{ role: string; content: string }>;
+    // Last 4 must always be kept, even if they exceed the budget
+    assert.equal(messages.length, 4, "exactly last 4 kept when all exceed budget");
+    assert.ok(messages[messages.length - 1]!.content.startsWith("m5:"), "newest message is m5");
+    assert.ok(messages[0]!.content.startsWith("m2:"), "oldest kept message is m2");
+  });
+});
+
 // ── PM + SecretaryProxy 协同测试 ──────────────────────────────────────────────
 
 describe("PM + SecretaryProxy 协同", () => {
