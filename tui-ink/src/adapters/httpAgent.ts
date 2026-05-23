@@ -32,12 +32,31 @@ export class HttpConvAgent extends EventEmitter {
     resumeFrom?: string; // S3: agentId to resume messages from
   }) {
     super();
-    // S3: load conversation history for resume
+    // S3: load conversation history for resume, with token-budget guard
     if (cfg.resumeFrom) {
-      this.messages = loadMessages(cfg.resumeFrom).map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      const RESUME_CHAR_BUDGET = 60_000; // ≈ 15K tokens — leaves room for system prompt + new response
+      const raw = loadMessages(cfg.resumeFrom);
+      const all = raw.map((m) => ({ role: m.role, content: m.content }));
+      const total = all.reduce((s, m) => s + m.content.length, 0);
+      if (total <= RESUME_CHAR_BUDGET) {
+        this.messages = all;
+      } else {
+        // Walk newest→oldest; include messages until budget full.
+        // Last 4 messages are always kept regardless of size.
+        const kept: typeof all = [];
+        let size = 0;
+        for (let i = all.length - 1; i >= 0; i--) {
+          const m = all[i]!;
+          const required = i >= all.length - 4;
+          if (!required && size + m.content.length > RESUME_CHAR_BUDGET) break;
+          kept.unshift(m);
+          size += m.content.length;
+        }
+        process.stderr.write(
+          `[${cfg.id}] resume: history truncated ${all.length}→${kept.length} msgs (${total}→${size} chars)\n`,
+        );
+        this.messages = kept;
+      }
     }
   }
 

@@ -771,6 +771,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (dispatchCtx.acceptance_criteria?.length) parts.push(`验收标准：${dispatchCtx.acceptance_criteria.join("；")}`);
     initMsg = parts.join("\n");
   }
+  // Inject parent TL's confirmed facts (Codex fork-spawn pattern):
+  // Worker gets cross-task context without needing to re-read parent history.
+  const parentSec = secretaries.get(e.parent);
+  if (parentSec) {
+    const parentFacts = parentSec.getMemory().working_set.facts.slice(-5);
+    if (parentFacts.length > 0) {
+      const factsBlock = parentFacts.map((f) => `  - ${f.text}`).join("\n");
+      initMsg += `\n\n【父级已确认事实 (TL working_set)】\n${factsBlock}`;
+    }
+  }
   a.sendCommand({ type: "user.message", text: initMsg });
 }
 
