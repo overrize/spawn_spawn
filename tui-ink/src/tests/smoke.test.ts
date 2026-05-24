@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import {
   applyEvent, getState, selectAgent, approve, reject,
   setMinLevel, scrollBy, _resetForTest, ensureAgent, updateAgentInfo,
+  clearDoneAgents,
 } from "../store.js";
 import type { TuiEvent, DispatchSpec } from "../protocol.js";
 
@@ -68,37 +69,43 @@ describe("applyEvent — state updates", () => {
     assert.equal(a.role, "Worker");
   });
 
-  it("agent.done success=true → state done, hidden after 1.5s", async () => {
+  it("agent.done success=true → state done, NOT immediately hidden", () => {
     ensureAgent({ id: "a", name: "a", role: "Worker", state: "run", parent: "pm" });
     applyEvent({ v: 1, type: "agent.done", agent: "a", success: true, reason: "all good" });
     assert.equal(getState().agents.get("a")!.state, "done");
-    assert.equal(getState().agents.get("a")!.hidden, undefined, "not hidden yet");
-    // Wait for the 1.5s hide timer
-    await new Promise((r) => setTimeout(r, 1600));
-    assert.equal(getState().agents.get("a")!.hidden, true, "hidden after delay");
+    assert.equal(getState().agents.get("a")!.hidden, undefined, "visible until next PM message");
   });
 
-  it("agent.done success=true → auto-selects parent when selected agent hides", async () => {
-    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "run" });
+  it("clearDoneAgents hides done non-permanent agents", () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
+    ensureAgent({ id: "tl", name: "tl", role: "Leader", state: "run", parent: "pm" });
+    applyEvent({ v: 1, type: "agent.done", agent: "tl", success: true });
+    assert.equal(getState().agents.get("tl")!.hidden, undefined, "visible before clear");
+    clearDoneAgents();
+    assert.equal(getState().agents.get("tl")!.hidden, true, "hidden after clear");
+  });
+
+  it("clearDoneAgents auto-selects parent when selected agent is hidden", () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
     ensureAgent({ id: "tl", name: "tl", role: "Leader", state: "run", parent: "pm" });
     getState().selectedAgent = "tl";
     applyEvent({ v: 1, type: "agent.done", agent: "tl", success: true });
-    await new Promise((r) => setTimeout(r, 1600));
+    clearDoneAgents();
     assert.equal(getState().selectedAgent, "pm", "selection jumped to parent");
   });
 
-  it("agent.done success=false → state err, NOT hidden", async () => {
+  it("clearDoneAgents does NOT hide err agents", () => {
     ensureAgent({ id: "a", name: "a", role: "Worker", state: "run", parent: "pm" });
     applyEvent({ v: 1, type: "agent.done", agent: "a", success: false });
     assert.equal(getState().agents.get("a")!.state, "err");
-    await new Promise((r) => setTimeout(r, 1600));
+    clearDoneAgents();
     assert.equal(getState().agents.get("a")!.hidden, undefined, "err agents stay visible");
   });
 
-  it("pm agent.done success=true → stays visible (permanent agent)", async () => {
+  it("clearDoneAgents does NOT hide permanent agents (pm)", () => {
     ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "run" });
     applyEvent({ v: 1, type: "agent.done", agent: "pm", success: true });
-    await new Promise((r) => setTimeout(r, 1600));
+    clearDoneAgents();
     assert.equal(getState().agents.get("pm")!.hidden, undefined, "pm is never hidden");
   });
 

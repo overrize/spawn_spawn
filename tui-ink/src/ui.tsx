@@ -143,47 +143,55 @@ export function AgentsPane({ width }: { width: number }) {
   const allAgents = useStore((s) => Array.from(s.agents.values()));
   const sel = useStore((s) => s.selectedAgent);
 
-  // Only show active agents; hidden (completed) ones fade out after success.
-  const agents = allAgents.filter((a) => !a.hidden);
-  const doneCount = allAgents.filter((a) => a.hidden).length;
+  const nonHidden = allAgents.filter((a) => !a.hidden);
+  const activeAgents = nonHidden.filter((a) => a.state !== "done");
+  const doneAgents = nonHidden.filter((a) => a.state === "done");
+  const hiddenCount = allAgents.filter((a) => a.hidden).length;
 
-  // Scroll the visible window so the selected agent is always on-screen.
-  // Each agent renders 2–5 rows; use 3 as a conservative estimate.
+  // Scroll the visible window within the active group only.
   const availRows = Math.max(6, (process.stdout.rows ?? 24) - 5);
   const maxVisible = Math.max(3, Math.floor(availRows / 3));
-  const selIdx = Math.max(0, agents.findIndex((a) => a.id === sel));
-  const scrollStart = Math.min(selIdx, Math.max(0, agents.length - maxVisible));
-  const visible = agents.slice(scrollStart, scrollStart + maxVisible);
+  const selIdx = Math.max(0, activeAgents.findIndex((a) => a.id === sel));
+  const scrollStart = Math.min(selIdx, Math.max(0, activeAgents.length - maxVisible));
+  const visibleActive = activeAgents.slice(scrollStart, scrollStart + maxVisible);
 
   return (
     <Box flexDirection="column" width={width} flexShrink={0}>
       <Box paddingX={1} paddingY={0}>
-        <Text dimColor>AGENTS </Text><Text dimColor>{agents.length}</Text>
+        <Text dimColor>AGENTS </Text><Text dimColor>{nonHidden.length}</Text>
         {scrollStart > 0 && <Text dimColor> ↑{scrollStart}</Text>}
       </Box>
       <Box flexDirection="column" paddingX={1} overflowY="hidden" flexGrow={1}>
-        {agents.length === 0 && (
+        {nonHidden.length === 0 && (
           <Text dimColor italic>(none yet — press enter to spawn leader)</Text>
         )}
-        {visible.map((a) => (
+        {visibleActive.map((a) => (
           <AgentRow key={a.id} a={a} selected={a.id === sel} />
         ))}
+        {doneAgents.length > 0 && (
+          <Box marginTop={visibleActive.length > 0 ? 1 : 0}>
+            <Text dimColor>── completed ──</Text>
+          </Box>
+        )}
+        {doneAgents.map((a) => (
+          <AgentRow key={a.id} a={a} selected={a.id === sel} dimmed />
+        ))}
       </Box>
-      {doneCount > 0 && (
+      {hiddenCount > 0 && (
         <Box paddingX={1}>
-          <Text color={p.success} dimColor>✓ {doneCount} done</Text>
+          <Text color={p.success} dimColor>✓ {hiddenCount} cleared</Text>
         </Box>
       )}
     </Box>
   );
 }
 
-function AgentRow({ a, selected }: { a: AgentInfo; selected: boolean }) {
+function AgentRow({ a, selected, dimmed }: { a: AgentInfo; selected: boolean; dimmed?: boolean }) {
   const p = usePalette();
   const depth = a.depth ?? (a.parent ? 1 : 0);
   const indent = depth > 0 ? "  ".repeat(depth) + "└" : "";
   const marginLeft = depth > 0 ? depth * 2 + 2 : 3;
-  const color = stateColor(a.state, p);
+  const color = dimmed ? p.dim : stateColor(a.state, p);
   const step = useStore((s) => s.stepByAgent.get(a.id));
   const todos = useStore((s) => s.todosByAgent.get(a.id) ?? []);
   const todoDone = todos.filter((t) => t.state === "done").length;
@@ -193,20 +201,20 @@ function AgentRow({ a, selected }: { a: AgentInfo; selected: boolean }) {
         <Text color={selected ? p.accent : undefined}>{selected ? "▎" : " "}</Text>
         <Text dimColor>{indent}</Text>
         <Text color={color}>{STATE_GLYPH[a.state]} </Text>
-        <Text bold={selected} inverse={selected}>{truncate(a.name, 14)}</Text>
+        <Text bold={selected && !dimmed} inverse={selected && !dimmed} dimColor={dimmed}>{truncate(a.name, 14)}</Text>
         <Text dimColor> {a.role[0]}</Text>
       </Box>
-      {a.sub && (
+      {!dimmed && a.sub && (
         <Box marginLeft={marginLeft}>
           <Text dimColor wrap="truncate-end">{a.sub}</Text>
         </Box>
       )}
-      {a.model && (
+      {!dimmed && a.model && (
         <Box marginLeft={marginLeft}>
           <Text dimColor wrap="truncate-end">{a.model}</Text>
         </Box>
       )}
-      {a.state === "run" && step && (
+      {!dimmed && a.state === "run" && step && (
         <Box marginLeft={marginLeft}>
           <Text color={p.accent} wrap="truncate-end">› {step}</Text>
         </Box>
@@ -661,8 +669,10 @@ function ApprovalCard({ m }: { m: Message }) {
 // ── 右栏:todo + step ──────────────────────────────────────────────────────
 export function TodoPane({ width }: { width: number }) {
   const sel = useStore((s) => s.selectedAgent);
+  const agentState = useStore((s) => s.agents.get(s.selectedAgent)?.state);
   const todos = useStore((s) => s.todosByAgent.get(s.selectedAgent) ?? []);
   const done = todos.filter((t) => t.state === "done").length;
+  const isCompleted = agentState === "done";
 
   return (
     <Box flexDirection="column" width={width} flexShrink={0} paddingLeft={1} paddingRight={1}>
@@ -670,27 +680,31 @@ export function TodoPane({ width }: { width: number }) {
         <Text dimColor>TODO · {sel}</Text>
         <Text dimColor>{done}/{todos.length}</Text>
       </Box>
+      {isCompleted && (
+        <Text dimColor>── task completed ──</Text>
+      )}
       {todos.length === 0 && (
         <Text dimColor italic>(empty)</Text>
       )}
       <Box flexDirection="column" marginTop={1}>
-        {todos.map((t) => <TodoRow key={t.id} t={t} />)}
+        {todos.map((t) => <TodoRow key={t.id} t={t} dimmed={isCompleted} />)}
       </Box>
     </Box>
   );
 }
 
-function TodoRow({ t }: { t: TodoItem }) {
+function TodoRow({ t, dimmed }: { t: TodoItem; dimmed?: boolean }) {
   const p = usePalette();
-  const color = t.state === "done" ? p.success : t.state === "run" ? p.accent :
-                t.state === "warn" ? p.warn : t.state === "err" ? p.error : undefined;
+  const color = dimmed ? p.dim :
+    t.state === "done" ? p.success : t.state === "run" ? p.accent :
+    t.state === "warn" ? p.warn : t.state === "err" ? p.error : undefined;
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box>
         <Text color={color}>{TODO_GLYPH[t.state]} </Text>
-        <Text dimColor={t.state === "done"}>{truncate(t.text, 20)}</Text>
+        <Text dimColor={t.state === "done" || dimmed}>{truncate(t.text, 20)}</Text>
       </Box>
-      {t.state === "run" && t.progress != null && (
+      {!dimmed && t.state === "run" && t.progress != null && (
         <Box marginLeft={2}><ProgressBar pct={t.progress} accent={p.accent} /></Box>
       )}
     </Box>

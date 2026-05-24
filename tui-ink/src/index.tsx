@@ -31,6 +31,7 @@ import {
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
   approve, reject, setLayout, scrollBy, setMinLevel, resumeAgent, updateAgentInfo,
+  clearDoneAgents,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -1085,6 +1086,8 @@ function App() {
       return;
     }
 
+    // New PM message: clear done agents from the previous task before proceeding.
+    if (target === "pm") clearDoneAgents();
     userMessage(target, body);
     const a = agents.get(target);
     if (!a) return;
