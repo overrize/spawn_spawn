@@ -43,6 +43,7 @@ export interface AgentInfo {
   tokens_out?: number;
   dispatch?: DispatchSpec; // S1: spawn 时携带的 DispatchSpec
   depth?: number;          // S3: 在 spawn 树中的深度
+  hidden?: boolean;        // true = removed from agent list after successful completion
 }
 
 export interface Message {

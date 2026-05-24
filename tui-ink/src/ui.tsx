@@ -139,8 +139,13 @@ export function VDivider() {
 
 // ── 左栏:agents 列表 ───────────────────────────────────────────────────────
 export function AgentsPane({ width }: { width: number }) {
-  const agents = useStore((s) => Array.from(s.agents.values()));
+  const p = usePalette();
+  const allAgents = useStore((s) => Array.from(s.agents.values()));
   const sel = useStore((s) => s.selectedAgent);
+
+  // Only show active agents; hidden (completed) ones fade out after success.
+  const agents = allAgents.filter((a) => !a.hidden);
+  const doneCount = allAgents.filter((a) => a.hidden).length;
 
   // Scroll the visible window so the selected agent is always on-screen.
   // Each agent renders 2–5 rows; use 3 as a conservative estimate.
@@ -164,6 +169,11 @@ export function AgentsPane({ width }: { width: number }) {
           <AgentRow key={a.id} a={a} selected={a.id === sel} />
         ))}
       </Box>
+      {doneCount > 0 && (
+        <Box paddingX={1}>
+          <Text color={p.success} dimColor>✓ {doneCount} done</Text>
+        </Box>
+      )}
     </Box>
   );
 }

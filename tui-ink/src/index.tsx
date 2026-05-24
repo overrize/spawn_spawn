@@ -1099,7 +1099,7 @@ function App() {
     const cfg = loadConfig();
     ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle", sub: "waiting for first message", model: cfg.agents.leader.model });
     // process-monitor: visual representation of the TypeScript ProcessManager in the agent tree
-    ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "run", sub: "supervising", model: "internal" });
+    ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "idle", sub: "", model: "internal" });
   }, []);
 
   // 鼠标滚轮 + 粘贴处理:

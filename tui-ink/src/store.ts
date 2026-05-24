@@ -239,6 +239,22 @@ export function applyEvent(e: TuiEvent) {
       const a = state.agents.get(e.agent);
       if (a) a.state = e.success ? "done" : "err";
       state.stepByAgent.set(e.agent, e.reason ?? (e.success ? "done" : "failed"));
+      // Successful non-root agents fade out of the list after 1.5s.
+      // err agents stay visible so the user can see what failed.
+      const PERMANENT_IDS = new Set(["pm", "process-monitor"]);
+      if (e.success && !PERMANENT_IDS.has(e.agent)) {
+        setTimeout(() => {
+          const agent = state.agents.get(e.agent);
+          if (agent) {
+            agent.hidden = true;
+            if (state.selectedAgent === e.agent) {
+              state.selectedAgent = agent.parent ?? "pm";
+              state.scrollOffset = 0;
+            }
+            notify();
+          }
+        }, 1500);
+      }
       break;
     }
     case "agent.error": {

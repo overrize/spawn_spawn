@@ -68,16 +68,38 @@ describe("applyEvent — state updates", () => {
     assert.equal(a.role, "Worker");
   });
 
-  it("agent.done success=true → state done", () => {
-    ensureAgent({ id: "a", name: "a", role: "Worker", state: "run" });
+  it("agent.done success=true → state done, hidden after 1.5s", async () => {
+    ensureAgent({ id: "a", name: "a", role: "Worker", state: "run", parent: "pm" });
     applyEvent({ v: 1, type: "agent.done", agent: "a", success: true, reason: "all good" });
     assert.equal(getState().agents.get("a")!.state, "done");
+    assert.equal(getState().agents.get("a")!.hidden, undefined, "not hidden yet");
+    // Wait for the 1.5s hide timer
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.equal(getState().agents.get("a")!.hidden, true, "hidden after delay");
   });
 
-  it("agent.done success=false → state err", () => {
-    ensureAgent({ id: "a", name: "a", role: "Worker", state: "run" });
+  it("agent.done success=true → auto-selects parent when selected agent hides", async () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "run" });
+    ensureAgent({ id: "tl", name: "tl", role: "Leader", state: "run", parent: "pm" });
+    getState().selectedAgent = "tl";
+    applyEvent({ v: 1, type: "agent.done", agent: "tl", success: true });
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.equal(getState().selectedAgent, "pm", "selection jumped to parent");
+  });
+
+  it("agent.done success=false → state err, NOT hidden", async () => {
+    ensureAgent({ id: "a", name: "a", role: "Worker", state: "run", parent: "pm" });
     applyEvent({ v: 1, type: "agent.done", agent: "a", success: false });
     assert.equal(getState().agents.get("a")!.state, "err");
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.equal(getState().agents.get("a")!.hidden, undefined, "err agents stay visible");
+  });
+
+  it("pm agent.done success=true → stays visible (permanent agent)", async () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "run" });
+    applyEvent({ v: 1, type: "agent.done", agent: "pm", success: true });
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.equal(getState().agents.get("pm")!.hidden, undefined, "pm is never hidden");
   });
 
   it("todo.set → todosByAgent updated", () => {
