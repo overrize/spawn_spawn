@@ -211,8 +211,8 @@ const Think: ToolDef = {
 export function rgNotFoundResult(e: unknown, tool: "Glob" | "Grep"): ToolResult | null {
   if ((e as NodeJS.ErrnoException).code !== "ENOENT") return null;
   const hint = tool === "Glob"
-    ? "use Bash with 'dir /s' (Windows) / 'find' (Unix) instead"
-    : "use Bash with 'findstr' / 'Select-String' instead";
+    ? "use Bash with 'find . -name \"pattern\"' (Unix) / 'dir /s' (Windows) instead"
+    : "use Bash with 'grep -rn pattern dir' (Unix) / 'findstr' (Windows) instead";
   return err(`ripgrep (rg) not found — install it or ${hint}`);
 }
 

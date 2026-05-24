@@ -6,6 +6,15 @@ import { strict as assert } from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { spawnSync } from "node:child_process";
+
+// spawnSync accepts shell: boolean (execSync only accepts shell: string).
+// Pass the full command as a string — do NOT pass args as a separate array
+// when shell:true, because the shell receives them as $0/$1 (not rg arguments).
+const hasRg = (() => {
+  const r = spawnSync("rg --version", [], { stdio: "ignore", shell: true });
+  return !r.error && r.status === 0;
+})();
 
 import { executeTool, toolNeedsApproval, getToolsForRole } from "../tools/registry.js";
 import {
@@ -168,6 +177,53 @@ describe("executeTool — unknown tool", () => {
     assert.equal(r.ok, false);
     assert.ok(r.output.includes("Unknown tool"));
     assert.ok(r.output.includes("Read"));
+  });
+});
+
+// ── executeTool — Grep (requires rg) ─────────────────────────────────────────
+
+describe("executeTool — Grep", { skip: !hasRg ? "ripgrep not installed" : false }, () => {
+  it("finds pattern in file", async () => {
+    const f = path.join(tmpDir, "grep-src.ts");
+    fs.writeFileSync(f, "export function hello() {}\nexport function world() {}");
+    const r = await executeTool("Grep", { pattern: "hello", path: tmpDir });
+    assert.ok(r.ok);
+    assert.ok(r.output.includes("hello"));
+  });
+
+  it("returns (no matches) for absent pattern", async () => {
+    const r = await executeTool("Grep", { pattern: "ZZZNOMATCH_UNIQUE", path: tmpDir });
+    assert.ok(r.ok);
+    assert.ok(r.output.includes("no matches"));
+  });
+
+  it("case_insensitive flag works", async () => {
+    const f = path.join(tmpDir, "grep-case.ts");
+    fs.writeFileSync(f, "HELLO WORLD");
+    const r = await executeTool("Grep", { pattern: "hello", path: tmpDir, case_insensitive: true });
+    assert.ok(r.ok);
+    assert.ok(r.output.includes("HELLO"));
+  });
+});
+
+// ── executeTool — Glob (requires rg) ─────────────────────────────────────────
+
+describe("executeTool — Glob", { skip: !hasRg ? "ripgrep not installed" : false }, () => {
+  it("matches files by extension pattern", async () => {
+    fs.writeFileSync(path.join(tmpDir, "foo.ts"), "");
+    fs.writeFileSync(path.join(tmpDir, "bar.ts"), "");
+    fs.writeFileSync(path.join(tmpDir, "baz.json"), "{}");
+    const r = await executeTool("Glob", { pattern: "**/*.ts", path: tmpDir });
+    assert.ok(r.ok);
+    assert.ok(r.output.includes("foo.ts"));
+    assert.ok(r.output.includes("bar.ts"));
+    assert.ok(!r.output.includes("baz.json"), ".json should not match **/*.ts");
+  });
+
+  it("returns (no files) when pattern matches nothing", async () => {
+    const r = await executeTool("Glob", { pattern: "**/*.xyz_unique", path: tmpDir });
+    assert.ok(r.ok);
+    assert.ok(r.output.includes("no files"));
   });
 });
 

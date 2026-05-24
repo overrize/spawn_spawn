@@ -16,6 +16,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { render, useApp, useInput, useStdin, Box, Text } from "ink";
 import { PassThrough } from "node:stream";
+import { execSync, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -1400,6 +1401,15 @@ const banner = DEMO
   : `live mode — will spawn 'claude' on first message (model=${MODEL})`;
 
 console.log(`\nmulti-agent TUI · ${banner}\n`);
+
+// ── rg (ripgrep) probe — Grep/Glob tools require it ─────────────────────────
+// spawnSync accepts shell: boolean; execSync only accepts shell: string.
+// Full command in string — do NOT split args when shell:true (shell receives them as $0/$1).
+const _rgCheck = spawnSync("rg --version", [], { stdio: "ignore", shell: true });
+if (_rgCheck.error || _rgCheck.status !== 0) {
+  console.warn("⚠  ripgrep (rg) not found — Grep/Glob tools will be unavailable.");
+  console.warn("   Install: apt install ripgrep  |  brew install ripgrep  |  cargo install ripgrep\n");
+}
 
 // ── stdin passthrough (no mouse interception) ───────────────────────────────
 // 关掉所有鼠标追踪，还给终端原生文字选中能力。
