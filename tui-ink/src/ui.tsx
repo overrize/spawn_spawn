@@ -730,6 +730,7 @@ export function StatusBar({ demo }: { demo?: boolean }) {
   const idle    = agents.filter((a) => a.state === "idle").length;
   const cost = useStore((s) => s.cost_usd);
   const minLevel = useStore((s) => s.minLevel);
+  const ultraMode = useStore((s) => s.ultraMode);
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
   const contentCols = Math.max(20, termCols - (FIXED_COLS + CONV_OVERHEAD));
@@ -742,6 +743,7 @@ export function StatusBar({ demo }: { demo?: boolean }) {
         {waiting > 0 && <Text color="yellow">⌛ {waiting} waiting  </Text>}
         <Text dimColor>$ {cost.toFixed(2)}</Text>
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
+        {ultraMode && <Text color="magenta" bold> [ULTRA] </Text>}
         {isDebug && (
           <Text color={contentCols <= 20 ? "red" : p.dim}>
             {" "}term={termCols}×{termRows} cont={contentCols}
