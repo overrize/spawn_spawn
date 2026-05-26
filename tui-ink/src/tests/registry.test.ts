@@ -160,7 +160,7 @@ describe("executeTool — Think", () => {
 // ── executeTool — Bash banned commands ──────────────────────────────────────
 
 describe("executeTool — Bash banned commands", () => {
-  for (const banned of ["curl", "wget", "ssh", "nc", "telnet"]) {
+  for (const banned of ["ssh", "nc", "telnet", "ncat", "rsync"]) {
     it(`blocks ${banned}`, async () => {
       const r = await executeTool("Bash", { command: `${banned} example.com` });
       assert.equal(r.ok, false);

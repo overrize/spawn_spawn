@@ -21,7 +21,6 @@ interface State {
   layout: "v1" | "v3";
   scrollOffset: number;
   minLevel: LogLevel;
-  ultraMode: boolean;
 }
 
 const state: State = {
@@ -39,7 +38,6 @@ const state: State = {
   layout: "v1",
   scrollOffset: 0,
   minLevel: "info",
-  ultraMode: false,
 };
 
 const listeners = new Set<() => void>();
@@ -139,12 +137,6 @@ export function setLayout(l: "v1" | "v3"): void {
 export function setMinLevel(l: LogLevel): void {
   state.minLevel = l;
   notify();
-}
-
-export function toggleUltraMode(): boolean {
-  state.ultraMode = !state.ultraMode;
-  notify();
-  return state.ultraMode;
 }
 
 const PERMANENT_IDS = new Set(["pm", "process-monitor"]);

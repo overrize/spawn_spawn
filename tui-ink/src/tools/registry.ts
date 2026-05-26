@@ -94,20 +94,12 @@ const Edit: ToolDef = {
   },
 };
 
-const BANNED_ALWAYS = new Set([
+const BANNED_COMMANDS = new Set([
   "nc", "ncat", "netcat", "telnet", "ssh", "scp", "ftp", "rsync",
 ]);
-// curl/wget are only banned in normal mode; ultra mode allows them for web fetch
-const BANNED_NORMAL = new Set([...BANNED_ALWAYS, "curl", "wget"]);
-
-let _ultraMode = false;
-export function setUltraMode(v: boolean): void { _ultraMode = v; }
-export function isUltraMode(): boolean { return _ultraMode; }
-
 function isBanned(cmd: string): string | null {
   const first = cmd.trim().split(/[\s|;&<>]/)[0]?.split(/[/\\]/).pop() ?? "";
-  const banned = _ultraMode ? BANNED_ALWAYS : BANNED_NORMAL;
-  return banned.has(first.toLowerCase()) ? first : null;
+  return BANNED_COMMANDS.has(first.toLowerCase()) ? first : null;
 }
 
 const Bash: ToolDef = {

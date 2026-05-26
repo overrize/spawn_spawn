@@ -31,7 +31,7 @@ import {
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
   approve, reject, setLayout, scrollBy, setMinLevel, resumeAgent, updateAgentInfo,
-  clearDoneAgents, toggleUltraMode,
+  clearDoneAgents,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -39,7 +39,7 @@ import type { PaletteName, ProviderConfig } from "./config.js";
 import { SecretaryProxy } from "./memory/SecretaryProxy.js";
 import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, deleteAgentMemory } from "./memory/MemoryStore.js";
 import { ProcessManager } from "./pm/ProcessManager.js";
-import { executeTool, toolNeedsApproval, buildToolSchemaBlock, setUltraMode } from "./tools/registry.js";
+import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/registry.js";
 import type { AgentRole } from "./tools/registry.js";
 
 // ── 路径 ───────────────────────────────────────────────────────────────────
@@ -1055,20 +1055,6 @@ function App() {
     { name: "palette", desc: "切换配色 paper | green | amber", handler: (args) => { const name = args[0] as PaletteName; if (name && name in PALETTES) { setPaletteName(name); savePalette(name); } } },
     { name: "layout",  desc: "切换布局 v1 | v3",             handler: (args) => { const l = args[0]; if (l === "v1" || l === "v3") { setLayout(l); saveLayout(l); } } },
     { name: "log",     desc: "日志级别 debug | info | warn | error", handler: (args) => { const l = args[0] as LogLevel; if (["debug","info","warn","error"].includes(l)) setMinLevel(l); } },
-    { name: "ultra",   desc: "/ultra — 切换 ultra 模式（解除 curl/wget 封锁，允许网络抓取）", handler: () => {
-      const on = toggleUltraMode();
-      setUltraMode(on);
-      const sel = getState().selectedAgent;
-      const notice = on
-        ? "[系统] Ultra 模式已开启。curl 和 wget 不再被封锁，可用 Bash 执行网络抓取。其余高危命令（ssh/nc 等）仍然禁止。"
-        : "[系统] Ultra 模式已关闭。恢复默认工具白名单。";
-      applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: notice });
-      const agent = agents.get(sel);
-      if (agent) {
-        (agent as { sendCommand?: (c: { type: string; text: string }) => void })
-          .sendCommand?.({ type: "user.message", text: notice });
-      }
-    } },
     { name: "connect", desc: "/connect <role> <preset> <model> <apiKey> — preset: anthropic|deepseek|openai|ollama", handler: (args) => {
       const [role, preset, model, apiKey] = args;
       if (!role || !preset || !model || !apiKey) return;
