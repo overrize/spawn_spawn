@@ -19,7 +19,16 @@ export interface DispatchSpec {
   memory_quota_kb?: number;
   seed_facts?: string[];
   timeout_ms?: number;                 // 软超时：到期 PM 发 handup 纠正，不立即 kill
+  // Fork 子 agent 专用字段（与常规 spawn 兼容共存）
+  fork?: boolean;                      // true = 走 Fork 路径（轻量分身，共享缓存前缀）
+  cachePrefix?: CacheSafeParams;        // 父 agent 的缓存前缀（Fork 时必传）
+  inheritSystemPrompt?: boolean;        // 是否继承父 agent 的 system prompt（Fork 默认为 true）
+  parentMessageIndex?: number;          // Fork 时对话历史截止索引
 }
+
+// CacheSafeParams — 引入以确保 protocol.ts 类型自包含
+// 完整定义在 src/cache/CachePrefixManager.ts，此处仅复导出
+export type { CacheSafeParams } from "./cache/CachePrefixManager.js";
 
 export interface TodoItem {
   id: string;
@@ -91,6 +100,8 @@ export type TuiEvent =
       code: string; agent: string; detail: string; ts?: number }
   | { v: 1; type: "proposal.new"; agent: string; proposal_id: string;
       target: "role_boundary" | "principles"; diff: string }
+  | { v: 1; type: "task.notification"; agent: string; parent: string;
+      child_id: string; success: boolean; reason?: string; evidence?: string[] }
   | { v: 1; type: "proposal.decision"; proposal_id: string;
       decision: "apply" | "reject"; reason?: string }
   // leader → TUI: approve/reject a destructive Bash call from a worker

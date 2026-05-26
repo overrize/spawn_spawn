@@ -269,6 +269,22 @@ export function applyEvent(e: TuiEvent) {
       });
       break;
     }
+    case "task.notification": {
+      // Notify parent agent that a child has completed (foreground or background mode)
+      const status = e.success ? "成功完成" : "失败";
+      pushMessage(e.parent, {
+        agent: e.child_id, to: "user", kind: "system",
+        text: `[系统-通知] 子 agent ${e.child_id} ${status}。理由: ${e.reason ?? "（无）"}`,
+        level: e.success ? "info" : "warn",
+      });
+      // Update child state in todo (mark done)
+      const childAgent = state.agents.get(e.child_id);
+      if (childAgent) {
+        childAgent.state = e.success ? "done" : "err";
+        childAgent.sub = e.reason ?? (e.success ? "done" : "failed");
+      }
+      break;
+    }
     // S6: new event types
     case "pm.alert":
       pushMessage(e.agent, {
@@ -313,6 +329,18 @@ export function applyEvent(e: TuiEvent) {
         level: "info",
       });
       break;
+    case "task.notification": {
+      const status = e.success ? "成功" : "失败";
+      const reason = e.reason ? `。理由: ${e.reason}` : "";
+      pushMessage(e.parent, {
+        agent: e.agent,
+        to: e.parent,
+        kind: "system",
+        text: `[系统-通知] 子 agent ${e.child_id} ${status}${reason}`,
+        level: "info",
+      });
+      break;
+    }
   }
   notify();
 }

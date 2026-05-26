@@ -265,6 +265,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
       applyEvent(e);
       pm.observe(e);
       secretary.observe(e);
+      // Register auto-background spawn (foreground tracking)
+      if (pm.registerSpawn) pm.registerSpawn(e.child, e.parent);
       startWorker(e); // routes Leader role to startLeaderAgent internally
       return;
     }
@@ -784,6 +786,28 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     }
   }
   a.sendCommand({ type: "user.message", text: initMsg });
+
+  // ── Auto-background: register foreground spawn for parent → child tracking ──
+  const parentInfo = getState().agents.get(e.parent);
+  // Only register foreground tracking if parent is a Leader/PM (not worker)
+  if (parentInfo && parentInfo.role !== "Worker") {
+    const handle = pm.registerSpawn(e.child, e.parent);
+    // When the foreground promise resolves (30s sync or 2min bg switch):
+    handle.promise.then((syncResult) => {
+      if (syncResult === null) {
+        // Switched to background: notify parent
+        const parentAgent = agents.get(e.parent);
+        if (parentAgent instanceof HttpConvAgent) {
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[系统] ${e.child} 已超过 2 分钟，自动切换为后台模式。完成时会通过 task-notification 通知你。`,
+          });
+        }
+      }
+      // If syncResult !== null, the 30s synchronous completion already happened
+      // and the parent was notified directly inside agent.done handler.
+    });
+  }
 }
 
 // ── DEMO 模式 — 不调 claude,假发事件给你看 UI ──────────────────────────────
