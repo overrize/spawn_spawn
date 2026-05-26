@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
 import https from "node:https";
 import http from "node:http";
-import type { TuiEvent, AgentCommand } from "../protocol.js";
+import type { TuiEvent, AgentCommand, DispatchSpec, CacheSafeParams } from "../protocol.js";
 import type { ProviderConfig } from "../config.js";
 import { loadMessages } from "../memory/MemoryStore.js";
+import { serializeCachePrefix } from "../cache/CachePrefixManager.js";
 
 const VALID_TYPES = new Set([
   "todo.set", "step", "tool.call", "tool.result", "message",
@@ -23,6 +24,10 @@ export class HttpConvAgent extends EventEmitter {
   private _busy = false;
   private _abort: AbortController | null = null;
   private _queue: string[] = []; // outbound message queue when busy
+  private _cachePrefix: CacheSafeParams | null = null; // 当前缓存前缀参数（Fork 时共享）
+  private _cachePrefixSerialized: string = "";       // 缓存前缀序列化字符串
+  private _cacheDispatch: DispatchSpec | null = null;  // 当前 DispatchSpec（Fork 时传递）
+  private _loopIdx = 0;                               // 单调递增循环计数
 
   constructor(public cfg: {
     id: string;
@@ -30,8 +35,15 @@ export class HttpConvAgent extends EventEmitter {
     providerCfg: ProviderConfig;
     systemPrompt?: string;
     resumeFrom?: string; // S3: agentId to resume messages from
+    dispatch?: DispatchSpec; // S1: for Fork cache prefix reuse
   }) {
     super();
+    // 如果 dispatch 携带 cachePrefix，初始化 _cachePrefix
+    if (cfg.dispatch?.cachePrefix) {
+      this._cachePrefix = cfg.dispatch.cachePrefix;
+      this._cachePrefixSerialized = serializeCachePrefix(cfg.dispatch.cachePrefix);
+      this._cacheDispatch = cfg.dispatch;
+    }
     // S3: load conversation history for resume, with token-budget guard
     if (cfg.resumeFrom) {
       const RESUME_CHAR_BUDGET = 60_000; // ≈ 15K tokens — leaves room for system prompt + new response
@@ -58,6 +70,31 @@ export class HttpConvAgent extends EventEmitter {
         this.messages = kept;
       }
     }
+  }
+
+  /**
+   * setCachePrefix — 设置/更新当前缓存前缀参数
+   * 供 Fork 子 agent 在初始化后复用父 agent 的缓存前缀
+   */
+  setCachePrefix(params: CacheSafeParams): void {
+    this._cachePrefix = params;
+    this._cachePrefixSerialized = serializeCachePrefix(params);
+  }
+
+  /**
+   * getCachePrefix — 返回当前缓存前缀参数（如果已设置）
+   * 供 Fork 子 agent 读取共享缓存前缀
+   */
+  getCachePrefix(): CacheSafeParams | null {
+    return this._cachePrefix;
+  }
+
+  /**
+   * getCachePrefixSerialized — 返回序列化的缓存前缀字符串
+   * （内部使用，用于 Anthropic API 请求体组装）
+   */
+  getCachePrefixSerialized(): string {
+    return this._cachePrefixSerialized;
   }
 
   sendCommand(cmd: AgentCommand): void {
@@ -179,10 +216,15 @@ export class HttpConvAgent extends EventEmitter {
           continue;
         }
 
-        // 计大括号深度（忽略字符串内的括号，简化实现）
+        // 计大括号深度，正确跳过字符串内的括号
         jsonBuf += (jsonBuf ? "\n" : "") + trimmed;
+        let inStr = false, esc = false;
         for (const ch of trimmed) {
-          if (ch === "{") depth++;
+          if (esc)            { esc = false; continue; }
+          if (ch === "\\" && inStr) { esc = true;  continue; }
+          if (ch === '"')     { inStr = !inStr; continue; }
+          if (inStr)          continue;
+          if (ch === "{")     depth++;
           else if (ch === "}") depth--;
         }
 
@@ -243,11 +285,33 @@ export class HttpConvAgent extends EventEmitter {
 
   private async _callAnthropic(): Promise<string> {
     const pc = this.cfg.providerCfg;
+
+    // ── Prompt caching 支持 ────────────────────────────────────────────
+    // 如果 systemPrompt 存在，用数组格式并标记 cache_control: ephemeral
+    const systemBlock = this.cfg.systemPrompt
+      ? [{ type: "text", text: this.cfg.systemPrompt, cache_control: { type: "ephemeral" } }]
+      : undefined;
+
+    // messages 统一用数组格式（Anthropic 要求同一请求所有 content 类型一致）
+    // 最后一条 user message 标记 cache_control: ephemeral 作为缓存断点
+    const trimmedHistory = this._trimmedHistory();
+    const messages = trimmedHistory.map((m, i) => {
+      const isLastUser = i === trimmedHistory.length - 1 && m.role === "user";
+      return {
+        role: m.role,
+        content: [{
+          type: "text",
+          text: m.content,
+          ...(isLastUser ? { cache_control: { type: "ephemeral" as const } } : {}),
+        }],
+      };
+    });
+
     const body = JSON.stringify({
       model: pc.model,
       max_tokens: 8192,
-      ...(this.cfg.systemPrompt ? { system: this.cfg.systemPrompt } : {}),
-      messages: this._trimmedHistory(),
+      ...(systemBlock ? { system: systemBlock } : {}),
+      messages,
       stream: true,
     });
 
