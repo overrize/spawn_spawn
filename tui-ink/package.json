@@ -9,7 +9,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx/esm --test src/tests/smoke.test.ts src/tests/integration.test.ts src/tests/pm-hierarchy.test.ts src/tests/registry.test.ts src/tests/registry-enoent.test.ts"
+    "test": "node --import tsx/esm --test src/tests/smoke.test.ts src/tests/integration.test.ts src/tests/pm-hierarchy.test.ts src/tests/registry.test.ts src/tests/registry-enoent.test.ts src/tests/cache-prefix.test.ts"
   },
   "dependencies": {
     "ink": "^5.0.1",

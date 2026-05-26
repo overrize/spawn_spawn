@@ -26,9 +26,8 @@ export interface DispatchSpec {
   parentMessageIndex?: number;          // Fork 时对话历史截止索引
 }
 
-// CacheSafeParams — 引入以确保 protocol.ts 类型自包含
-// 完整定义在 src/cache/CachePrefixManager.ts，此处仅复导出
-export type { CacheSafeParams } from "./cache/CachePrefixManager.js";
+import type { CacheSafeParams } from "./cache/CachePrefixManager.js";
+export type { CacheSafeParams };
 
 export interface TodoItem {
   id: string;
