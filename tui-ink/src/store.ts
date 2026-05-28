@@ -257,6 +257,11 @@ export function applyEvent(e: TuiEvent) {
       const a = state.agents.get(e.agent);
       if (a) a.state = e.success ? "done" : "err";
       state.stepByAgent.set(e.agent, e.reason ?? (e.success ? "done" : "failed"));
+      // Switch back to parent so the user sees PM's follow-up reply
+      if (state.selectedAgent === e.agent && a?.parent) {
+        state.selectedAgent = a.parent;
+        state.scrollOffset = 0;
+      }
       break;
     }
     case "agent.error": {
