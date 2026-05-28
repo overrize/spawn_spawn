@@ -5,6 +5,7 @@ export interface MemoryFact {
   text: string;
   src: string;  // "tool:<name>", "btw:user", "todo:done", "handup:<agentId>"
   ts: number;
+  weight?: number;  // cumulative weight for Jaccard-weighted dedup (P1)
 }
 
 export interface MemoryDecision {
@@ -54,6 +55,7 @@ export interface AgentMemory {
     constraints: string[];
     acceptance_criteria: string[];
     stop_conditions: string[];
+    memory_quota_kb?: number;  // soft budget in KB for resume context (P1, default 60)
   };
   working_set: {
     facts: MemoryFact[];

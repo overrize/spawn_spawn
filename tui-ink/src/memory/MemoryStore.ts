@@ -4,7 +4,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
-import type { AgentMemory } from "./types.js";
+import type { AgentMemory, MemoryFact } from "./types.js";
 
 function memoryDir(): string {
   return path.resolve(process.cwd(), ".spawn", "memory");
@@ -176,6 +176,69 @@ export function appendReminder(text: string, ts: number): void {
   try { reminders = JSON.parse(fs.readFileSync(p, "utf8")); } catch { /* fresh file */ }
   reminders.push({ text, ts });
   fs.writeFileSync(p, JSON.stringify(reminders, null, 2), "utf8");
+}
+
+// ── Jaccard similarity for weighted dedup (P1) ──────────────────────────────
+
+/** Tokenize text into lowercase word set */
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().split(/[^a-zA-Z0-9_\u4e00-\u9fff]+/).filter(Boolean),
+  );
+}
+
+/** Jaccard similarity coefficient between two strings */
+export function jaccardSimilarity(a: string, b: string): number {
+  const setA = tokenize(a);
+  const setB = tokenize(b);
+  if (setA.size === 0 && setB.size === 0) return 0;
+  const intersection = new Set([...setA].filter((x) => setB.has(x)));
+  const union = new Set([...setA, ...setB]);
+  return intersection.size / union.size;
+}
+
+/** Jaccard threshold above which two facts are considered duplicates */
+export const JACCARD_THRESHOLD = 0.7;
+
+/**
+ * Add a fact to working_set.facts with Jaccard-weighted dedup (P1).
+ * If a similar fact (Jaccard >= 0.7) exists, merge by incrementing weight.
+ * Otherwise, append with weight = 1 (or provided weight).
+ */
+export function addFact(
+  mem: AgentMemory,
+  text: string,
+  src: string,
+  weight: number = 1,
+): void {
+  const idx = mem.working_set.facts.findIndex(
+    (f) => jaccardSimilarity(f.text, text) >= JACCARD_THRESHOLD,
+  );
+  if (idx >= 0) {
+    // Merge: increment weight, update src and ts
+    const existing = mem.working_set.facts[idx];
+    existing.weight = (existing.weight ?? 1) + weight;
+    existing.src = src;
+    existing.ts = Date.now();
+  } else {
+    // Append new fact
+    mem.working_set.facts.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      text,
+      src,
+      ts: Date.now(),
+      weight,
+    });
+  }
+}
+
+/**
+ * Get top-N facts by weight (descending). Used for resume context injection (P1).
+ */
+export function topFactsByWeight(mem: AgentMemory, n: number = 10): MemoryFact[] {
+  return [...mem.working_set.facts]
+    .sort((a, b) => (b.weight ?? 1) - (a.weight ?? 1))
+    .slice(0, n);
 }
 
 /** 构建一个全新 AgentMemory 对象（spawn 时初始化） */

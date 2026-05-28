@@ -227,8 +227,43 @@ export class SecretaryProxy extends EventEmitter {
     }
   }
 
+  /** Jaccard similarity between two strings (token-level) */
+  private jaccard(a: string, b: string): number {
+    const tokenize = (s: string) => new Set(s.toLowerCase().split(/\s+/).filter(Boolean));
+    const sa = tokenize(a);
+    const sb = tokenize(b);
+    if (sa.size === 0 && sb.size === 0) return 1;
+    let intersect = 0;
+    for (const t of sa) { if (sb.has(t)) intersect++; }
+    const union = sa.size + sb.size - intersect;
+    return union === 0 ? 0 : intersect / union;
+  }
+
   private addFact(fact: MemoryFact): void {
-    this.memory.working_set.facts.push(fact);
+    const facts = this.memory.working_set.facts;
+    const SIMILARITY_THRESHOLD = 0.6;
+    const now = Date.now();
+
+    // Look for a similar existing fact
+    let merged = false;
+    for (let i = 0; i < facts.length; i++) {
+      const existing = facts[i];
+      if (this.jaccard(existing.text, fact.text) >= SIMILARITY_THRESHOLD) {
+        // Merge: bump weight, update text to the longer one, refresh ts
+        const newWeight = (existing.weight ?? 1) + (fact.weight ?? 1);
+        existing.weight = newWeight;
+        if (fact.text.length > existing.text.length) {
+          existing.text = fact.text;
+        }
+        existing.ts = now;
+        merged = true;
+        break;
+      }
+    }
+
+    if (!merged) {
+      facts.push({ ...fact, weight: fact.weight ?? 1 });
+    }
     this.gc();
     this.saveAsync();
   }

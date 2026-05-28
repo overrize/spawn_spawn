@@ -68,12 +68,32 @@ function buildSystemPrompt(
   if (resumedMemoryId) {
     const mem = loadMemory(resumedMemoryId);
     if (mem) {
-      const facts = mem.working_set.facts.slice(-10).map((f) => `- ${f.text}`).join("\n");
+      const budgetKb = mem.dispatch?.memory_quota_kb ?? 60;
+      const budgetChars = budgetKb * 512; // rough: ~512 chars per KB in markdown
+
+      // Sort facts by weight desc, then by ts desc (newer first for tie)
+      const sorted = [...mem.working_set.facts].sort((a, b) => {
+        const wDiff = (b.weight ?? 1) - (a.weight ?? 1);
+        if (wDiff !== 0) return wDiff;
+        return b.ts - a.ts; // recent first
+      });
+
+      // Take top 10 respecting budget
+      const topFacts: string[] = [];
+      let charsUsed = 0;
+      for (const f of sorted.slice(0, 10)) {
+        const line = `- [w${f.weight ?? 1}] ${f.text}`;
+        if (charsUsed + line.length > budgetChars && topFacts.length > 0) break;
+        topFacts.push(line);
+        charsUsed += line.length;
+      }
+
+      const facts = topFacts.join("\n");
       const decisions = mem.working_set.decisions.map((d) => `- ${d.text}`).join("\n");
       const lastTodo = mem.tombstone.last_todo
         ? JSON.parse(mem.tombstone.last_todo).map((t: {state: string; text: string}) => `  [${t.state}] ${t.text}`).join("\n")
         : "(unknown)";
-      tpl += `\n\n---\n\n## ⚠️ RESUMED CONTEXT\n\n你正在从中断恢复。上次中断原因：${mem.tombstone.resume_hint ?? "未知"}\n\n**上次 TODO 状态：**\n${lastTodo}\n\n**已确认事实（最近 10 条）：**\n${facts || "(无)"}\n\n**关键决定：**\n${decisions || "(无)"}\n\n**第一句必须输出 todo.set 重申当前计划，然后继续推进。**`;
+      tpl += `\n\n---\n\n## ⚠️ RESUMED CONTEXT\n\n你正在从中断恢复。上次中断原因：${mem.tombstone.resume_hint ?? "未知"}\n\nResume budget: ${budgetKb}KB\n\n**上次 TODO 状态：**\n${lastTodo}\n\n**已确认事实（weight top 10，预算内）：**\n${facts || "(无)"}\n\n**关键决定：**\n${decisions || "(无)"}\n\n**第一句必须输出 todo.set 重申当前计划，然后继续推进。**`;
     }
   }
 
