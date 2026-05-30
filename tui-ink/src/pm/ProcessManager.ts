@@ -244,9 +244,11 @@ export class ProcessManager extends EventEmitter {
         if (filePath) {
           const count = (stats.toolPathCounter.get(filePath) ?? 0) + 1;
           stats.toolPathCounter.set(filePath, count);
-          if (stats.recentEventCount % LOOP_WINDOW === 0 && count > LOOP_THRESHOLD) {
+          // Cumulative alert: fire at LOOP_THRESHOLD, 2×, 3×... regardless of window size
+          // Avoids missing loops whose cycle length exceeds LOOP_WINDOW
+          if (count > 0 && count % LOOP_THRESHOLD === 0) {
             this.emitAlert("warn", "loop_suspected", agentId,
-              `${agentId} 在 ${LOOP_WINDOW} 个事件内对 "${filePath}" 调用工具 ${count} 次`);
+              `${agentId} 对 "${filePath}" 累计调用工具 ${count} 次（每 ${LOOP_THRESHOLD} 次告警一次）`);
           }
         }
         break;

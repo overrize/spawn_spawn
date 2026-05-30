@@ -120,13 +120,16 @@ export class HttpConvAgent extends EventEmitter {
 
   private static _isRetryable(err: any): boolean {
     const msg: string = err?.message ?? "";
+    // HTTP 429 (rate limit) and 5xx (server errors) are retryable
+    if (/^HTTP (429|500|502|503|504):/.test(msg)) return true;
     return (
       err?.code === "ECONNRESET" ||
       msg.includes("socket hang up") ||
       msg.includes("ECONNRESET") ||
       msg.includes("ETIMEDOUT") ||
       msg.includes("ECONNREFUSED") ||
-      msg.includes("request timeout")
+      msg.includes("request timeout") ||
+      msg.includes("stream idle timeout")
     );
   }
 
@@ -149,7 +152,10 @@ export class HttpConvAgent extends EventEmitter {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
-        const delaySec = attempt * 2;
+        // Exponential backoff with jitter: base 2s * attempt, ±30% random
+        const base = attempt * 2;
+        const jitter = base * 0.3 * (Math.random() * 2 - 1);
+        const delaySec = Math.max(1, Math.round(base + jitter));
         process.stderr.write(`[${this.cfg.id}] network error, retry ${attempt}/${MAX_RETRIES} in ${delaySec}s…\n`);
         this.emit("event", {
           v: 1, type: "agent.state", agent: this.cfg.id,
@@ -450,7 +456,7 @@ export class HttpConvAgent extends EventEmitter {
       let fullText = "";
       let buf = "";
       let idleTimer: ReturnType<typeof setTimeout> | null = null;
-      const IDLE_TIMEOUT_MS = 60_000;
+      const IDLE_TIMEOUT_MS = 120_000; // 2min: accommodates slow chain-of-thought models
 
       const resetIdleTimer = () => {
         if (idleTimer) clearTimeout(idleTimer);

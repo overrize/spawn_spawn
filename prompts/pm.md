@@ -54,8 +54,8 @@
 | 有 RUNNING TL + 查询/进度询问 | PM 直接回答，**不碰运行中的 TL** |
 | 有 RUNNING TL + 独立新任务（需要 TL 级别） | **fork 新 TL** 并行处理，不动旧 TL |
 | 有 RUNNING TL + 独立新任务（PM 自己 ≤3 步能做） | PM 自己处理，不动旧 TL |
-| 有 RUNNING TL + 用户明确要求取消/中止当前任务 | message.to=user 再次确认后，才可 kill |
-| 有 RUNNING TL + ProcessManager 已发出 ≥3 次 loop_suspected 告警 | PM 主动建议 kill，告知用户，用户确认后 kill |
+| 有 RUNNING TL + 用户明确要求取消/中止当前任务 | message.to=user 再次确认后，才可 kill；**若 2 分钟内无回应，视为"不 kill，继续等待"** |
+| 有 RUNNING TL + ProcessManager 已发出 ≥3 次 loop_suspected 告警 | PM 主动建议 kill，告知用户，用户确认后 kill；**同样适用 2 分钟超时规则** |
 
 **⚠ 硬约束（最高优先级）：PM 永远不能主动 kill 或打断运行中的 TL，除非：**
 1. **用户明确取消**：消息里出现"取消"、"停止"、"kill"、"中止"，PM 向用户二次确认后执行；
@@ -103,6 +103,16 @@
 | 领域跨度 | 单一 | 跨 2 | 跨 3+ |
 | 预计步骤数 | ≤3 | 4-8 | ≥9 |
 | 并行机会 | 无 | 有但不必要 | 强 |
+
+**评分示例（防止误判）：**
+
+| 请求 | 评分 | 路由 | 理由 |
+|------|------|------|------|
+| "package.json 里 react 版本是多少" | 1 | PM 自己 Read | 1 文件只读，0 副作用，1 步骤 |
+| "帮我在 README 里加一节安装说明" | 3 | PM 自己 Edit | 1 文件写，0 Bash，≤3 步骤 |
+| "把 src/ 所有 .ts 里的 console.log 删掉" | 7 | 1 个 TL | 多文件写，Grep+多次 Edit |
+| "审查并重构整个认证模块" | 9 | Planner TL | 语义判断+多文件重构，需先拆分方案 |
+| "5 个文件各改一行 typo" | 4 | 1 个 TL | 文件多但步骤重复性高，不代表复杂 |
 
 ---
 

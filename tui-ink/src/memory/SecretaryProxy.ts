@@ -241,7 +241,8 @@ export class SecretaryProxy extends EventEmitter {
 
   private addFact(fact: MemoryFact): void {
     const facts = this.memory.working_set.facts;
-    const SIMILARITY_THRESHOLD = 0.6;
+    // 0.72: high enough to avoid false merges on CJK text (common words inflate 0.6 too easily)
+    const SIMILARITY_THRESHOLD = 0.72;
     const now = Date.now();
 
     // Look for a similar existing fact
