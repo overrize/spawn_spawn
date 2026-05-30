@@ -13,6 +13,7 @@ interface State {
   todosByAgent: Map<string, TodoItem[]>;
   stepByAgent: Map<string, string>;
   pendingApprovals: Message[];    // 待审批的 tool calls
+  pendingInputAgents: Set<string>; // agents with queued user messages not yet processed
   cost_usd: number;
   tokens_in: number;
   tokens_out: number;
@@ -30,6 +31,7 @@ const state: State = {
   todosByAgent: new Map(),
   stepByAgent: new Map(),
   pendingApprovals: [],
+  pendingInputAgents: new Set(),
   cost_usd: 0,
   tokens_in: 0,
   tokens_out: 0,
@@ -89,6 +91,17 @@ export function selectAgent(id: string) {
 
 export function userMessage(toAgent: string, text: string) {
   pushMessage(toAgent, { agent: "user", to: toAgent, kind: "text", text });
+  notify();
+}
+
+/** Mark that a user message is queued but the agent hasn't started processing it yet. */
+export function markPendingInput(agentId: string): void {
+  state.pendingInputAgents.add(agentId);
+  notify();
+}
+
+export function clearPendingInput(agentId: string): void {
+  state.pendingInputAgents.delete(agentId);
   notify();
 }
 
@@ -182,6 +195,8 @@ export function applyEvent(e: TuiEvent) {
         if (e.sub !== undefined) a.sub = e.sub;
         else if (e.state === "idle" || e.state === "done" || e.state === "err") a.sub = "";
       }
+      // Agent actually started processing — clear pending-input flag
+      if (e.state === "run") state.pendingInputAgents.delete(e.agent);
       break;
     }
     case "todo.set":
@@ -373,6 +388,7 @@ export function _resetForTest(): void {
   state.todosByAgent.clear();
   state.stepByAgent.clear();
   state.pendingApprovals.length = 0;
+  state.pendingInputAgents.clear();
   state.cost_usd = 0;
   state.tokens_in = 0;
   state.tokens_out = 0;

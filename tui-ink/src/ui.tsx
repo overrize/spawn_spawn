@@ -473,9 +473,11 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
     return () => clearInterval(t);
   }, [a?.state]);
 
+  const isPending = useStore((s) => s.pendingInputAgents.has(s.selectedAgent));
   const isRunning = a?.state === "run";
-  // Reserve 2 rows at the bottom for the live indicator when agent is running
-  const liveBarRows = isRunning ? 2 : 0;
+  const isActive  = isRunning || isPending;
+  // Reserve 2 rows at the bottom for the live indicator when agent is active
+  const liveBarRows = isActive ? 2 : 0;
 
   const allLines = [...msgLines];
   const total    = allLines.length;
@@ -528,10 +530,10 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
         <ScrollBar total={total} visible={availRows} offset={off} />
       </Box>
 
-      {isRunning && (
+      {isActive && (
         <Box flexDirection="column" paddingLeft={1}>
           <Text color={p.dim} bold>{`◆ ${a?.name ?? sel}`}</Text>
-          <Text dimColor>{`  ${step || "generating…"} ${SPINNER[spinIdx]}`}</Text>
+          <Text dimColor>{`  ${isPending && !isRunning ? "waiting in queue…" : step || "generating…"} ${SPINNER[spinIdx]}`}</Text>
         </Box>
       )}
 
@@ -750,7 +752,8 @@ function ProgressBar({ pct, width = 16, accent }: { pct: number; width?: number;
 // ── 底部 status bar ─────────────────────────────────────────────────────────
 export function StatusBar({ demo, exitConfirm, exitSecsLeft }: { demo?: boolean; exitConfirm?: boolean; exitSecsLeft?: number }) {
   const p = usePalette();
-  const agents = useStore((s) => Array.from(s.agents.values()));
+  const agents  = useStore((s) => Array.from(s.agents.values()));
+  const pending = useStore((s) => s.pendingInputAgents.size);
   const running = agents.filter((a) => a.state === "run").length;
   const waiting = agents.filter((a) => a.state === "wait").length;
   const idle    = agents.filter((a) => a.state === "idle").length;
@@ -766,6 +769,7 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft }: { demo?: boolean;
         <Text color={p.accent}>● </Text><Text dimColor>{running} running  </Text>
         <Text dimColor>◯ {idle} idle  </Text>
         {waiting > 0 && <Text color="yellow">⌛ {waiting} waiting  </Text>}
+        {pending > 0 && <Text color="cyan">↩ {pending} queued  </Text>}
         <Text dimColor>$ {cost.toFixed(2)}</Text>
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
         {isDebug && (

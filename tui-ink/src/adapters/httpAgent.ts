@@ -190,9 +190,30 @@ export class HttpConvAgent extends EventEmitter {
       let jsonBuf = "";
       let depth = 0;
 
+      // Repair JSON strings that contain literal newlines/CR (non-standard agent output).
+      // Scans with the same inStr/esc tracking as the depth counter.
+      const repairJsonLiterals = (s: string): string => {
+        let out = "", inStr = false, esc = false;
+        for (const ch of s) {
+          if (esc)                    { esc = false; out += ch; continue; }
+          if (ch === "\\" && inStr)   { esc = true;  out += ch; continue; }
+          if (ch === '"')             { inStr = !inStr; out += ch; continue; }
+          if (inStr && ch === "\n")   { out += "\\n"; continue; }
+          if (inStr && ch === "\r")   { out += "\\r"; continue; }
+          if (inStr && ch === "\t")   { out += "\\t"; continue; }
+          out += ch;
+        }
+        return out;
+      };
+
       const emitParsed = (raw: string) => {
+        let parsed: any;
         try {
-          const parsed = JSON.parse(raw);
+          parsed = JSON.parse(raw);
+        } catch {
+          try { parsed = JSON.parse(repairJsonLiterals(raw)); } catch { parsed = null; }
+        }
+        if (parsed) try {
           // Internal thinking block — show as step status, never as conversation message
           if (parsed?.type === "think") {
             const thought = String(parsed.thought ?? parsed.text ?? "").slice(0, 120);

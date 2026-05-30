@@ -31,7 +31,7 @@ import {
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
   approve, reject, setLayout, scrollBy, setMinLevel, resumeAgent, updateAgentInfo,
-  clearDoneAgents,
+  clearDoneAgents, markPendingInput,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -1139,9 +1139,9 @@ function App() {
     const a = agents.get(target);
     if (!a) return;
 
-    // Optimistic UI: mark agent as running immediately so the status bar
-    // reflects activity before the HTTP request even starts.
-    updateAgentInfo(target, { state: "run", sub: "thinking…" });
+    // Mark pending so the UI shows activity even if the agent is busy and
+    // queues the message. Cleared automatically when agent.state:run fires.
+    markPendingInput(target);
 
     // HttpConvAgent has its own internal _queue and drains one message per turn,
     // so we always call sendCommand immediately — no React-level blocking needed.
