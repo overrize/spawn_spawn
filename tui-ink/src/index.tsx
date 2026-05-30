@@ -966,8 +966,9 @@ function App() {
   const palette = PALETTES[paletteName];
   const layout = useStore((s) => s.layout);
   const scrollOffset    = useStore((s) => s.scrollOffset);
-  const [exitConfirm, setExitConfirm] = useState(false);
-  const exitConfirmTimer              = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [exitSecsLeft, setExitSecsLeft] = useState(0);
+  const exitConfirm                     = exitSecsLeft > 0;
+  const exitConfirmTimer                = useRef<ReturnType<typeof setInterval> | null>(null);
   const cmdHistory      = useRef<string[]>([]);
   const historyIdx      = useRef(-1);
   const browsingHistory = useRef(false);
@@ -1242,12 +1243,21 @@ function App() {
 
   const requestExit = () => {
     if (exitConfirm) {
-      if (exitConfirmTimer.current) clearTimeout(exitConfirmTimer.current);
+      if (exitConfirmTimer.current) clearInterval(exitConfirmTimer.current);
       exit();
       return;
     }
-    setExitConfirm(true);
-    exitConfirmTimer.current = setTimeout(() => setExitConfirm(false), 3000);
+    setExitSecsLeft(3);
+    exitConfirmTimer.current = setInterval(() => {
+      setExitSecsLeft((s) => {
+        if (s <= 1) {
+          clearInterval(exitConfirmTimer.current!);
+          exitConfirmTimer.current = null;
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
   };
 
   // 全局快捷键
@@ -1437,7 +1447,7 @@ function App() {
             ))}
           </Box>
         )}
-        <StatusBar demo={DEMO} exitConfirm={exitConfirm} />
+        <StatusBar demo={DEMO} exitConfirm={exitConfirm} exitSecsLeft={exitSecsLeft} />
       </Box>
     </PaletteContext.Provider>
   );
