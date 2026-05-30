@@ -265,28 +265,45 @@ spawn TL 后，**每 3-5 轮**主动检查一次 Worker 状态：
 
 ---
 
-## 网页内容提取标准方法（PM 自己做 ≤3 步时必须使用）
+## 结构化内容提取决策框架（网页 / XML / 嵌套 JSON）
 
-**⚠️ 绝对不能用的方法（会导致卡死/截断）：**
-- `head -N` / `sed -n '...'`：HTML 结构不按行数切，内容截断几乎必然
-- `grep -B N '</div>'`：第一个闭合 div 就截断，文章 body 100% 丢失
-- `re.DOTALL + .*?` 正则提取 div 内容：非贪婪仍然在第一个嵌套 `</div>` 截断
+### 识别"结构化内容"场景
 
-**✅ 唯一可靠的方法：Python 深度追踪提取**
+当任务满足以下任一特征，立刻进入本框架，**不允许先试行工具再报错**：
+
+| 信号 | 例子 |
+|------|------|
+| 目标是 HTML 页面某个区域的正文 | "读这个网页的文章内容" |
+| 目标结构体有嵌套（div 内有 div，JSON object 内有同类 object） | cnblogs / 知乎 / 微信公众号文章 |
+| 正文边界不是固定行号，而是由开闭标签决定 | 任何 web 页面 |
+
+### 第一步：判断内容类型
+
+```
+是 HTML 页面 → 用【深度追踪提取】
+是 JSON      → python json.loads() 直接解析，取目标 key
+是 XML       → python xml.etree.ElementTree.fromstring()
+```
+
+**绝对禁止的误区（每种都导致过卡死）：**
+- `head -N`：HTML 不按行数切，前 N 行几乎都是 `<head>/<style>`
+- `grep / sed` 配合 `</div>` 边界：第一个嵌套闭合 tag 就截断
+- `re.DOTALL + .*?` 正则：非贪婪 `.*?` 仍然在首个嵌套 `</div>` 停下
+- 反复换不同 bash 命令试错：这是结构问题，换命令无效，换方法才有效
+
+### HTML 深度追踪标准模板（第一个 tool.call 直接用）
 
 ```bash
 curl -s --max-time 15 "URL" | python3 -c "
 import sys, html, re
 content = sys.stdin.read()
-# 找 id 标志
-marker = 'id=\"TARGET_ID\"'  # 替换为实际 id，如 cnblogs_post_body
+marker = 'id=\"TARGET_ID\"'          # 换成实际 id，如 cnblogs_post_body
 start = content.find(marker)
 if start == -1: print('NOT FOUND'); sys.exit(1)
 tag_end = content.index('>', start)
-# 深度追踪匹配闭合 </div>
 depth, i = 1, tag_end + 1
 while i < len(content) and depth > 0:
-    if content[i:i+5] == '<div':   depth += 1; i += 5
+    if content[i:i+5] == '<div':    depth += 1; i += 5
     elif content[i:i+6] == '</div>': depth -= 1; i += (0 if depth == 0 else 6)
     else: i += 1
 body = content[tag_end+1:i]
@@ -297,7 +314,14 @@ print('\n'.join(lines[:200]))
 "
 ```
 
-**失败教训（2026-05 cnblogs 文章读取卡死 3 轮）：**
-- 3 次不同 bash 方法均因 HTML 嵌套 div 截断失败
-- 正确方法第 1 次就能提取全文，无需迭代试错
-- **规则：第 1 个工具调用就必须用深度追踪法，不允许先试 head/grep/sed**
+**不知道 target id？** 先 `curl -s URL | grep -o 'id="[^"]*"' | head -20` 列出所有 id，选正文容器。
+
+### 如果页面没有明显 id
+
+先查找语义 class（`.article-content`、`.post-body`）替换 `id=` 查找方式，或改用第一个 `<article>` / `<main>` tag 做深度追踪起点。
+
+### 收到空输出怎么办
+
+1. 确认 marker 是否找到（`NOT FOUND` → 换 id 或 class）
+2. 检查页面是否需要 JS 渲染（curl 拿不到内容 → 告知用户，需要浏览器工具）
+3. **不要继续换 bash 命令重试**，上报用户说明技术原因
