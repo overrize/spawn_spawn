@@ -262,3 +262,42 @@ spawn TL 后，**每 3-5 轮**主动检查一次 Worker 状态：
 
 每轮最后一个 JSON 必须是更新后的 `todo.set`。
 向用户发出最终汇报后，本轮所有 run/todo 项必须改为 done（或 err）。
+
+---
+
+## 网页内容提取标准方法（PM 自己做 ≤3 步时必须使用）
+
+**⚠️ 绝对不能用的方法（会导致卡死/截断）：**
+- `head -N` / `sed -n '...'`：HTML 结构不按行数切，内容截断几乎必然
+- `grep -B N '</div>'`：第一个闭合 div 就截断，文章 body 100% 丢失
+- `re.DOTALL + .*?` 正则提取 div 内容：非贪婪仍然在第一个嵌套 `</div>` 截断
+
+**✅ 唯一可靠的方法：Python 深度追踪提取**
+
+```bash
+curl -s --max-time 15 "URL" | python3 -c "
+import sys, html, re
+content = sys.stdin.read()
+# 找 id 标志
+marker = 'id=\"TARGET_ID\"'  # 替换为实际 id，如 cnblogs_post_body
+start = content.find(marker)
+if start == -1: print('NOT FOUND'); sys.exit(1)
+tag_end = content.index('>', start)
+# 深度追踪匹配闭合 </div>
+depth, i = 1, tag_end + 1
+while i < len(content) and depth > 0:
+    if content[i:i+5] == '<div':   depth += 1; i += 5
+    elif content[i:i+6] == '</div>': depth -= 1; i += (0 if depth == 0 else 6)
+    else: i += 1
+body = content[tag_end+1:i]
+text = re.sub(r'<[^>]+>', '', body)
+text = html.unescape(text)
+lines = [l.strip() for l in text.splitlines() if l.strip()]
+print('\n'.join(lines[:200]))
+"
+```
+
+**失败教训（2026-05 cnblogs 文章读取卡死 3 轮）：**
+- 3 次不同 bash 方法均因 HTML 嵌套 div 截断失败
+- 正确方法第 1 次就能提取全文，无需迭代试错
+- **规则：第 1 个工具调用就必须用深度追踪法，不允许先试 head/grep/sed**
