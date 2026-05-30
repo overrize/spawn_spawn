@@ -339,28 +339,39 @@ function wrapAt(text: string, cols: number): string[] {
 
 function messagesToLines(msgs: Message[], cols: number, p: Palette): RenderLine[] {
   const out: RenderLine[] = [];
+  // Track last text-message sender to merge consecutive bubbles from same agent
+  let prevTextKey = ""; // "<agent>|<to>"
   for (const m of msgs) {
     if (m.kind === "tool_call") {
+      prevTextKey = "";
       const arg = truncate(JSON.stringify(m.tool_args ?? {}), 52);
       out.push({ text: `► ${m.tool_name}(${arg})`, color: m.needs_approval ? p.warn : p.dim });
       continue;
     }
     if (m.kind === "tool_result") {
+      prevTextKey = "";
       const preview = m.text.replace(/\n/g, " ").slice(0, 120);
       out.push({ text: `  ${preview}`, dim: true });
       continue;
     }
     if (m.kind === "system") {
+      prevTextKey = "";
       const c = m.level === "error" ? p.error : p.warn;
       for (const raw of m.text.split("\n"))
         for (const l of wrapAt(raw, cols)) out.push({ text: l, color: c });
       out.push({ text: "" });
       continue;
     }
-    // Regular text message
+    // Regular text message — merge consecutive bubbles from the same sender+recipient
+    const textKey = `${m.agent}|${m.to}`;
+    const merged  = textKey === prevTextKey;
+    prevTextKey   = textKey;
+
     const who = m.agent === "user" ? "▶ you" : `◆ ${m.agent}`;
     const wc  = m.agent === "user" ? p.accent : (m.level === "error" ? p.error : p.text);
-    out.push({ text: who, color: wc, bold: true });
+    if (!merged) {
+      out.push({ text: who, color: wc, bold: true });
+    }
     let inCode = false;
     for (const raw of m.text.split("\n")) {
       const t = raw.trimStart();
@@ -374,7 +385,7 @@ function messagesToLines(msgs: Message[], cols: number, p: Palette): RenderLine[
       if (/^\|[\s\-:|]+\|$/.test(t)) continue; // separator row
       for (const l of wrapAt("  " + stripInline(raw), cols)) out.push({ text: l });
     }
-    out.push({ text: "" }); // gap between messages
+    out.push({ text: "" }); // gap after each message (merged ones have tighter spacing via empty lines in text)
   }
   return out;
 }

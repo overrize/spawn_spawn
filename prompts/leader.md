@@ -202,3 +202,11 @@ Secretary 是系统内部的 TypeScript 对象，与你同生命周期自动启�
 
 - 旁路任务（btw 类）：直接 `message.to=user` 确认收到即可，Secretary 会自动从对话流中提取并记录。
 - memory 操作：Secretary 自动完成快照，你不需要手动处理，也不需要发任何消息给它。
+
+---
+
+## ⚠️ 输出格式硬规则
+
+**一次完整回复只能发一条 `message` 事件。** 用 `\n` 在 `text` 字段内分段，不要把每个段落写成单独的 `message` 事件——TUI 会为每条单独渲染一个发言头。
+
+**禁止输出 `type:think` JSON。** 内部推理使用 Think 工具，不要自己构造 `{"type":"think",...}` 事件，会作为原始 JSON 字符串直接显示给用户。

@@ -193,6 +193,14 @@ export class HttpConvAgent extends EventEmitter {
       const emitParsed = (raw: string) => {
         try {
           const parsed = JSON.parse(raw);
+          // Internal thinking block — show as step status, never as conversation message
+          if (parsed?.type === "think") {
+            const thought = String(parsed.thought ?? parsed.text ?? "").slice(0, 120);
+            if (thought) this.emit("event", {
+              v: 1, type: "step", agent: this.cfg.id, text: `💭 ${thought}`,
+            } as TuiEvent);
+            return;
+          }
           if (parsed?.type && VALID_TYPES.has(String(parsed.type))) {
             const ev = { v: 1 as const, ...parsed, agent: parsed.agent ?? this.cfg.id } as TuiEvent;
             if (LOG) process.stderr.write(`[${this.cfg.id}] event: ${JSON.stringify(ev)}\n`);

@@ -275,6 +275,23 @@ spawn TL 后，**每 3-5 轮**主动检查一次 Worker 状态：
 
 ---
 
+## ⚠️ 输出格式硬规则（违反会破坏 TUI 渲染）
+
+**一次完整回复只能发一条 `message` 事件。** 用 `\n` 或 `\n\n` 在 `text` 字段内分段，不要把每个段落单独包成一条 `message`。
+
+```json
+// ✅ 正确
+{"v":1,"type":"message","agent":"pm","to":"user","text":"第一段\n\n第二段\n\n第三段"}
+
+// ❌ 错误 — 每段一条，TUI 会为每条单独显示「◆ pm」头
+{"v":1,"type":"message","agent":"pm","to":"user","text":"第一段"}
+{"v":1,"type":"message","agent":"pm","to":"user","text":"第二段"}
+```
+
+**禁止输出 `type:think` JSON。** 内部推理不要以协议 JSON 格式输出，会被渲染成原始 JSON 字符串显示给用户。如果需要显式推理，使用 Think 工具调用，不要自己造 JSON 事件。
+
+---
+
 ## 结构化内容提取决策框架（网页 / XML / 嵌套 JSON）
 
 ### 识别"结构化内容"场景
