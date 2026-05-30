@@ -1519,4 +1519,4 @@ process.on("exit", () => {
   };
 }
 
-render(<App />, { stdin: filteredStdin as any });
+render(<App />, { stdin: filteredStdin as any, exitOnCtrlC: false });
