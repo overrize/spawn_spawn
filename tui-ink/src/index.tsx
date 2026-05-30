@@ -1139,6 +1139,10 @@ function App() {
     const a = agents.get(target);
     if (!a) return;
 
+    // Optimistic UI: mark agent as running immediately so the status bar
+    // reflects activity before the HTTP request even starts.
+    updateAgentInfo(target, { state: "run", sub: "thinking…" });
+
     // HttpConvAgent has its own internal _queue and drains one message per turn,
     // so we always call sendCommand immediately — no React-level blocking needed.
     a.sendCommand({ type: "user.message", text: body });

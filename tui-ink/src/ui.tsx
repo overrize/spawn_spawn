@@ -464,22 +464,30 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   // Flatten all messages into individual display lines
   const msgLines = messagesToLines(filtered, contentCols, p);
 
-  // Append live streaming indicator when agent is generating
-  const liveLines: RenderLine[] = (a?.state === "run" && scrollOffset === 0) ? [
-    { text: `◆ ${a?.name ?? sel}`, color: p.dim, bold: true },
-    { text: `  ${step || "generating…"} ◐`, dim: true },
-  ] : [];
+  // Spinner animation — cycles independently of scroll/render
+  const SPINNER = ["◐", "◓", "◑", "◒"];
+  const [spinIdx, setSpinIdx] = useState(0);
+  useEffect(() => {
+    if (a?.state !== "run") return;
+    const t = setInterval(() => setSpinIdx((i) => (i + 1) % SPINNER.length), 180);
+    return () => clearInterval(t);
+  }, [a?.state]);
 
-  const allLines = [...msgLines, ...liveLines];
+  const isRunning = a?.state === "run";
+  // Reserve 2 rows at the bottom for the live indicator when agent is running
+  const liveBarRows = isRunning ? 2 : 0;
+
+  const allLines = [...msgLines];
   const total    = allLines.length;
 
-  // Clamp offset: can't scroll past start of content
-  const maxOff = Math.max(0, total - availRows);
+  // Clamp offset: can't scroll past start of content (reserve rows for live bar)
+  const scrollRows = Math.max(4, availRows - liveBarRows);
+  const maxOff = Math.max(0, total - scrollRows);
   const off     = Math.min(scrollOffset, maxOff);
 
   // Slice the visible window (newest content at bottom)
   const winEnd   = Math.max(0, total - off);
-  const winStart = Math.max(0, winEnd - availRows);
+  const winStart = Math.max(0, winEnd - scrollRows);
   const visible  = allLines.slice(winStart, winEnd);
 
   return (
@@ -519,6 +527,13 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
         {/* scrollbar */}
         <ScrollBar total={total} visible={availRows} offset={off} />
       </Box>
+
+      {isRunning && (
+        <Box flexDirection="column" paddingLeft={1}>
+          <Text color={p.dim} bold>{`◆ ${a?.name ?? sel}`}</Text>
+          <Text dimColor>{`  ${step || "generating…"} ${SPINNER[spinIdx]}`}</Text>
+        </Box>
+      )}
 
       {pending.length > 0 && <ApprovalCard m={pending[0]!} />}
     </Box>
