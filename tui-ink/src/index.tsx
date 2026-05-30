@@ -966,6 +966,8 @@ function App() {
   const palette = PALETTES[paletteName];
   const layout = useStore((s) => s.layout);
   const scrollOffset    = useStore((s) => s.scrollOffset);
+  const [exitConfirm, setExitConfirm] = useState(false);
+  const exitConfirmTimer              = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cmdHistory      = useRef<string[]>([]);
   const historyIdx      = useRef(-1);
   const browsingHistory = useRef(false);
@@ -1096,7 +1098,7 @@ function App() {
       const text = alerts.map((a) => `[${a.severity}] ${a.code} @ ${a.agent}: ${a.detail}`).join("\n");
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `📊 告警 (${alerts.length} 条):\n${text}\n\n/alerts ack <code> 确认` });
     } },
-    { name: "quit",    desc: "exit the TUI",                handler: () => process.exit(0) },
+    { name: "quit",    desc: "exit the TUI",                handler: () => requestExit() },
   ];
 
   const runCommand = (cmd: string) => {
@@ -1238,10 +1240,20 @@ function App() {
     };
   }, [isRawModeSupported]);
 
+  const requestExit = () => {
+    if (exitConfirm) {
+      if (exitConfirmTimer.current) clearTimeout(exitConfirmTimer.current);
+      exit();
+      return;
+    }
+    setExitConfirm(true);
+    exitConfirmTimer.current = setTimeout(() => setExitConfirm(false), 3000);
+  };
+
   // 全局快捷键
   useInput((char, key) => {
-    if (key.ctrl && char === "c") exit();
-    if (char === "q" && !input) exit();
+    if (key.ctrl && char === "c") { requestExit(); return; }
+    if (char === "q" && !input) { requestExit(); return; }
 
     // 待审批时 y/n 接管
     if (pending.length > 0) {
@@ -1425,7 +1437,7 @@ function App() {
             ))}
           </Box>
         )}
-        <StatusBar demo={DEMO} />
+        <StatusBar demo={DEMO} exitConfirm={exitConfirm} />
       </Box>
     </PaletteContext.Provider>
   );

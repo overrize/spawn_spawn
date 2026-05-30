@@ -722,7 +722,7 @@ function ProgressBar({ pct, width = 16, accent }: { pct: number; width?: number;
 }
 
 // ── 底部 status bar ─────────────────────────────────────────────────────────
-export function StatusBar({ demo }: { demo?: boolean }) {
+export function StatusBar({ demo, exitConfirm }: { demo?: boolean; exitConfirm?: boolean }) {
   const p = usePalette();
   const agents = useStore((s) => Array.from(s.agents.values()));
   const running = agents.filter((a) => a.state === "run").length;
@@ -749,8 +749,11 @@ export function StatusBar({ demo }: { demo?: boolean }) {
         )}
       </Box>
       <Box>
-        <Text dimColor>log:{minLevel}  </Text>
-        <Text dimColor>tab cycle · enter send · [ up  ] dn · y/n approve · q quit</Text>
+        {exitConfirm
+          ? <Text color="yellow" bold>再按一次 q / Ctrl+C 确认退出（3s 后取消）</Text>
+          : <><Text dimColor>log:{minLevel}  </Text>
+             <Text dimColor>tab cycle · enter send · [ up  ] dn · y/n approve · q quit</Text></>
+        }
       </Box>
     </Box>
   );
