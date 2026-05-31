@@ -323,6 +323,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "agent.state" && e.state === "run") {
       actedThisTurn = false;
+      continuations = 0; // fresh nudge budget for each new turn
+      gaveUp = false;
     }
 
     if (e.type === "tool.call") {
@@ -407,8 +409,26 @@ function startLeaderAgent(opts: LeaderOpts): void {
         const hasRun = todos.some((t) => t.state === "run");
         const hasTodo = todos.some((t) => t.state === "todo");
         if (hasRun && !hasTodo) {
+          // All items are "run" with nothing pending → auto-close
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
           applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
+        } else if (hasTodo && continuations < 3) {
+          // Agent replied/acted but still has pending todos — nudge it to continue
+          continuations++;
+          const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+          setImmediate(() => {
+            a.sendCommand({
+              type: "user.message",
+              text: `【系统-自检】你回复了用户但 todo 列表仍有未完成项：${pendingTodos}。\n你有两个选项：\n① 如果这些 todo 应由 TL 执行 → 立刻 spawn TL 并把 todo 列表作为 goal\n② 如果这些是 PM 自己要做的 → 立刻输出 step + tool.call 执行第一步\n不允许回复完就停止。`,
+            });
+          });
+        } else if (hasTodo) {
+          gaveUp = true;
+          const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+          applyEvent({
+            v: 1, type: "message", agent: opts.id, to: "user",
+            text: `⚠ ${opts.id} 回复后 3 次推进仍停滞。未完成项：${pendingTodos}。\n请选择：① 重试  ② 换策略  ③ 放弃`,
+          });
         }
       } else if (!actedThisTurn && !gaveUp) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
@@ -683,6 +703,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (ev.type === "agent.state" && ev.state === "run") {
       workerActedThisTurn = false;
       workerCorrectedThisTurn = false;
+      workerContinuations = 0;
+      workerGaveUp = false;
     }
 
     // Registry is the authority for needsApproval — prevents agent from forging false.
@@ -737,13 +759,22 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
       } else if (workerActedThisTurn) {
-        // Worker acted (sent message to parent or ran tool) — auto-close stale run todos
+        // Worker acted but may still have pending todos — auto-close or nudge
         const todos = getState().todosByAgent.get(e.child) ?? [];
         const hasRun  = todos.some((t) => t.state === "run");
         const hasTodo = todos.some((t) => t.state === "todo");
         if (hasRun && !hasTodo) {
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
           applyEvent({ v: 1, type: "todo.set", agent: e.child, items: closed as any });
+        } else if (hasTodo && workerContinuations < 3) {
+          workerContinuations++;
+          const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+          setImmediate(() => {
+            a.sendCommand({
+              type: "user.message",
+              text: `【系统-自检】你执行了部分操作但 todo 列表仍有未完成项：${pendingTodos}。立刻继续执行下一步：输出 step + tool.call。`,
+            });
+          });
         }
       } else if (!workerActedThisTurn && !workerGaveUp) {
         // Worker planned but didn't act — nudge to continue
