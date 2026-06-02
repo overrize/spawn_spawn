@@ -252,7 +252,7 @@ export async function executeTool(name: string, args: unknown): Promise<ToolResu
 
 // Bash commands that modify filesystem or run installs/git writes — require approval
 const BASH_DESTRUCTIVE =
-  /(?:^|[;&|`]|\$\()\s*(?:rm|del|rmdir|rd|mv|cp|move|copy|mkdir|md|touch|chmod|chown|tee|git\s+(?:commit|push|reset|checkout|branch\s+-[Dd]|stash)|npm\s+(?:install|run|ci)|yarn\s+add|pip\s+install|apt|brew|choco)|\s*&?>>?[^>=]/i;
+  /(?:^|[;&|`]|\$\()\s*(?:rm|del|rmdir|rd|mv|cp|move|copy|mkdir|md|touch|chmod|chown|tee|git\s+(?:reset|checkout|branch\s+-[Dd]|stash)|npm\s+(?:install|run|ci)|yarn\s+add|pip\s+install|apt|brew|choco)|\s*&?>>?[^>=]/i;
 
 /**
  * 检查工具是否需要审批（注册表是权威来源，防止 agent 篡改 needs_approval）
