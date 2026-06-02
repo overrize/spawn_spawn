@@ -105,6 +105,11 @@ export function clearPendingInput(agentId: string): void {
   notify();
 }
 
+export function abortAgent(agentId: string): void {
+  state.pendingApprovals = state.pendingApprovals.filter((p) => p.agent !== agentId);
+  notify();
+}
+
 export function approve(toolId: string) {
   const m = state.pendingApprovals.find((p) => p.tool_id === toolId);
   if (m) m.approved = true;

@@ -13,7 +13,7 @@
 //   --model=<id>      override leader model (default claude-sonnet-4-5)
 //   --prompts=<dir>   directory holding _base.md / leader.md / ... (default ../prompts)
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { render, useApp, useInput, useStdin, Box, Text } from "ink";
 import { PassThrough } from "node:stream";
 import { execSync, spawnSync } from "node:child_process";
@@ -30,7 +30,7 @@ import {
 } from "./ui.js";
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
-  approve, reject, setLayout, scrollBy, setMinLevel, resumeAgent, updateAgentInfo,
+  approve, reject, abortAgent, setLayout, scrollBy, setMinLevel, resumeAgent, updateAgentInfo,
   clearDoneAgents, markPendingInput,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
@@ -990,6 +990,7 @@ function App() {
   const { exit } = useApp();
   const { stdin, isRawModeSupported } = useStdin();
   const [input, setInput] = useState("");
+
   const agentList = useStore((s) => Array.from(s.agents.keys()));
   const sel = useStore((s) => s.selectedAgent);
   const pending = useStore((s) => s.pendingApprovals);
@@ -1276,6 +1277,34 @@ function App() {
     };
   }, [isRawModeSupported]);
 
+  const handleESCInterrupt = () => {
+    const selId = getState().selectedAgent;
+    const selState = getState().agents.get(selId)?.state;
+    if (selState === "run") {
+      agents.get(selId)?.kill?.();
+      abortAgent(selId);
+      applyEvent({ v: 1, type: "message", agent: selId, to: "user", text: `⏹ interrupted by ESC` });
+    } else {
+      // 无 agent 运行时：加载最后一条 user message 到输入框供编辑
+      const msgs = getState().messagesByAgent.get(selId);
+      if (msgs && msgs.length > 0) {
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i]!.agent === "user") {
+            const text = msgs[i]!.text ?? "";
+            setInput(text);
+            // 将加载的消息加入命令历史末尾，以便 ↓ 键恢复空行
+            if (!cmdHistory.current.length || cmdHistory.current[cmdHistory.current.length - 1] !== text) {
+              cmdHistory.current.push(text);
+              historyIdx.current = -1;
+              browsingHistory.current = false;
+            }
+            return;
+          }
+        }
+      }
+    }
+  };
+
   const requestExit = () => {
     if (exitConfirm) {
       if (exitConfirmTimer.current) clearInterval(exitConfirmTimer.current);
@@ -1299,6 +1328,7 @@ function App() {
   useInput((char, key) => {
     if (key.ctrl && char === "c") { requestExit(); return; }
     if (char === "q" && !input) { requestExit(); return; }
+    if (key.escape) { handleESCInterrupt(); return; }
 
     // 待审批时 y/n 接管
     if (pending.length > 0) {
@@ -1454,6 +1484,7 @@ function App() {
           focused={pending.length === 0}
           value={input}
           onChange={setInput}
+          onESC={handleESCInterrupt}
           onSubmit={(v) => {
             if (v.trim()) {
               cmdHistory.current.push(v.trim());

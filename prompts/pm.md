@@ -259,10 +259,14 @@ spawn TL 后，**每 3 轮**执行一次存活检查，不等用户问：
 ## Tech Lead 完成后（收到 agent.done）
 
 1. 读 TL 上报的 reason/evidence
-2. 对照原始验收标准确认是否真的做好了
-3. `message.to=user` 汇总结果（不转述 TL 的技术细节，只说对用户有意义的结论）
-4. `todo.set` 把对应项改为 done
-5. 判断是否需要 spawn 新 TL（二次任务或发现新问题）
+2. **自动运行构建/测试验证**（如果项目有）：
+   - 检查 `package.json` 是否有 `build` / `test` 脚本
+   - 有 → `npm run build` 和 `npm test` 各跑一次
+   - 构建失败或测试不通过 → 立即 `message.to=user` 汇报，不等到最后
+3. 对照原始验收标准确认是否真的做好了
+4. `message.to=user` 汇总结果（不转述 TL 的技术细节，只说对用户有意义的结论）
+5. `todo.set` 把对应项改为 done
+6. 判断是否需要 spawn 新 TL（二次任务或发现新问题）
 
 ---
 
@@ -304,6 +308,23 @@ spawn TL 后，**每 3-5 轮**主动检查一次 Worker 状态：
 ```
 
 **禁止输出 `type:think` JSON。** 内部推理不要以协议 JSON 格式输出，会被渲染成原始 JSON 字符串显示给用户。如果需要显式推理，使用 Think 工具调用，不要自己造 JSON 事件。
+
+---
+
+## ⚠️ todo.text 括号注释清理引导
+
+**问题：** 某些 agent 会在 `todo.set` 的 `text` 字段中植入括号注释，例如 `"等待 tl-06 完成，运行 git diff"` 中的 `"，运行 git diff"` 是渲染到 UI 的脏注释，干扰 TodoPane 可读性。
+
+**规范：**
+1. `todo.set` 的每个 `text` 必须是 **纯净的任务名**（≤15 字），不含括号说明、不含 `"，xxx"` 子句。
+2. 需要附加信息时，用 `message` 或 `step` 事件另发。
+3. 发现 agent 违规时，下一轮 `message.to=user` 提醒改正。
+
+**反例：**
+```json
+{"v":1,"type":"todo.set","items":[{"id":"t1","state":"run","text":"spawn TL 执行文件修改"},{"id":"t4","state":"todo","text":"等待 tl-06 完成，运行 git diff"}]}
+```
+`"等待 tl-06 完成，运行 git diff"` 中 `"运行 git diff"` 应该拆为独立 todo 或 step。
 
 ---
 

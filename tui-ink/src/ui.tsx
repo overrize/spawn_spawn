@@ -3,7 +3,7 @@
 // 配色:paper 主题用 Ink 默认终端色;状态点用文字字形。
 
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { Box, Text, measureElement } from "ink";
+import { Box, Text, measureElement, useInput } from "ink";
 import type { DOMElement } from "ink";
 import TextInput from "ink-text-input";
 import * as fs from "node:fs";
@@ -721,16 +721,35 @@ export function TodoPane({ width }: { width: number }) {
   );
 }
 
+// Parse parentheses in todo text: wraps （...） and (...) content in gray Text
+function parseTodoText(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const re = /（[^）]*）|\([^)]*\)/;
+  const m = re.exec(text);
+  if (m) {
+    const idx = m.index;
+    if (idx > 0) nodes.push(text.slice(0, idx));
+    nodes.push(<Text key={nodes.length} color="gray">{m[0]}</Text>);
+    const after = text.slice(idx + m[0].length);
+    if (after) nodes.push(after);
+  } else {
+    nodes.push(text);
+  }
+  return nodes;
+}
+
 function TodoRow({ t, dimmed }: { t: TodoItem; dimmed?: boolean }) {
   const p = usePalette();
   const color = dimmed ? p.dim :
     t.state === "done" ? p.success : t.state === "run" ? p.accent :
     t.state === "warn" ? p.warn : t.state === "err" ? p.error : undefined;
+  const displayText = truncate(t.text, 20);
+  const parts = React.useMemo(() => parseTodoText(displayText), [displayText]);
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box>
         <Text color={color}>{TODO_GLYPH[t.state]} </Text>
-        <Text dimColor={t.state === "done" || dimmed}>{truncate(t.text, 20)}</Text>
+        <Text dimColor={t.state === "done" || dimmed}>{parts}</Text>
       </Box>
       {!dimmed && t.state === "run" && t.progress != null && (
         <Box marginLeft={2}><ProgressBar pct={t.progress} accent={p.accent} /></Box>
@@ -845,15 +864,21 @@ export function DagView({ maxHeight = 12 }: { maxHeight?: number }) {
 
 // ── 输入栏 ──────────────────────────────────────────────────────────────────
 export function InputBar({
-  value, onChange, onSubmit, hint, focused = true,
+  value, onChange, onSubmit, hint, focused = true, onESC,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSubmit: (v: string) => void;
   hint?: string;
   focused?: boolean;
+  onESC?: () => void;
 }) {
   const p = usePalette();
+  useInput((_char, key) => {
+    if (key.escape && focused && onESC) {
+      onESC();
+    }
+  });
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   // › (2) + paddingX*2 (2) + borders (0, borderLeft/Right=false) + counter (5 max)
   const availInputCols = termCols - 9;
