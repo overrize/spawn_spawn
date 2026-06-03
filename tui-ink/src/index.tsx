@@ -455,6 +455,16 @@ function startLeaderAgent(opts: LeaderOpts): void {
               text: `⚠ ${opts.id} 经过 3 次推进仍无有效行动。未完成项：${pendingTodos}。\n请选择：\n① 重试 — 输入新指令\n② 换策略 — 描述新方法\n③ 放弃 — 结束当前任务`,
             });
           }
+        } else if (continuations < 2) {
+          // PM processed a message but produced no output (no message, tool.call, or spawn)
+          // and has no pending todos. Nudge it to actually reply.
+          continuations++;
+          setImmediate(() => {
+            a.sendCommand({
+              type: "user.message",
+              text: "【系统-回复缺失】你刚才处理了消息但没有输出任何内容（无 message、无 tool.call、无 spawn）。请立刻 message→user 回复用户，或说明你在等待什么。",
+            });
+          });
         } else {
           continuations = 0;
         }
@@ -799,6 +809,15 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
               text: `[系统-卡住] ${e.child} 经过 3 次推进仍无有效行动，任务可能超出能力范围。未完成项：${pendingTodos}。\n请立即 message→user 说明情况，并提供选项：\n① 重试（重新 spawn 同目标 worker）\n② 换策略（spawn 新 worker 用不同方法）\n③ 放弃该子任务，继续其他工作\n④ 人工介入`,
             });
           }
+        } else if (workerContinuations < 2) {
+          // Worker processed a message but produced no output, and has no pending todos.
+          workerContinuations++;
+          setImmediate(() => {
+            a.sendCommand({
+              type: "user.message",
+              text: "【系统-回复缺失】你处理了消息但没有任何输出。请立刻 message→parent 报告当前状态，或继续执行任务。",
+            });
+          });
         } else {
           workerContinuations = 0;
         }

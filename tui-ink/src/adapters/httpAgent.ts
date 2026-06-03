@@ -187,8 +187,12 @@ export class HttpConvAgent extends EventEmitter {
       if (LOG) process.stderr.write(`[${this.cfg.id}] raw response:\n${fullText}\n---\n`);
 
       // 解析协议 JSON。支持单行和多行格式，用大括号深度计数累积完整对象。
+      // inStr/esc MUST persist across lines so multi-line string values (e.g. a Python
+      // script embedded in a Bash args field) don't cause {} inside strings to corrupt depth.
       let jsonBuf = "";
       let depth = 0;
+      let jsonInStr = false;
+      let jsonEsc = false;
 
       // Repair JSON strings that contain literal newlines/CR (non-standard agent output).
       // Scans with the same inStr/esc tracking as the depth counter.
@@ -240,34 +244,36 @@ export class HttpConvAgent extends EventEmitter {
         const trimmed = line.trim();
         if (!trimmed) {
           // 空行：如果当前不在 JSON 块里，忽略；否则继续累积（理论上不该有空行）
-          if (depth === 0 && jsonBuf) { emitParsed(jsonBuf); jsonBuf = ""; }
+          if (depth === 0 && !jsonInStr && jsonBuf) {
+            emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false;
+          }
           continue;
         }
 
-        if (depth === 0 && !trimmed.startsWith("{")) {
+        if (depth === 0 && !jsonInStr && !trimmed.startsWith("{")) {
           // 纯散文行（不以 { 开头）
-          if (jsonBuf) { emitParsed(jsonBuf); jsonBuf = ""; }
+          if (jsonBuf) { emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false; }
           emitParsed(trimmed);
           continue;
         }
 
         // 计大括号深度，正确跳过字符串内的括号
+        // jsonInStr/jsonEsc are declared outside the line loop so multi-line string
+        // values (e.g. Python scripts in Bash args) don't corrupt depth tracking.
         jsonBuf += (jsonBuf ? "\n" : "") + trimmed;
-        let inStr = false, esc = false;
         for (const ch of trimmed) {
-          if (esc)            { esc = false; continue; }
-          if (ch === "\\" && inStr) { esc = true;  continue; }
-          if (ch === '"')     { inStr = !inStr; continue; }
-          if (inStr)          continue;
-          if (ch === "{")     depth++;
-          else if (ch === "}") depth--;
+          if (jsonEsc)               { jsonEsc = false; continue; }
+          if (ch === "\\" && jsonInStr) { jsonEsc = true; continue; }
+          if (ch === '"')            { jsonInStr = !jsonInStr; continue; }
+          if (jsonInStr)             continue;
+          if (ch === "{")            depth++;
+          else if (ch === "}")       depth--;
         }
 
-        if (depth <= 0) {
+        if (depth <= 0 && !jsonInStr) {
           // 对象闭合
           emitParsed(jsonBuf);
-          jsonBuf = "";
-          depth = 0;
+          jsonBuf = ""; depth = 0; jsonInStr = false; jsonEsc = false;
         }
       }
       if (jsonBuf.trim()) emitParsed(jsonBuf);
