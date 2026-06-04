@@ -229,7 +229,29 @@ export class HttpConvAgent extends EventEmitter {
         try {
           parsed = JSON.parse(raw);
         } catch {
-          try { parsed = JSON.parse(repairJsonLiterals(raw)); } catch { parsed = null; }
+          const repaired = repairJsonLiterals(raw);
+          try {
+            parsed = JSON.parse(repaired);
+          } catch (e2) {
+            // Last resort: try closing unclosed braces (truncated LLM response)
+            let closed: any = null;
+            for (let extra = 1; extra <= 3; extra++) {
+              try { closed = JSON.parse(repaired + "}".repeat(extra)); break; } catch { /* try more */ }
+            }
+            if (closed) {
+              process.stderr.write(
+                `[${this.cfg.id}] JSON repaired by closing ${raw.length < repaired.length + 3 ? "braces" : "?"}: ${raw.slice(0, 120)}\n`
+              );
+              parsed = closed;
+            } else {
+              // Always log parse failures to stderr — capture with: npm run dev 2>debug.log
+              process.stderr.write(
+                `[${this.cfg.id}] JSON parse FAILED: ${(e2 as Error).message}\n` +
+                `  raw(${raw.length}): ${raw.slice(0, 300)}\n`
+              );
+              parsed = null;
+            }
+          }
         }
         if (parsed) try {
           // Internal thinking block — show as step status, never as conversation message
