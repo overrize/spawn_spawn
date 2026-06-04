@@ -1224,6 +1224,24 @@ function App() {
     ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle", sub: "waiting for first message", model: cfg.agents.leader.model });
     // process-monitor: visual representation of the TypeScript ProcessManager in the agent tree
     ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "idle", sub: "", model: "internal" });
+
+    // Auto-resume: if there's an unfinished PM session from a previous run, resume it automatically.
+    // "Unfinished" means final_status === null (PM was killed / crashed before agent.done).
+    const pmMem = loadMemory("pm");
+    if (pmMem && pmMem.tombstone?.final_status === null && !pmStarted.current) {
+      pmStarted.current = true;
+      const resumeHint = pmMem.tombstone.resume_hint ?? "你正在从上次中断恢复，请重申当前计划并继续推进。";
+      const deadWorkers = listUnfinishedAgents()
+        .filter((m) => m.parent_chain?.includes("pm") && m.agent_id !== "pm")
+        .map((m) => m.agent_id);
+      const deadNote = deadWorkers.length > 0
+        ? `\n\n⚠️ 以下子 agent 在上次会话中存在但当前不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划。`
+        : "";
+      const hint = resumeHint + deadNote;
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `🔄 检测到未完成会话 (hash: ${pmMem.session_hash ?? "?"})，自动恢复中…` });
+      startLeaderAgent({ id: "pm", firstMessage: hint, resumedMemoryId: "pm", promptFile: "pm" });
+    }
   }, []);
 
   // 鼠标滚轮 + 粘贴处理:
