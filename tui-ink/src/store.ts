@@ -22,6 +22,7 @@ interface State {
   layout: "v1" | "v3";
   scrollOffset: number;
   agentPaneScroll: number;   // manual scroll offset for the left agent panel
+  effort: "min" | "mid" | "high" | "max";
   minLevel: LogLevel;
 }
 
@@ -41,6 +42,7 @@ const state: State = {
   layout: "v1",
   scrollOffset: 0,
   agentPaneScroll: 0,
+  effort: "mid",
   minLevel: "info",
 };
 
@@ -151,6 +153,11 @@ export function switchSession(agentId: string, sessionId: string): void {
 
 export function setLayout(l: "v1" | "v3"): void {
   state.layout = l;
+  notify();
+}
+
+export function setEffort(e: "min" | "mid" | "high" | "max"): void {
+  state.effort = e;
   notify();
 }
 
@@ -388,17 +395,43 @@ export function scrollAgentBy(delta: number, totalAgents: number, maxVisible: nu
 }
 
 /** Hide all completed/errored non-permanent agents from the panel. */
-export function pruneAgents(): number {
+/**
+ * Collect all descendant agent ids for a given root (BFS).
+ * The root itself is included. PERMANENT_IDS are always excluded.
+ */
+function collectSubtree(rootId: string): string[] {
+  const result: string[] = [];
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (PERMANENT_IDS.has(id)) continue;
+    result.push(id);
+    for (const [, a] of state.agents) {
+      if (a.parent === id) queue.push(a.id);
+    }
+  }
+  return result;
+}
+
+/**
+ * Hide agents from the panel.
+ * - No args → hide all done/err non-permanent agents.
+ * - targetId  → hide that agent + all its descendants (any state), PM-immune.
+ */
+export function pruneAgents(targetId?: string): number {
+  const ids = targetId ? collectSubtree(targetId) : null;
   let count = 0;
   for (const [, agent] of state.agents) {
     if (PERMANENT_IDS.has(agent.id) || agent.hidden) continue;
-    if (agent.state === "done" || agent.state === "err") {
-      agent.hidden = true;
-      count++;
-      if (state.selectedAgent === agent.id) {
-        state.selectedAgent = agent.parent ?? "pm";
-        state.scrollOffset = 0;
-      }
+    const shouldHide = ids
+      ? ids.includes(agent.id)                              // targeted: any state
+      : (agent.state === "done" || agent.state === "err");  // global: done/err only
+    if (!shouldHide) continue;
+    agent.hidden = true;
+    count++;
+    if (state.selectedAgent === agent.id) {
+      state.selectedAgent = agent.parent ?? "pm";
+      state.scrollOffset = 0;
     }
   }
   state.agentPaneScroll = 0;
@@ -429,5 +462,6 @@ export function _resetForTest(): void {
   state.layout = "v1";
   state.scrollOffset = 0;
   state.agentPaneScroll = 0;
+  state.effort = "mid";
   state.minLevel = "info";
 }

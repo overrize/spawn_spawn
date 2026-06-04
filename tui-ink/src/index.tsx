@@ -25,13 +25,14 @@ import { fileURLToPath } from "node:url";
 
 import { HttpConvAgent } from "./adapters/httpAgent.js";
 import {
-  TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar,
+  TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar, EffortBar,
+  EFFORT_LEVELS, type Effort,
   DagView, VDivider, PaletteContext, PALETTES,
 } from "./ui.js";
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
-  approve, reject, abortAgent, setLayout, scrollBy, scrollAgentBy, setMinLevel, resumeAgent,
-  updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents,
+  approve, reject, abortAgent, setLayout, scrollBy, scrollAgentBy, setMinLevel, setEffort,
+  resumeAgent, updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -1031,6 +1032,8 @@ function App() {
   const layout = useStore((s) => s.layout);
   const scrollOffset     = useStore((s) => s.scrollOffset);
   const agentPaneScroll  = useStore((s) => s.agentPaneScroll);
+  const effort           = useStore((s) => s.effort);
+  const [effortSelecting, setEffortSelecting] = useState(false);
   const [exitSecsLeft, setExitSecsLeft] = useState(0);
   const exitConfirm                     = exitSecsLeft > 0;
   const exitConfirmTimer                = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1066,10 +1069,37 @@ function App() {
 
   const COMMANDS: CmdDef[] = [
     { name: "pause",   desc: "kill the selected agent",     handler: () => { const sel = getState().selectedAgent; agents.get(sel)?.kill(); } },
-    { name: "prune",   desc: "hide all completed TL/Worker agents from the panel", handler: () => {
-      const n = pruneAgents();
-      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-        text: n > 0 ? `🧹 已隐藏 ${n} 个已完成的 agent，输入 /resume <id> 可恢复` : "没有可隐藏的已完成 agent" });
+    { name: "effort",  desc: "/effort [min|mid|high|max] — set or open effort selector", handler: (args) => {
+      const lvl = args[0] as Effort | undefined;
+      if (lvl && (EFFORT_LEVELS as readonly string[]).includes(lvl)) {
+        confirmEffort(lvl);
+      } else {
+        setEffortSelecting(true);
+      }
+    } },
+    { name: "prune",   desc: "/prune [agentId] — hide done agents; with id: hide that subtree", handler: (args) => {
+      const target = args[0];
+      if (target) {
+        // Validate: must exist and not be permanent
+        const info = getState().agents.get(target);
+        if (!info) {
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: `未找到 agent "${target}"` });
+          return;
+        }
+        if (target === "pm" || target === "process-monitor") {
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: `pm 和 process-monitor 不能被 prune` });
+          return;
+        }
+        const n = pruneAgents(target);
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: `🧹 已隐藏 ${target} 及其 ${n - 1} 个子 agent（共 ${n} 个）` });
+      } else {
+        const n = pruneAgents();
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: n > 0 ? `🧹 已隐藏 ${n} 个已完成的 agent` : "没有可隐藏的已完成 agent" });
+      }
     } },
     { name: "sessions", desc: "列出所有未完成会话及 session hash", handler: () => {
       const sessions = listUnfinishedAgents();
@@ -1362,6 +1392,28 @@ function App() {
     };
   }, [isRawModeSupported]);
 
+  const EFFORT_DESC_SHORT: Record<Effort, string> = {
+    min:  "PM 优先自理，仅复杂多文件任务才 spawn TL",
+    mid:  "默认平衡，对话/单文件自理，其余 spawn TL",
+    high: "激进派发，任何工具调用都优先 spawn TL",
+    max:  "全双工，spawn 后立即回待命，不等 TL 完成",
+  };
+
+  const confirmEffort = (e: Effort) => {
+    setEffort(e);
+    setEffortSelecting(false);
+    // Notify PM so it can adjust spawning strategy immediately
+    const pm = agents.get("pm");
+    if (pm) {
+      pm.sendCommand({
+        type: "user.message",
+        text: `[系统-effort] effort 已调整为 "${e}"。${EFFORT_DESC_SHORT[e]}。请根据新等级调整后续 spawn 决策。`,
+      });
+    }
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+      text: `⚡ effort → ${e}  (${EFFORT_DESC_SHORT[e]})` });
+  };
+
   const handleESCInterrupt = () => {
     const selId = getState().selectedAgent;
     const selState = getState().agents.get(selId)?.state;
@@ -1453,8 +1505,11 @@ function App() {
       if (char === "]") { scrollBy(-3); return; } // newer = unhide 3 recent msgs
     }
 
-    // P/F/C shortcuts — only when not typing and no pending approvals
+    // P/F/C/E shortcuts — only when not typing and no pending approvals
     if (!input && !pending.length) {
+      // E — open effort selector (ESC/Enter handled inside EffortBar's own useInput)
+      if (char === "E" && !effortSelecting) { setEffortSelecting(true); return; }
+      if (key.escape && effortSelecting)    { setEffortSelecting(false); return; }
       if (char === "P") {
         const id = getState().selectedAgent;
         agents.get(id)?.kill?.();
@@ -1567,41 +1622,46 @@ function App() {
             );
           })()
         )}
-        <InputBar
-          key={completeTick.current}
-          focused={pending.length === 0}
-          value={input}
-          onChange={setInput}
-          onESC={handleESCInterrupt}
-          onSubmit={(v) => {
-            if (v.trim()) {
-              cmdHistory.current.push(v.trim());
-              historyIdx.current = -1;
-              browsingHistory.current = false;
-            }
-            dispatchUser(v);
-            setInput("");
-          }}
-          hint={
-            pending.length > 0
-              ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
-              : (() => {
-                  const selState = getState().agents.get(getState().selectedAgent)?.state;
-                  return selState === "run" ? "working… (message queued)" : undefined;
-                })()
-          }
-        />
-        {slashMatches.length > 0 && (
-          <Box paddingX={2} flexDirection="column">
-            {slashMatches.map((c) => (
-              <Box key={c.name}>
-                <Text color="cyan">{`/${c.name}`.padEnd(12)}</Text>
-                <Text dimColor>{c.desc}</Text>
-              </Box>
-            ))}
-          </Box>
-        )}
-        <StatusBar demo={DEMO} exitConfirm={exitConfirm} exitSecsLeft={exitSecsLeft} />
+        {effortSelecting
+          ? <EffortBar current={effort} onConfirm={confirmEffort} onCancel={() => setEffortSelecting(false)} />
+          : <>
+              <InputBar
+                key={completeTick.current}
+                focused={pending.length === 0}
+                value={input}
+                onChange={setInput}
+                onESC={handleESCInterrupt}
+                onSubmit={(v) => {
+                  if (v.trim()) {
+                    cmdHistory.current.push(v.trim());
+                    historyIdx.current = -1;
+                    browsingHistory.current = false;
+                  }
+                  dispatchUser(v);
+                  setInput("");
+                }}
+                hint={
+                  pending.length > 0
+                    ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
+                    : (() => {
+                        const selState = getState().agents.get(getState().selectedAgent)?.state;
+                        return selState === "run" ? "working… (message queued)" : undefined;
+                      })()
+                }
+              />
+              {slashMatches.length > 0 && (
+                <Box paddingX={2} flexDirection="column">
+                  {slashMatches.map((c) => (
+                    <Box key={c.name}>
+                      <Text color="cyan">{`/${c.name}`.padEnd(12)}</Text>
+                      <Text dimColor>{c.desc}</Text>
+                    </Box>
+                  ))}
+                </Box>
+              )}
+            </>
+        }
+        <StatusBar demo={DEMO} exitConfirm={exitConfirm} exitSecsLeft={exitSecsLeft} effort={effort} />
       </Box>
     </PaletteContext.Provider>
   );

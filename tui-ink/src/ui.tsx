@@ -773,7 +773,66 @@ function ProgressBar({ pct, width = 16, accent }: { pct: number; width?: number;
 }
 
 // ── 底部 status bar ─────────────────────────────────────────────────────────
-export function StatusBar({ demo, exitConfirm, exitSecsLeft }: { demo?: boolean; exitConfirm?: boolean; exitSecsLeft?: number }) {
+// ── Effort 等级 ──────────────────────────────────────────────────────────────
+export const EFFORT_LEVELS = ["min", "mid", "high", "max"] as const;
+export type Effort = typeof EFFORT_LEVELS[number];
+
+const EFFORT_DESC: Record<Effort, string> = {
+  min:  "PM 优先自理，仅复杂多文件任务才 spawn",
+  mid:  "默认平衡，对话/单文件自理，其余 spawn",
+  high: "激进派发，任何工具调用都优先 spawn TL",
+  max:  "全双工，spawn 后立即回待命，不等 TL 完成",
+};
+
+/** Horizontal effort selector — replaces InputBar when active. */
+export function EffortBar({
+  current, onConfirm, onCancel,
+}: {
+  current: Effort;
+  onConfirm: (e: Effort) => void;
+  onCancel: () => void;
+}) {
+  const p = usePalette();
+  const [sel, setSel] = useState<number>(EFFORT_LEVELS.indexOf(current));
+
+  useInput((_ch, key) => {
+    if (key.leftArrow)  { setSel((s) => Math.max(0, s - 1)); return; }
+    if (key.rightArrow) { setSel((s) => Math.min(EFFORT_LEVELS.length - 1, s + 1)); return; }
+    if (key.return)     { onConfirm(EFFORT_LEVELS[sel]!); return; }
+    if (key.escape)     { onCancel(); return; }
+  });
+
+  const chosen = EFFORT_LEVELS[sel]!;
+  return (
+    <Box flexDirection="column" borderStyle="single" borderColor="gray"
+         borderLeft={false} borderRight={false} paddingX={1}>
+      {/* selector row */}
+      <Box>
+        <Text dimColor>effort  </Text>
+        <Text dimColor>◀  </Text>
+        {EFFORT_LEVELS.map((e, i) => (
+          <Text key={e}
+            inverse={i === sel}
+            bold={i === sel}
+            color={i === sel ? undefined : p.dim}
+          >
+            {` ${e} `}
+          </Text>
+        ))}
+        <Text dimColor>  ▶  </Text>
+        <Text dimColor>↩ confirm  esc cancel</Text>
+      </Box>
+      {/* description row */}
+      <Box>
+        <Text dimColor>  {EFFORT_DESC[chosen]}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
+  demo?: boolean; exitConfirm?: boolean; exitSecsLeft?: number; effort?: Effort;
+}) {
   const p = usePalette();
   const agents  = useStore((s) => Array.from(s.agents.values()));
   const pending = useStore((s) => s.pendingInputAgents.size);
@@ -794,6 +853,7 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft }: { demo?: boolean;
         {waiting > 0 && <Text color="yellow">⌛ {waiting} waiting  </Text>}
         {pending > 0 && <Text color="cyan">↩ {pending} queued  </Text>}
         <Text dimColor>$ {cost.toFixed(2)}</Text>
+        {effort && <Text dimColor>  effort:<Text color={p.accent}>{effort}</Text></Text>}
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
         {isDebug && (
           <Text color={contentCols <= 20 ? "red" : p.dim}>
@@ -805,7 +865,7 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft }: { demo?: boolean;
         {exitConfirm
           ? <Text color="yellow" bold>再按一次 q / Ctrl+C 确认退出（{exitSecsLeft}s）</Text>
           : <><Text dimColor>log:{minLevel}  </Text>
-             <Text dimColor>tab cycle · enter send · [ up  ] dn · y/n approve · q quit</Text></>
+             <Text dimColor>E effort · tab cycle · [ ] scroll · y/n approve · q quit</Text></>
         }
       </Box>
     </Box>
