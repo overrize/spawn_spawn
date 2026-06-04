@@ -276,8 +276,29 @@ export class HttpConvAgent extends EventEmitter {
         } as TuiEvent);
       };
 
+      // State for stripping <thinking>...</thinking> blocks (DeepSeek embeds in content)
+      let inThinking = false;
+      let thinkingStepEmitted = false;
+
       for (const line of fullText.split("\n")) {
         const trimmed = line.trim();
+
+        // Skip markdown fences (```json, ```, etc.) — LLMs sometimes wrap JSON in fences
+        if (/^```/.test(trimmed)) continue;
+
+        // Strip <thinking>...</thinking> blocks; show a single "thinking…" step instead
+        if (!inThinking && trimmed.includes("<thinking>")) {
+          inThinking = true;
+          if (!thinkingStepEmitted) {
+            thinkingStepEmitted = true;
+            this.emit("event", { v: 1, type: "step", agent: this.cfg.id, text: "thinking…" } as TuiEvent);
+          }
+        }
+        if (inThinking) {
+          if (trimmed.includes("</thinking>")) inThinking = false;
+          continue;
+        }
+
         if (!trimmed) {
           // 空行：如果当前不在 JSON 块里，忽略；否则继续累积（理论上不该有空行）
           if (depth === 0 && !jsonInStr && jsonBuf) {

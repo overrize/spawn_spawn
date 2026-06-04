@@ -1353,7 +1353,10 @@ function App() {
   useInput((char, key) => {
     if (key.ctrl && char === "c") { requestExit(); return; }
     if (char === "q" && !input) { requestExit(); return; }
-    if (key.escape) { handleESCInterrupt(); return; }
+    // Only handle ESC here when InputBar is NOT focused (pending approvals).
+    // When InputBar is focused (pending.length===0), it handles ESC itself via onESC prop.
+    // Handling it in both places caused double "⏹ interrupted by ESC" messages.
+    if (key.escape && pending.length > 0) { handleESCInterrupt(); return; }
 
     // 待审批时 y/n 接管
     if (pending.length > 0) {

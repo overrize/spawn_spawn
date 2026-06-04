@@ -61,7 +61,8 @@ describe("toolNeedsApproval — Bash command classification", () => {
 
   it("destructive commands → true", () => {
     assert.equal(toolNeedsApproval("Bash", { command: "rm -rf /tmp/x" }),     true);
-    assert.equal(toolNeedsApproval("Bash", { command: "git commit -m msg" }), true);
+    // git commit/push intentionally removed from approval list so PM/TL can push autonomously
+    assert.equal(toolNeedsApproval("Bash", { command: "git commit -m msg" }), false);
     assert.equal(toolNeedsApproval("Bash", { command: "npm install lodash" }), true);
     assert.equal(toolNeedsApproval("Bash", { command: "echo x >> file.txt" }), true);
   });
