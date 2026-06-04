@@ -44,7 +44,8 @@ export interface AgentInfo {
   role: "Leader" | "Secretary" | "Worker";
   parent?: string;
   state: AgentRunState;
-  sub?: string; // 一行话状态
+  goal?: string; // spawn 时的原始 goal，不可变
+  sub?: string;  // 一行话当前状态（会随 agent.state 事件更新）
   model?: string;
   cost_usd?: number;
   tokens_in?: number;

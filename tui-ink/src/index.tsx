@@ -416,10 +416,17 @@ function startLeaderAgent(opts: LeaderOpts): void {
           // Agent replied/acted but still has pending todos — nudge it to continue
           continuations++;
           const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+          // Show PM which children are already running so it doesn't re-spawn duplicates
+          const runningKids = Array.from(getState().agents.values())
+            .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
+            .map((ag) => `${ag.id}【${ag.goal ?? ag.sub ?? "?"}】`);
+          const runningNote = runningKids.length > 0
+            ? `\n⚠ 已有子 agent 运行中，禁止重复 spawn 相同 goal：${runningKids.join("、")}。`
+            : "";
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
-              text: `【系统-自检】你回复了用户但 todo 列表仍有未完成项：${pendingTodos}。\n你有两个选项：\n① 如果这些 todo 应由 TL 执行 → 立刻 spawn TL 并把 todo 列表作为 goal\n② 如果这些是 PM 自己要做的 → 立刻输出 step + tool.call 执行第一步\n不允许回复完就停止。`,
+              text: `【系统-自检】你回复了用户但 todo 列表仍有未完成项：${pendingTodos}。${runningNote}\n你有两个选项：\n① 如果这些 todo 应由 TL 执行 → 检查上方列表，若无对应 TL 再 spawn；若已有则等待\n② 如果这些是 PM 自己要做的 → 立刻输出 step + tool.call 执行第一步\n不允许回复完就停止。`,
             });
           });
         } else if (hasTodo) {
@@ -435,8 +442,14 @@ function startLeaderAgent(opts: LeaderOpts): void {
         const hasPending = todos.some((t) => t.state === "todo" || t.state === "run");
         if (hasPending && continuations < 3) {
           continuations++;
+          const runningKids2 = Array.from(getState().agents.values())
+            .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
+            .map((ag) => `${ag.id}【${ag.goal ?? ag.sub ?? "?"}】`);
+          const runningNote2 = runningKids2.length > 0
+            ? ` 已运行中的子 agent：${runningKids2.join("、")}——禁止对相同 goal 重复 spawn。`
+            : "";
           setImmediate(() => {
-            a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call 或 spawn，不要只规划。" });
+            a.sendCommand({ type: "user.message", text: `【系统】你有未完成的 todo。${runningNote2}立刻执行下一步：输出 step + tool.call 或（若无对应子 agent）spawn，不要只规划。` });
           });
         } else if (hasPending) {
           gaveUp = true;

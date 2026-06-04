@@ -405,9 +405,18 @@ export class ProcessManager extends EventEmitter {
   }
 
   private hasRunningChildWithGoal(agentId: string, goal: string): boolean {
-    return Array.from(getState().agents.values()).some(
-      (a) => a.parent === agentId && a.state === "run" && a.sub === goal,
-    );
+    // Normalize: trim, lowercase, collapse whitespace, strip punctuation variance
+    const norm = (g: string) => g.trim().toLowerCase().replace(/[\s　]+/g, " ");
+    const normNew = norm(goal);
+    return Array.from(getState().agents.values()).some((a) => {
+      if (a.parent !== agentId) return false;
+      // Cover both the spawn→start window (idle) and running state
+      if (a.state !== "run" && a.state !== "idle") return false;
+      if (a.hidden) return false;
+      // Use the immutable goal field; fall back to sub only if goal wasn't stored
+      const existing = a.goal ?? a.sub ?? "";
+      return existing !== "" && norm(existing) === normNew;
+    });
   }
 
   private getOrCreate(agentId: string): AgentStats {

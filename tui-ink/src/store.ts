@@ -258,7 +258,7 @@ export function applyEvent(e: TuiEvent) {
     case "spawn": {
       ensureAgent({
         id: e.child, name: e.child, role: e.role,
-        parent: e.parent, state: "idle", sub: e.goal, model: e.model,
+        parent: e.parent, state: "idle", goal: e.goal, sub: e.goal, model: e.model,
         dispatch: e.dispatch,
       });
       pushMessage(e.parent, {
