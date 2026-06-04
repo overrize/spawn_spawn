@@ -311,10 +311,24 @@ export class HttpConvAgent extends EventEmitter {
     } finally {
       this._busy = false;
       this._abort = null;
-      // Drain one queued message per turn so worker reports land in order
+      // Drain one queued message per turn so worker reports land in order.
+      //
+      // IMPORTANT: the agent.state:idle event fires inside the try block,
+      // BEFORE this finally runs. If the idle handler (in index.tsx) registers
+      // a setImmediate for a nudge/tool-exec, that setImmediate is queued
+      // BEFORE the one we register here. So by the time our drain setImmediate
+      // fires, _busy may already be true again (the nudge send() got there first).
+      //
+      // Fix: check _busy inside the setImmediate; if busy, leave the item in
+      // the queue — the nudge's own finally will schedule another drain.
       if (this._queue.length > 0) {
-        const next = this._queue.shift()!;
-        setImmediate(() => this.send(next));
+        setImmediate(() => {
+          if (!this._busy && this._queue.length > 0) {
+            const next = this._queue.shift()!;
+            this.send(next);
+          }
+          // else: nudge preempted us — item stays in queue, next drain picks it up
+        });
       }
     }
   }
