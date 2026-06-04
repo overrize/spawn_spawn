@@ -194,12 +194,26 @@ export class HttpConvAgent extends EventEmitter {
       let jsonInStr = false;
       let jsonEsc = false;
 
-      // Repair JSON strings that contain literal newlines/CR (non-standard agent output).
-      // Scans with the same inStr/esc tracking as the depth counter.
+      // Repair JSON strings with two classes of problems common in LLM output:
+      //   1. Literal control chars inside string values (\n \r \t) → escaped sequences
+      //   2. Invalid JSON escape sequences (e.g. \| \d \w \s from shell/regex patterns)
+      //      → double the backslash so the char is preserved (\ + | becomes \\ + |)
+      // Valid JSON escapes (" \ / b f n r t u) are passed through untouched.
+      const VALID_JSON_ESC = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
       const repairJsonLiterals = (s: string): string => {
         let out = "", inStr = false, esc = false;
         for (const ch of s) {
-          if (esc)                    { esc = false; out += ch; continue; }
+          if (esc) {
+            esc = false;
+            if (inStr && !VALID_JSON_ESC.has(ch)) {
+              // Invalid escape: the leading \ was already output; add another \ so the
+              // sequence becomes \\ + ch (a valid JSON escaped backslash + literal char).
+              out += "\\" + ch;
+            } else {
+              out += ch;
+            }
+            continue;
+          }
           if (ch === "\\" && inStr)   { esc = true;  out += ch; continue; }
           if (ch === '"')             { inStr = !inStr; out += ch; continue; }
           if (inStr && ch === "\n")   { out += "\\n"; continue; }
