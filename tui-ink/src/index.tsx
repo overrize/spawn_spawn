@@ -1160,8 +1160,9 @@ function App() {
     if (c) c.handler(parts.slice(1));
   };
 
-  const slashMatches = input.startsWith("/")
-    ? COMMANDS.filter((c) => c.name.startsWith(input.slice(1).split(/\s+/)[0]!))
+  const slashHead = input.startsWith("/") ? input.slice(1).split(/\s+/)[0]! : "";
+  const slashMatches = slashHead
+    ? COMMANDS.filter((c) => c.name.startsWith(slashHead))
     : [];
 
   const pmStarted = useRef(false);
@@ -1170,7 +1171,12 @@ function App() {
     const text = raw.trim();
     if (!text) return;
 
-    if (text.startsWith("/")) return runCommand(text);
+    if (text.startsWith("/")) {
+      // Only treat as a slash command if the first word matches a known command.
+      // Paths like /home/user/file.txt should pass through as regular messages.
+      const head = text.slice(1).split(/\s+/)[0]!;
+      if (COMMANDS.some((c) => c.name === head)) return runCommand(text);
+    }
 
     let target = getState().selectedAgent;
     const m = text.match(/^@(\S+)\s+(.+)$/);
