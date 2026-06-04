@@ -21,6 +21,7 @@ interface State {
   currentSessionByAgent: Map<string, string>;
   layout: "v1" | "v3";
   scrollOffset: number;
+  agentPaneScroll: number;   // manual scroll offset for the left agent panel
   minLevel: LogLevel;
 }
 
@@ -39,6 +40,7 @@ const state: State = {
   currentSessionByAgent: new Map(),
   layout: "v1",
   scrollOffset: 0,
+  agentPaneScroll: 0,
   minLevel: "info",
 };
 
@@ -379,6 +381,31 @@ export function scrollBy(delta: number): void {
   notify();
 }
 
+export function scrollAgentBy(delta: number, totalAgents: number, maxVisible: number): void {
+  const max = Math.max(0, totalAgents - maxVisible);
+  state.agentPaneScroll = Math.max(0, Math.min(max, state.agentPaneScroll + delta));
+  notify();
+}
+
+/** Hide all completed/errored non-permanent agents from the panel. */
+export function pruneAgents(): number {
+  let count = 0;
+  for (const [, agent] of state.agents) {
+    if (PERMANENT_IDS.has(agent.id) || agent.hidden) continue;
+    if (agent.state === "done" || agent.state === "err") {
+      agent.hidden = true;
+      count++;
+      if (state.selectedAgent === agent.id) {
+        state.selectedAgent = agent.parent ?? "pm";
+        state.scrollOffset = 0;
+      }
+    }
+  }
+  state.agentPaneScroll = 0;
+  if (count > 0) notify();
+  return count;
+}
+
 function shortArgs(args: unknown): string {
   try {
     const s = typeof args === "string" ? args : JSON.stringify(args);
@@ -401,5 +428,6 @@ export function _resetForTest(): void {
   state.currentSessionByAgent.clear();
   state.layout = "v1";
   state.scrollOffset = 0;
+  state.agentPaneScroll = 0;
   state.minLevel = "info";
 }

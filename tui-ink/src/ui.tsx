@@ -138,48 +138,52 @@ export function VDivider() {
 }
 
 // ── 左栏:agents 列表 ───────────────────────────────────────────────────────
-export function AgentsPane({ width }: { width: number }) {
+export function AgentsPane({ width, scroll = 0 }: { width: number; scroll?: number }) {
   const p = usePalette();
   const allAgents = useStore((s) => Array.from(s.agents.values()));
   const sel = useStore((s) => s.selectedAgent);
 
   const nonHidden = allAgents.filter((a) => !a.hidden);
-  const activeAgents = nonHidden.filter((a) => a.state !== "done");
-  const doneAgents = nonHidden.filter((a) => a.state === "done");
   const hiddenCount = allAgents.filter((a) => a.hidden).length;
 
-  // Scroll the visible window within the active group only.
+  // Unified scrollable list: active agents first, then done/err.
+  const activeAgents = nonHidden.filter((a) => a.state !== "done" && a.state !== "err");
+  const doneAgents   = nonHidden.filter((a) => a.state === "done" || a.state === "err");
+  // Virtual rows: each agent = 1 row, divider = 1 row when needed
+  const allRows: Array<AgentInfo | "divider"> = [
+    ...activeAgents,
+    ...(doneAgents.length > 0 ? ["divider" as const, ...doneAgents] : []),
+  ];
+
   const availRows = Math.max(6, (process.stdout.rows ?? 24) - 5);
+  // Each AgentRow is 1–4 lines depending on sub/model/step/todo, but for scroll
+  // purposes we count virtual rows (1 per agent + 1 per divider).
   const maxVisible = Math.max(3, Math.floor(availRows / 3));
-  const selIdx = Math.max(0, activeAgents.findIndex((a) => a.id === sel));
-  const scrollStart = Math.min(selIdx, Math.max(0, activeAgents.length - maxVisible));
-  const visibleActive = activeAgents.slice(scrollStart, scrollStart + maxVisible);
+  const clampedScroll = Math.max(0, Math.min(scroll, Math.max(0, allRows.length - maxVisible)));
+  const visibleRows = allRows.slice(clampedScroll, clampedScroll + maxVisible);
+  const above = clampedScroll;
+  const below = Math.max(0, allRows.length - clampedScroll - maxVisible);
 
   return (
     <Box flexDirection="column" width={width} flexShrink={0}>
       <Box paddingX={1} paddingY={0}>
         <Text dimColor>AGENTS </Text><Text dimColor>{nonHidden.length}</Text>
-        {scrollStart > 0 && <Text dimColor> ↑{scrollStart}</Text>}
+        {above > 0 && <Text dimColor> ↑{above}</Text>}
+        {below > 0 && <Text dimColor> ↓{below}</Text>}
       </Box>
       <Box flexDirection="column" paddingX={1} overflowY="hidden" flexGrow={1}>
         {nonHidden.length === 0 && (
-          <Text dimColor italic>(none yet — press enter to spawn leader)</Text>
+          <Text dimColor italic>(none yet)</Text>
         )}
-        {visibleActive.map((a) => (
-          <AgentRow key={a.id} a={a} selected={a.id === sel} />
-        ))}
-        {doneAgents.length > 0 && (
-          <Box marginTop={visibleActive.length > 0 ? 1 : 0}>
-            <Text dimColor>── completed ──</Text>
-          </Box>
+        {visibleRows.map((row, i) =>
+          row === "divider"
+            ? <Box key="div" marginTop={1}><Text dimColor>── done ──</Text></Box>
+            : <AgentRow key={row.id} a={row} selected={row.id === sel} dimmed={row.state === "done" || row.state === "err"} />
         )}
-        {doneAgents.map((a) => (
-          <AgentRow key={a.id} a={a} selected={a.id === sel} dimmed />
-        ))}
       </Box>
       {hiddenCount > 0 && (
         <Box paddingX={1}>
-          <Text color={p.success} dimColor>✓ {hiddenCount} cleared</Text>
+          <Text color={p.success} dimColor>✓ {hiddenCount} pruned</Text>
         </Box>
       )}
     </Box>

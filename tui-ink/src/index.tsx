@@ -30,8 +30,8 @@ import {
 } from "./ui.js";
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
-  approve, reject, abortAgent, setLayout, scrollBy, setMinLevel, resumeAgent, updateAgentInfo,
-  clearDoneAgents, markPendingInput,
+  approve, reject, abortAgent, setLayout, scrollBy, scrollAgentBy, setMinLevel, resumeAgent,
+  updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -1029,7 +1029,8 @@ function App() {
   const [paletteName, setPaletteName] = useState<PaletteName>(loadConfig().palette);
   const palette = PALETTES[paletteName];
   const layout = useStore((s) => s.layout);
-  const scrollOffset    = useStore((s) => s.scrollOffset);
+  const scrollOffset     = useStore((s) => s.scrollOffset);
+  const agentPaneScroll  = useStore((s) => s.agentPaneScroll);
   const [exitSecsLeft, setExitSecsLeft] = useState(0);
   const exitConfirm                     = exitSecsLeft > 0;
   const exitConfirmTimer                = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1065,6 +1066,11 @@ function App() {
 
   const COMMANDS: CmdDef[] = [
     { name: "pause",   desc: "kill the selected agent",     handler: () => { const sel = getState().selectedAgent; agents.get(sel)?.kill(); } },
+    { name: "prune",   desc: "hide all completed TL/Worker agents from the panel", handler: () => {
+      const n = pruneAgents();
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: n > 0 ? `🧹 已隐藏 ${n} 个已完成的 agent，输入 /resume <id> 可恢复` : "没有可隐藏的已完成 agent" });
+    } },
     { name: "sessions", desc: "列出所有未完成会话及 session hash", handler: () => {
       const sessions = listUnfinishedAgents();
       if (sessions.length === 0) {
@@ -1261,7 +1267,7 @@ function App() {
   useEffect(() => {
     if (!isRawModeSupported) return;
     process.stdout.write("\x1b[?1000h\x1b[?1006h\x1b[?2004h");
-    const MOUSE_SGR_RE = /\x1b\[<(\d+);\d+;\d+[Mm]/g;
+    const MOUSE_SGR_RE = /\x1b\[<(\d+);(\d+);\d+[Mm]/g; // groups: btn, col
     // X10: \x1b[M + exactly 3 bytes (button, col, row — all offset by 32)
     const MOUSE_X10_RE = /\x1b\[M[\x00-\xff]{3}/g;
 
@@ -1305,10 +1311,33 @@ function App() {
         MOUSE_SGR_RE.lastIndex = 0;
         let hasMouse = false;
         let m: RegExpExecArray | null;
+        // AgentsPane occupies the leftmost ~22 columns (FIXED_COLS comment in ui.tsx)
+        const AGENT_PANE_COLS = 23;
         while ((m = MOUSE_SGR_RE.exec(bin)) !== null) {
           hasMouse = true;
-          if (m[1] === "64") scrollBy(3);   // wheel up → older
-          if (m[1] === "65") scrollBy(-3);  // wheel down → newer
+          const btn = m[1];
+          const col = parseInt(m[2] ?? "999", 10);
+          const isAgentPane = col <= AGENT_PANE_COLS;
+          if (btn === "64") {
+            // wheel up → scroll toward older/higher items
+            if (isAgentPane) {
+              const total = getState().agents.size;
+              const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+              scrollAgentBy(-1, total, maxVis);
+            } else {
+              scrollBy(3);
+            }
+          }
+          if (btn === "65") {
+            // wheel down → scroll toward newer/lower items
+            if (isAgentPane) {
+              const total = getState().agents.size;
+              const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+              scrollAgentBy(1, total, maxVis);
+            } else {
+              scrollBy(-3);
+            }
+          }
         }
         if (hasMouse) {
           const filtered = bin.replace(/\x1b\[<\d+;\d+;\d+[Mm]/g, "");
@@ -1529,7 +1558,7 @@ function App() {
             const toW = tc >= 120 ? 32 : tc >= 90 ? 24 : 18;
             return (
               <Box flexGrow={1}>
-                <AgentsPane width={agW} />
+                <AgentsPane width={agW} scroll={agentPaneScroll} />
                 <VDivider />
                 <ConvPane scrollOffset={scrollOffset} />
                 <VDivider />
