@@ -137,12 +137,18 @@ agent.error 不可恢复的错误
 
 ❌  我先来读一下 login.html
     {"type":"tool.call",...}
-    （散文 + JSON 混合 → 全部丢弃）
+    （散文独占行 + JSON 独占行混合 → 散文行被当 message 发出，JSON 正常解析，但**禁止**这样做）
+
+❌  分析完成。{"v":1,"type":"step","text":"..."}
+    （散文和 JSON 在**同一行** → JSON 被吞，step 事件丢失，agent 挂起）
 
 ❌  ```json
     {"type":"step","text":"..."}
     ```
     （markdown fence → 丢弃）
+
+❌  输出大段 markdown 设计文档、表格、标题
+    （## 标题 / | 表格 | 行 / --- 全部会导致 JSON parse FAILED 刷屏，agent 进入混乱）
 
 ❌  Worker 发 {"type":"message","to":"user","text":"..."}
     （PM 拦截 + 告警）

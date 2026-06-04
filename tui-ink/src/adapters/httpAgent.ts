@@ -308,9 +308,30 @@ export class HttpConvAgent extends EventEmitter {
         }
 
         if (depth === 0 && !jsonInStr && !trimmed.startsWith("{")) {
-          // 纯散文行（不以 { 开头）
+          // 散文行（不以 { 开头）。但 LLM 有时把 JSON 拼在散文末尾同一行，
+          // 例如："分析完成。{"v":1,"type":"step",...}" — 拆分后分别处理。
           if (jsonBuf) { emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false; }
-          emitParsed(trimmed);
+          const inlineJson = trimmed.indexOf('{"');
+          if (inlineJson > 0) {
+            const prose = trimmed.slice(0, inlineJson).trim();
+            if (prose) emitParsed(prose);
+            // 剩余部分当 JSON 起点，下面的 jsonBuf 累积逻辑会接手
+            const jsonPart = trimmed.slice(inlineJson);
+            jsonBuf = jsonPart;
+            for (const ch of jsonPart) {
+              if (jsonEsc)                  { jsonEsc = false; continue; }
+              if (ch === "\\" && jsonInStr) { jsonEsc = true; continue; }
+              if (ch === '"')               { jsonInStr = !jsonInStr; continue; }
+              if (jsonInStr)                continue;
+              if (ch === "{")  depth++;
+              else if (ch === "}") depth--;
+            }
+            if (depth <= 0 && !jsonInStr) {
+              emitParsed(jsonBuf); jsonBuf = ""; depth = 0; jsonInStr = false; jsonEsc = false;
+            }
+          } else {
+            emitParsed(trimmed);
+          }
           continue;
         }
 
