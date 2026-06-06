@@ -274,6 +274,13 @@ export class HttpConvAgent extends EventEmitter {
 
   kill(): void {
     this._queue.length = 0; // drop all pending messages so drain doesn't restart it
+    // If a send() is in progress, the user message was already pushed to this.messages
+    // but will never get an assistant reply. Pop it so history stays alternating
+    // user/assistant — otherwise the next send() creates two consecutive user messages
+    // which Anthropic rejects with a 400 error.
+    if (this._busy && this.messages.at(-1)?.role === "user") {
+      this.messages.pop();
+    }
     this._abort?.abort();
   }
 
@@ -335,7 +342,14 @@ export class HttpConvAgent extends EventEmitter {
         lastErr = null;
         break; // success
       } catch (err: any) {
-        if (err.name === "AbortError") return;
+        if (err.name === "AbortError") {
+          // Emit idle so the UI returns to ready state (not stuck on "run")
+          this.emit("event", {
+            v: 1, type: "agent.state", agent: this.cfg.id,
+            state: "idle", sub: "",
+          } as TuiEvent);
+          return;
+        }
         lastErr = err;
         if (!HttpConvAgent._isRetryable(err) || attempt >= MAX_RETRIES) break;
       }

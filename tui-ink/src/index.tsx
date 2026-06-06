@@ -127,6 +127,10 @@ const agents = new Map<string, HttpConvAgent>();
 const secretaries = new Map<string, SecretaryProxy>(); // agentId → Secretary
 const pm = new ProcessManager();
 
+// Agents that were explicitly killed by the user (ESC) or by a parent agent.kill event.
+// Used to suppress child→parent notifications after a kill so the parent isn't restarted.
+const killedAgents = new Set<string>();
+
 // Destructive Bash commands from workers are routed to leader for approval instead
 // of asking the user directly. Keyed by tool.call id.
 const leaderApprovalQueue = new Map<string, {
@@ -212,13 +216,12 @@ interface LeaderOpts {
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
 }
 
-function killAgent(id: string, reason = "interrupted"): void {
-  agents.get(id)?.kill?.();
-  abortAgent(id);
-  const st = getState().agents.get(id)?.state;
-  if (st === "run" || st === "idle") {
-    applyEvent({ v: 1, type: "agent.state", agent: id, state: "err", sub: reason });
-  }
+function killAgent(id: string, _reason = "interrupted"): void {
+  killedAgents.add(id);
+  agents.get(id)?.kill?.(); // clears queue, pops unresponded user msg, aborts HTTP
+  abortAgent(id);           // clears pending approvals in store
+  // Do NOT set state:err — httpAgent emits state:idle after AbortError,
+  // which returns the agent to ready state so the user can resend immediately.
 }
 
 function startLeaderAgent(opts: LeaderOpts): void {
@@ -417,9 +420,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
       const pmSec = secretaries.get("pm");
       if (pmSec) pmSec.ingestChildMemory(secretary.getMemory() as any);
       const parentAgent = agents.get(opts.parentId);
-      // Don't wake a dead/interrupted parent — it was killed intentionally
+      // Don't wake a killed/finished parent — child completion should not restart it
+      if (killedAgents.has(opts.parentId)) return;
       const parentState = getState().agents.get(opts.parentId)?.state;
-      if (parentState === "err" || parentState === "done") return;
+      if (parentState === "done") return;
       if (parentAgent instanceof HttpConvAgent) {
         if (e.success) {
           const evidenceLines = e.evidence?.length
@@ -796,9 +800,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         ` evidence=${ev.evidence?.length ?? 0}\n`,
       );
       const parentAgent = agents.get(e.parent);
-      // Don't wake a dead/interrupted parent — it was killed intentionally
+      // Don't wake a killed/finished parent
+      if (killedAgents.has(e.parent)) return;
       const parentSt = getState().agents.get(e.parent)?.state;
-      if (parentSt !== "err" && parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
+      if (parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
         if (ev.success) {
           const evidenceLines = ev.evidence?.length
             ? "\n证据:\n" + ev.evidence.map((s) => `  - ${s}`).join("\n")
@@ -1589,6 +1594,10 @@ function App() {
     // Mark pending so the UI shows activity even if the agent is busy and
     // queues the message. Cleared automatically when agent.state:run fires.
     markPendingInput(target);
+
+    // If user re-engages a killed agent, clear its killed status so dead-parent
+    // guards don't block any child agents it spawns next.
+    killedAgents.delete(target);
 
     // HttpConvAgent has its own internal _queue and drains one message per turn,
     // so we always call sendCommand immediately — no React-level blocking needed.
