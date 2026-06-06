@@ -70,6 +70,9 @@ function buildSystemPrompt(
   // S3: inject RESUMED CONTEXT when resuming from memory
   if (resumedMemoryId) {
     const mem = loadMemory(resumedMemoryId);
+    if (!mem) {
+      process.stderr.write(`[resume] WARN: loadMemory("${resumedMemoryId}") returned null — no context injected\n`);
+    }
     if (mem) {
       const budgetKb = mem.dispatch?.memory_quota_kb ?? 60;
       const budgetChars = budgetKb * 512; // rough: ~512 chars per KB in markdown
@@ -96,6 +99,7 @@ function buildSystemPrompt(
       const lastTodo = mem.tombstone.last_todo
         ? JSON.parse(mem.tombstone.last_todo).map((t: {state: string; text: string}) => `  [${t.state}] ${t.text}`).join("\n")
         : "(unknown)";
+      process.stderr.write(`[resume] context injected: facts=${topFacts.length}, decisions=${mem.working_set.decisions.length}, hint="${(mem.tombstone.resume_hint ?? "").slice(0, 80)}"\n`);
       tpl += `\n\n---\n\n## ⚠️ RESUMED CONTEXT\n\n你正在从中断恢复。上次中断原因：${mem.tombstone.resume_hint ?? "未知"}\n\nResume budget: ${budgetKb}KB\n\n**上次 TODO 状态：**\n${lastTodo}\n\n**已确认事实（weight top 10，预算内）：**\n${facts || "(无)"}\n\n**关键决定：**\n${decisions || "(无)"}\n\n**第一句必须输出 todo.set 重申当前计划，然后继续推进。**`;
     }
   }
@@ -1293,6 +1297,7 @@ function App() {
           ? `\n\n⚠️ 以下 agent 在上次会话中存在，当前已不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划。`
           : "";
         const resumeHint = (mem.tombstone.resume_hint ?? "Resume from last checkpoint") + deadNote;
+        process.stderr.write(`[resume] starting ${id} — firstMessage: "${resumeHint.slice(0, 200)}"\n`);
         pmStarted.current = false;
         startLeaderAgent({ id, firstMessage: resumeHint, resumedMemoryId: id, promptFile: isRootAgent ? "pm" : "leader" });
         pmStarted.current = true;

@@ -205,6 +205,7 @@ export class HttpConvAgent extends EventEmitter {
       const raw = loadMessages(cfg.resumeFrom);
       const all = raw.map((m) => ({ role: m.role, content: m.content }));
       const total = all.reduce((s, m) => s + m.content.length, 0);
+      process.stderr.write(`[${cfg.id}] resume: loaded ${all.length} msgs (${total} chars) from "${cfg.resumeFrom}"\n`);
       if (total <= RESUME_CHAR_BUDGET) {
         this.messages = all;
       } else {
