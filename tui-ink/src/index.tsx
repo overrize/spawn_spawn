@@ -33,6 +33,7 @@ import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
   approve, reject, abortAgent, setLayout, scrollBy, scrollAgentBy, setMinLevel, setEffort,
   resumeAgent, updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents, setTokenBudget,
+  setPendingRating, clearPendingRating,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -380,13 +381,16 @@ function startLeaderAgent(opts: LeaderOpts): void {
         + (e.evidence?.length ? 10 : 0)
         + (qualNudges === 0 ? 10 : 0)
       ));
+      const sessionHash = mem.session_hash ?? "?";
       process.stderr.write(
-        `[quality] ${opts.id} session=${mem.session_hash ?? "?"} score=${score}` +
+        `[quality] ${opts.id} session=${sessionHash} score=${score}` +
         ` success=${e.success} turns=${qualTurns} nudges=${qualNudges}` +
         ` handup=${qualHandup} gaveUp=${gaveUp} rejects=${rejects}` +
         ` tokens_in=${tok?.prompt ?? 0} tokens_out=${tok?.completion ?? 0}` +
         ` evidence=${e.evidence?.length ?? 0}\n`,
       );
+      // Only ask for human rating on root PM sessions (not every sub-leader)
+      if (!opts.parentId) setPendingRating(opts.id, sessionHash);
     }
     // Tech Lead completion — notify parent PM + ingest memory upward
     if (e.type === "agent.done" && opts.parentId) {
@@ -1314,6 +1318,26 @@ function App() {
           text: n > 0 ? `🧹 已隐藏 ${n} 个已完成的 agent` : "没有可隐藏的已完成 agent" });
       }
     } },
+    { name: "rate", desc: "/rate good|bad [comment] — rate the last completed session", handler: (args) => {
+      const rating = getState().pendingRating;
+      const verdict = args[0]?.toLowerCase();
+      if (!verdict || (verdict !== "good" && verdict !== "bad")) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: "用法：/rate good [说明]  或  /rate bad [说明]" });
+        return;
+      }
+      const comment = args.slice(1).join(" ");
+      const human = verdict === "good" ? 1 : -1;
+      const agentId = rating?.agentId ?? "pm";
+      const sessionHash = rating?.sessionHash ?? "?";
+      process.stderr.write(
+        `[rating] ${agentId} session=${sessionHash} human=${human}` +
+        (comment ? ` comment="${comment}"` : "") + "\n",
+      );
+      clearPendingRating();
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `评分已记录：${verdict === "good" ? "👍" : "👎"}${comment ? `  "${comment}"` : ""}` });
+    } },
     { name: "sessions", desc: "列出所有未完成会话及 session hash", handler: () => {
       const sessions = listUnfinishedAgents();
       if (sessions.length === 0) {
@@ -1531,8 +1555,8 @@ function App() {
       return;
     }
 
-    // New PM message: clear done agents from the previous task before proceeding.
-    if (target === "pm") clearDoneAgents();
+    // New PM message: clear done agents and any pending rating from the previous task.
+    if (target === "pm") { clearDoneAgents(); clearPendingRating(); }
     userMessage(target, body);
     const a = agents.get(target);
     if (!a) return;
@@ -1972,6 +1996,8 @@ function App() {
                 hint={
                   pending.length > 0
                     ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
+                    : getState().pendingRating
+                    ? "Session done — /rate good [comment] or /rate bad [comment] to rate"
                     : (() => {
                         const sel = getState().selectedAgent;
                         const selState = getState().agents.get(sel)?.state;

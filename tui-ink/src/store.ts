@@ -30,6 +30,8 @@ interface State {
   tokensByAgent: Map<string, TokenBucket>;
   sessionTokens: TokenBucket;
   tokenBudget: number;  // 0 = unlimited
+  // Human rating request — set after agent.done, cleared after user rates or timeout
+  pendingRating: { agentId: string; sessionHash: string } | null;
 }
 
 const state: State = {
@@ -53,6 +55,7 @@ const state: State = {
   tokensByAgent: new Map(),
   sessionTokens: { prompt: 0, completion: 0 },
   tokenBudget: 0,
+  pendingRating: null,
 };
 
 const listeners = new Set<() => void>();
@@ -514,6 +517,16 @@ export function _resetAgents(agentIds: string[]): void {
   state.sessionTokens = { prompt: 0, completion: 0 };
 }
 
+export function setPendingRating(agentId: string, sessionHash: string): void {
+  state.pendingRating = { agentId, sessionHash };
+  notify();
+}
+
+export function clearPendingRating(): void {
+  state.pendingRating = null;
+  notify();
+}
+
 export function _resetForTest(): void {
   state.agents.clear();
   state.selectedAgent = "pm";
@@ -535,4 +548,5 @@ export function _resetForTest(): void {
   state.tokensByAgent.clear();
   state.sessionTokens = { prompt: 0, completion: 0 };
   state.tokenBudget = 0;
+  state.pendingRating = null;
 }
