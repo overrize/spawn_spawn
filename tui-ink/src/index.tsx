@@ -1753,31 +1753,37 @@ function App() {
       text: `⚡ effort → ${e}  (${EFFORT_DESC_SHORT[e]})` });
   };
 
+  // Restore last user message to input box (shared by ESC-run and ESC-idle paths)
+  const restoreLastUserMessage = (agentId: string) => {
+    const msgs = getState().messagesByAgent.get(agentId);
+    if (!msgs) return;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i]!.agent === "user") {
+        const text = msgs[i]!.text ?? "";
+        setInput(text);
+        if (!cmdHistory.current.length || cmdHistory.current[cmdHistory.current.length - 1] !== text) {
+          cmdHistory.current.push(text);
+          historyIdx.current = -1;
+          browsingHistory.current = false;
+        }
+        return;
+      }
+    }
+  };
+
   const handleESCInterrupt = () => {
     const selId = getState().selectedAgent;
     const selState = getState().agents.get(selId)?.state;
     if (selState === "run" || selState === "idle") {
       killAgent(selId);
       applyEvent({ v: 1, type: "message", agent: selId, to: "user",
-        text: `⏹ interrupted by user` });
+        text: `⏹ interrupted — edit your message above and resend` });
+      // Load the last user message back into the input box, just like Claude Code:
+      // user can immediately edit and resend without retyping from scratch.
+      restoreLastUserMessage(selId);
     } else {
-      // 无 agent 运行时：加载最后一条 user message 到输入框供编辑
-      const msgs = getState().messagesByAgent.get(selId);
-      if (msgs && msgs.length > 0) {
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i]!.agent === "user") {
-            const text = msgs[i]!.text ?? "";
-            setInput(text);
-            // 将加载的消息加入命令历史末尾，以便 ↓ 键恢复空行
-            if (!cmdHistory.current.length || cmdHistory.current[cmdHistory.current.length - 1] !== text) {
-              cmdHistory.current.push(text);
-              historyIdx.current = -1;
-              browsingHistory.current = false;
-            }
-            return;
-          }
-        }
-      }
+      // Agent not running — ESC loads last message for re-editing
+      restoreLastUserMessage(selId);
     }
   };
 
