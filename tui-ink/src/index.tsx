@@ -1731,10 +1731,26 @@ function App() {
   const handleESCInterrupt = () => {
     const selId = getState().selectedAgent;
     const selState = getState().agents.get(selId)?.state;
-    if (selState === "run") {
-      agents.get(selId)?.kill?.();
-      abortAgent(selId);
-      applyEvent({ v: 1, type: "message", agent: selId, to: "user", text: `⏹ interrupted by ESC` });
+    if (selState === "run" || selState === "idle") {
+      // Kill the selected agent and all its descendants so child events
+      // don't cause the parent to resume after the interrupt.
+      const allAgents = Array.from(getState().agents.values());
+      const toKill = [selId];
+      // BFS to collect all descendants
+      for (let i = 0; i < toKill.length; i++) {
+        const id = toKill[i]!;
+        allAgents.filter((a) => a.parent === id).forEach((a) => toKill.push(a.id));
+      }
+      toKill.forEach((id) => {
+        agents.get(id)?.kill?.();
+        abortAgent(id);
+        const st = getState().agents.get(id)?.state;
+        if (st === "run" || st === "idle") {
+          applyEvent({ v: 1, type: "agent.state", agent: id, state: "err", sub: "interrupted" });
+        }
+      });
+      applyEvent({ v: 1, type: "message", agent: selId, to: "user",
+        text: `⏹ interrupted — killed: ${toKill.join(", ")}` });
     } else {
       // 无 agent 运行时：加载最后一条 user message 到输入框供编辑
       const msgs = getState().messagesByAgent.get(selId);

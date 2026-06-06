@@ -271,6 +271,7 @@ export class HttpConvAgent extends EventEmitter {
   }
 
   kill(): void {
+    this._queue.length = 0; // drop all pending messages so drain doesn't restart it
     this._abort?.abort();
   }
 
