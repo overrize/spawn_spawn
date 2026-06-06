@@ -274,6 +274,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let actedThisTurn = false;
   let continuations = 0;
   let gaveUp = false;
+  let nudgePending = false; // true when the next run turn is a system-initiated nudge
 
   a.on("event", (e: TuiEvent) => {
     // Spawn — pre-check then dispatch to correct handler
@@ -326,8 +327,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "agent.state" && e.state === "run") {
       actedThisTurn = false;
-      continuations = 0; // fresh nudge budget for each new turn
-      gaveUp = false;
+      if (!nudgePending) { continuations = 0; gaveUp = false; }
+      nudgePending = false;
     }
 
     if (e.type === "tool.call") {
@@ -353,6 +354,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
       }
     }
 
+    if (e.type === "agent.done") actedThisTurn = true;
     // Tech Lead completion — notify parent PM + ingest memory upward
     if (e.type === "agent.done" && opts.parentId) {
       const pmSec = secretaries.get("pm");
@@ -393,6 +395,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     // Idle — drain tool queue or nudge
     if (e.type === "agent.state" && e.state === "idle") {
+      if (getState().agents.get(opts.id)?.state === "done") return;
       if (toolQueue.length > 0) {
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
@@ -426,6 +429,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           const runningNote = runningKids.length > 0
             ? `\n⚠ 已有子 agent 运行中，禁止重复 spawn 相同 goal：${runningKids.join("、")}。`
             : "";
+          nudgePending = true;
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
@@ -451,6 +455,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           const runningNote2 = runningKids2.length > 0
             ? ` 已运行中的子 agent：${runningKids2.join("、")}——禁止对相同 goal 重复 spawn。`
             : "";
+          nudgePending = true;
           setImmediate(() => {
             a.sendCommand({ type: "user.message", text: `【系统】你有未完成的 todo。${runningNote2}立刻执行下一步：输出 step + tool.call 或（若无对应子 agent）spawn，不要只规划。` });
           });
@@ -475,6 +480,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           // PM processed a message but produced no output (no message, tool.call, or spawn)
           // and has no pending todos. Nudge it to actually reply.
           continuations++;
+          nudgePending = true;
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
@@ -605,6 +611,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   let workerContinuations = 0;
   let workerGaveUp = false;
   let workerCorrectedThisTurn = false; // deduplicate illegal_message corrections per turn
+  let workerNudgePending = false; // true when the next run turn is a system-initiated nudge
 
   a.on("event", (ev: TuiEvent) => {
     // spawn: pre-check BEFORE applyEvent to prevent ghost agents in store
@@ -689,6 +696,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       }
     }
     if (ev.type === "agent.done") {
+      workerActedThisTurn = true;
       const parentAgent = agents.get(e.parent);
       if (parentAgent instanceof HttpConvAgent) {
         if (ev.success) {
@@ -729,8 +737,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (ev.type === "agent.state" && ev.state === "run") {
       workerActedThisTurn = false;
       workerCorrectedThisTurn = false;
-      workerContinuations = 0;
-      workerGaveUp = false;
+      if (!workerNudgePending) { workerContinuations = 0; workerGaveUp = false; }
+      workerNudgePending = false;
     }
 
     // Registry is the authority for needsApproval — prevents agent from forging false.
@@ -768,6 +776,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
 
     // Agent 变 idle → 批量执行排队的工具并把结果回喂给 agent
     if (ev.type === "agent.state" && ev.state === "idle") {
+      if (getState().agents.get(e.child)?.state === "done") return;
       if (toolQueue.length > 0) {
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
@@ -795,6 +804,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         } else if (hasTodo && workerContinuations < 3) {
           workerContinuations++;
           const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+          workerNudgePending = true;
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
@@ -808,6 +818,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         const hasPending = todos.some((t) => t.state === "todo" || t.state === "run");
         if (hasPending && workerContinuations < 3) {
           workerContinuations++;
+          workerNudgePending = true;
           setImmediate(() => {
             a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call，不要只规划。" });
           });
@@ -828,6 +839,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         } else if (workerContinuations < 2) {
           // Worker processed a message but produced no output, and has no pending todos.
           workerContinuations++;
+          workerNudgePending = true;
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
@@ -1453,22 +1465,20 @@ function App() {
     // process-monitor: visual representation of the TypeScript ProcessManager in the agent tree
     ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "idle", sub: "", model: "internal" });
 
-    // Auto-resume: if there's an unfinished PM session from a previous run, resume it automatically.
-    // "Unfinished" means final_status === null (PM was killed / crashed before agent.done).
+    // On startup: if there's an unfinished PM session, prompt the user to decide.
+    // Do NOT auto-resume — the user may want to start a fresh session instead.
     const pmMem = loadMemory("pm");
     if (pmMem && pmMem.tombstone?.final_status === null && !pmStarted.current) {
-      pmStarted.current = true;
-      const resumeHint = pmMem.tombstone.resume_hint ?? "你正在从上次中断恢复，请重申当前计划并继续推进。";
+      const hash = pmMem.session_hash ? pmMem.session_hash.slice(0, 8) : "?";
+      const hint = (pmMem.tombstone.resume_hint ?? "(无记录)").slice(0, 120);
       const deadWorkers = listUnfinishedAgents()
         .filter((m) => m.parent_chain?.includes("pm") && m.agent_id !== "pm")
         .map((m) => m.agent_id);
       const deadNote = deadWorkers.length > 0
-        ? `\n\n⚠️ 以下子 agent 在上次会话中存在但当前不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划。`
+        ? `\n⚠ 上次存在子 agent：${deadWorkers.join(", ")}`
         : "";
-      const hint = resumeHint + deadNote;
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-        text: `🔄 检测到未完成会话 (hash: ${pmMem.session_hash ?? "?"})，自动恢复中…` });
-      startLeaderAgent({ id: "pm", firstMessage: hint, resumedMemoryId: "pm", promptFile: "pm" });
+        text: `🔔 检测到上次未完成的会话 (${hash})\n上次状态：${hint}${deadNote}\n\n/resume — 继续上次任务\n直接发消息 — 开始新会话（上次记录保留，可稍后 /resume）` });
     }
   }, []);
 

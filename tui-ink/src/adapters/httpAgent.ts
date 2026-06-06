@@ -78,8 +78,29 @@ export function parseAgentOutput(
         emitFn(ev);
         return;
       }
+      // Parsed JSON with a type field not in protocol (e.g. type:planning, type:response).
+      // Silently drop — never display raw JSON blobs to the user.
+      if (parsed?.type) {
+        process.stderr.write(`[${agentId}] unknown event type "${parsed.type}", dropped\n`);
+        return;
+      }
     } catch { /* not valid protocol JSON */ }
-    emitFn({ v: 1, type: "message", agent: agentId, to: "user", text: raw.trim() } as TuiEvent);
+    // Plain-text "agent.done" signal — agent tried to quit via natural language instead of JSON.
+    // Synthesize the event so the system actually stops invoking it.
+    if (/agent\.done/.test(raw)) {
+      process.stderr.write(`[${agentId}] plain-text agent.done detected, synthesizing event\n`);
+      emitFn({ v: 1, type: "agent.done", agent: agentId, success: true,
+               reason: raw.trim().slice(0, 200) } as TuiEvent);
+      return;
+    }
+    // Drop output that looks like JSON but failed to parse or had no type field.
+    // These are protocol blobs the LLM corrupted — showing raw JSON to the user is noise.
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("{")) {
+      process.stderr.write(`[${agentId}] raw JSON-like output dropped: ${trimmed.slice(0, 120)}\n`);
+      return;
+    }
+    emitFn({ v: 1, type: "message", agent: agentId, to: "user", text: trimmed } as TuiEvent);
   };
 
   let jsonBuf = "";
