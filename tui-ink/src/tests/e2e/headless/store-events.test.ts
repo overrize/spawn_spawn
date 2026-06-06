@@ -9,7 +9,7 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   applyEvent, ensureAgent, getState, _resetForTest,
-  setTokenBudget, pruneAgents,
+  setTokenBudget, pruneAgents, markPendingInput,
 } from "../../../store.js";
 
 beforeEach(() => _resetForTest());
@@ -94,6 +94,79 @@ describe("store: prune", () => {
     ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
     pruneAgents("pm");
     assert.equal(getState().agents.get("pm")?.hidden, undefined);
+  });
+});
+
+// ── pendingInputAgents — "message queued" indicator ──────────────────────────
+// These cover the bug where the hint only checked state==="run" and went blank
+// during tool execution (state="idle" between LLM turns).
+
+describe("store: pendingInputAgents (message-queued indicator)", () => {
+  it("markPendingInput sets the flag for that agent", () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
+    markPendingInput("pm");
+    assert.ok(getState().pendingInputAgents.has("pm"),
+      "flag not set after markPendingInput");
+  });
+
+  it("flag is cleared when agent.state:run fires — normal processing path", () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
+    markPendingInput("pm");
+    applyEvent({ v: 1, type: "agent.state", agent: "pm", state: "run", sub: "thinking…" });
+    assert.equal(getState().pendingInputAgents.has("pm"), false,
+      "flag not cleared on state:run");
+  });
+
+  it("flag persists during state:idle — tool execution gap must keep indicator visible", () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "run" });
+    markPendingInput("pm");
+    // Simulate LLM turn ending (agent emits idle between tool calls)
+    applyEvent({ v: 1, type: "agent.state", agent: "pm", state: "idle", sub: "" });
+    assert.ok(getState().pendingInputAgents.has("pm"),
+      "flag wrongly cleared on state:idle — user would lose the queued indicator");
+  });
+
+  it("flag is cleared when agent.done fires (success)", () => {
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run" });
+    markPendingInput("tl-01");
+    applyEvent({ v: 1, type: "agent.done", agent: "tl-01", success: true, reason: "done" });
+    assert.equal(getState().pendingInputAgents.has("tl-01"), false,
+      "flag not cleared on agent.done success — hint would stay stuck forever");
+  });
+
+  it("flag is cleared when agent.done fires (failure)", () => {
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run" });
+    markPendingInput("tl-01");
+    applyEvent({ v: 1, type: "agent.done", agent: "tl-01", success: false, reason: "error" });
+    assert.equal(getState().pendingInputAgents.has("tl-01"), false,
+      "flag not cleared on agent.done failure");
+  });
+
+  it("flag is cleared when agent.state:err fires", () => {
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run" });
+    markPendingInput("tl-01");
+    applyEvent({ v: 1, type: "agent.state", agent: "tl-01", state: "err", sub: "timeout" });
+    assert.equal(getState().pendingInputAgents.has("tl-01"), false,
+      "flag not cleared on state:err — hint stays stuck after network error");
+  });
+
+  it("flag is cleared when agent.error fires", () => {
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run" });
+    markPendingInput("tl-01");
+    applyEvent({ v: 1, type: "agent.error", agent: "tl-01", code: "http_error", detail: "500" });
+    assert.equal(getState().pendingInputAgents.has("tl-01"), false,
+      "flag not cleared on agent.error");
+  });
+
+  it("clearing one agent's flag does not affect another agent", () => {
+    ensureAgent({ id: "pm",    name: "pm",    role: "Leader", state: "idle" });
+    ensureAgent({ id: "tl-01", name: "tl-01", role: "Leader", state: "run"  });
+    markPendingInput("pm");
+    markPendingInput("tl-01");
+    applyEvent({ v: 1, type: "agent.state", agent: "tl-01", state: "run", sub: "" });
+    assert.ok(getState().pendingInputAgents.has("pm"),
+      "pm flag incorrectly cleared when tl-01 processed its message");
+    assert.equal(getState().pendingInputAgents.has("tl-01"), false);
   });
 });
 

@@ -311,6 +311,7 @@ export function applyEvent(e: TuiEvent) {
       const a = state.agents.get(e.agent);
       if (a) a.state = e.success ? "done" : "err";
       state.stepByAgent.set(e.agent, e.reason ?? (e.success ? "done" : "failed"));
+      state.pendingInputAgents.delete(e.agent);
       // Switch back to parent so the user sees PM's follow-up reply
       if (state.selectedAgent === e.agent && a?.parent) {
         state.selectedAgent = a.parent;
@@ -321,6 +322,7 @@ export function applyEvent(e: TuiEvent) {
     case "agent.error": {
       const a = state.agents.get(e.agent);
       if (a) { a.state = "err"; a.sub = e.detail ?? e.code; }
+      state.pendingInputAgents.delete(e.agent);
       pushMessage(e.agent, {
         agent: e.agent, to: "user", kind: "system",
         text: `⚠ ${e.code}${e.detail ? ": " + e.detail : ""}`,
