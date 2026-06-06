@@ -370,8 +370,17 @@ function startLeaderAgent(opts: LeaderOpts): void {
       actedThisTurn = true;
       if (!toolNeedsApproval(e.name, e.args as Record<string, unknown>)) {
         toolQueue.push(e);
+      } else {
+        // Destructive tool: Leaders route to parent for approval; root PM has no parent
+        // so send an error result immediately instead of silently dropping the call.
+        // Without this, PM waits forever for a result that never comes.
+        setImmediate(() => {
+          applyEvent({ v: 1, type: "tool.result", agent: opts.id, id: e.id, ok: false,
+            output: `Tool "${e.name}" requires approval. Root leader has no parent to approve — use a non-destructive alternative or rephrase the command.` });
+          a.sendCommand({ type: "tool.result", id: e.id, ok: false,
+            output: `Tool "${e.name}" requires approval. Root leader has no parent to approve — use a non-destructive alternative or rephrase the command.` });
+        });
       }
-      // Leaders' own destructive Bash: root PM has no parent to ask, just execute
     }
 
     if (e.type === "message") {
