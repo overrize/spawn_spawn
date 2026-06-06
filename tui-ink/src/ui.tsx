@@ -9,7 +9,7 @@ import TextInput from "ink-text-input";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { useStore, approve, reject, switchSession } from "./store.js";
+import { useStore, approve, reject, switchSession, getSessionTokens } from "./store.js";
 import type {
   AgentInfo, Message, TodoItem, AgentRunState,
 } from "./protocol.js";
@@ -479,6 +479,8 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
 
   const isPending = useStore((s) => s.pendingInputAgents.has(s.selectedAgent));
   const isRunning = a?.state === "run";
+  // Recap: last user message in this conv — gives at-a-glance context
+  const recapText = messages.filter((m) => m.agent === "user").slice(-1)[0]?.text ?? "";
   const isActive  = isRunning || isPending;
   // Reserve 2 rows at the bottom for the live indicator when agent is active
   const liveBarRows = isActive ? 2 : 0;
@@ -506,6 +508,11 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
         </Box>
         <Text dimColor> [P][F][C]</Text>
       </Box>
+      {recapText && (
+        <Box paddingLeft={2}>
+          <Text dimColor wrap="truncate-end">○ {truncate(recapText, contentCols - 4)}</Text>
+        </Box>
+      )}
 
       <Box flexDirection="row" marginTop={1} flexGrow={1}>
         {/* message content — ref used by measureElement to get actual column width */}
@@ -830,6 +837,12 @@ export function EffortBar({
   );
 }
 
+function fmtK(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "k";
+  return String(n);
+}
+
 export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
   demo?: boolean; exitConfirm?: boolean; exitSecsLeft?: number; effort?: Effort;
 }) {
@@ -841,10 +854,20 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
   const idle    = agents.filter((a) => a.state === "idle").length;
   const cost = useStore((s) => s.cost_usd);
   const minLevel = useStore((s) => s.minLevel);
+  const sessionTokens = useStore((s) => s.sessionTokens);
+  const tokenBudget   = useStore((s) => s.tokenBudget);
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
   const contentCols = Math.max(20, termCols - (FIXED_COLS + CONV_OVERHEAD));
   const isDebug = minLevel === "debug";
+
+  const totalTokens = sessionTokens.prompt + sessionTokens.completion;
+  const budgetPct = tokenBudget > 0 ? totalTokens / tokenBudget : 0;
+  const tokenColor = budgetPct >= 0.95 ? p.error : budgetPct >= 0.80 ? p.warn : p.dim;
+  const tokenLabel = totalTokens > 0
+    ? `🪙 ${fmtK(totalTokens)}${tokenBudget > 0 ? `/${fmtK(tokenBudget)}` : ""}`
+    : "";
+
   return (
     <Box paddingX={1} justifyContent="space-between">
       <Box>
@@ -853,6 +876,7 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
         {waiting > 0 && <Text color="yellow">⌛ {waiting} waiting  </Text>}
         {pending > 0 && <Text color="cyan">↩ {pending} queued  </Text>}
         <Text dimColor>$ {cost.toFixed(2)}</Text>
+        {tokenLabel ? <Text color={tokenColor}>  {tokenLabel}</Text> : null}
         {effort && <Text dimColor>  effort:<Text color={p.accent}>{effort}</Text></Text>}
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
         {isDebug && (
@@ -950,7 +974,7 @@ export function InputBar({
 
   return (
     <Box borderStyle="single" borderColor="gray" borderLeft={false} borderRight={false}
-         paddingX={1}>
+         paddingX={1} flexShrink={0}>
       <Text color={p.accent}>› </Text>
       {focused ? (
         // overflow="hidden" clips TextInput rendering at box boundary;

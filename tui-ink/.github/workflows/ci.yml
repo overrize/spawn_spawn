@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Typecheck + Unit + Headless + Full
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (122 cases)
+        run: npm test
+
+      - name: Headless tests (45 cases)
+        run: npm run test:headless
+
+      - name: Full 5-phase suite
+        run: npm run test:full
+
+      - name: E2E suite (H1-H3 + HTTP E1-E3)
+        run: npm run test:e2e:full

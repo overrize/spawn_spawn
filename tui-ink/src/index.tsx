@@ -16,7 +16,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { render, useApp, useInput, useStdin, Box, Text } from "ink";
 import { PassThrough } from "node:stream";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawnSync, spawn as nodeSpawn } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -32,7 +32,7 @@ import {
 import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
   approve, reject, abortAgent, setLayout, scrollBy, scrollAgentBy, setMinLevel, setEffort,
-  resumeAgent, updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents,
+  resumeAgent, updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents, setTokenBudget,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
@@ -42,6 +42,8 @@ import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, delet
 import { ProcessManager } from "./pm/ProcessManager.js";
 import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/registry.js";
 import type { AgentRole } from "./tools/registry.js";
+import { TestSuite } from "./tests/e2e/runner/TestSuite.js";
+import { E2ESuite } from "./tests/e2e/runner/E2ESuite.js";
 
 // ── 路径 ───────────────────────────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1012,6 +1014,132 @@ function runDemo(initialPrompt: string) {
   } as any), 5100);
 }
 
+// ── In-TUI test runner ──────────────────────────────────────────────────────
+const HEADLESS_SUITES: Record<string, string[]> = {
+  headless: [
+    "src/tests/e2e/headless/store-events.test.ts",
+    "src/tests/e2e/headless/protocol-parsing.test.ts",
+    "src/tests/e2e/headless/pm-rules.test.ts",
+  ],
+  unit: [
+    "src/tests/smoke.test.ts",
+    "src/tests/integration.test.ts",
+    "src/tests/pm-hierarchy.test.ts",
+    "src/tests/registry.test.ts",
+    "src/tests/registry-enoent.test.ts",
+    "src/tests/cache-prefix.test.ts",
+  ],
+};
+
+function runTestSuite(suite: string): void {
+  const TUI_ROOT = path.resolve(__dirname, "..");
+  const files = HEADLESS_SUITES[suite];
+  if (!files) {
+    const suites = Object.keys(HEADLESS_SUITES).join(" | ");
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+      text: `未知测试套件 "${suite}"。可用: ${suites}` });
+    return;
+  }
+  const absPaths = files.map((f) => path.join(TUI_ROOT, f));
+
+  // Switch to PM so the user sees the output
+  selectAgent("pm");
+  applyEvent({ v: 1, type: "agent.state", agent: "pm", state: "run", sub: `🧪 ${suite} (0 passed)` } as any);
+  applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+    text: `🧪 /test ${suite} — ${files.length} 文件，启动中…` });
+
+  const proc = nodeSpawn(
+    "node",
+    ["--import", "tsx/esm", "--test", ...absPaths],
+    { cwd: TUI_ROOT, env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" } },
+  );
+
+  let passCount = 0;
+  let failCount = 0;
+  let lineBuf = "";
+  // Accumulate failure context (the lines immediately after "not ok")
+  let failContext: string[] = [];
+  let capturingFail = false;
+
+  const updateSub = () =>
+    applyEvent({ v: 1, type: "agent.state", agent: "pm", state: "run",
+      sub: `🧪 ${suite}: ${passCount} passed${failCount ? `, ${failCount} FAILED` : ""}` } as any);
+
+  const handleLine = (line: string) => {
+    const s = line.replace(/\x1b\[[0-9;]*m/g, "").trim();
+    if (!s) return;
+
+    if (/^ok \d+/.test(s)) {
+      passCount++;
+      updateSub();
+      capturingFail = false;
+      failContext = [];
+      return;
+    }
+    if (/^not ok \d+/.test(s)) {
+      failCount++;
+      updateSub();
+      capturingFail = true;
+      failContext = [s];
+      return;
+    }
+    // YAML block under a failure — collect up to 6 lines then flush
+    if (capturingFail) {
+      // Stop at blank line or next TAP line
+      if (!s || /^(ok|not ok|#|\d+\.\.)/.test(s)) {
+        if (failContext.length) {
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: failContext.join("\n") });
+          failContext = [];
+        }
+        capturingFail = false;
+      } else if (failContext.length < 8) {
+        failContext.push(s);
+      }
+    }
+  };
+
+  proc.stdout.on("data", (chunk: Buffer) => {
+    lineBuf += chunk.toString();
+    const parts = lineBuf.split("\n");
+    lineBuf = parts.pop() ?? "";
+    parts.forEach(handleLine);
+  });
+
+  proc.stderr.on("data", (chunk: Buffer) => {
+    const text = chunk.toString().replace(/\x1b\[[0-9;]*m/g, "").trim();
+    if (text) applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+      text: `[stderr] ${text.slice(0, 400)}` });
+  });
+
+  proc.on("close", (code) => {
+    if (lineBuf.trim()) handleLine(lineBuf);
+    if (failContext.length) {
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: failContext.join("\n") });
+    }
+    const total = passCount + failCount;
+    const ok = code === 0 || failCount === 0;
+    const summary = ok
+      ? `✅ ${suite}: ${passCount}/${total} 全部通过`
+      : `❌ ${suite}: ${failCount} 失败 / ${passCount} 通过 (共 ${total})`;
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: summary });
+    applyEvent({ v: 1, type: "agent.state", agent: "pm", state: "idle", sub: "" } as any);
+  });
+
+  proc.on("error", (err) => {
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+      text: `⚠ 无法启动测试进程: ${err.message}` });
+    applyEvent({ v: 1, type: "agent.state", agent: "pm", state: "idle", sub: "" } as any);
+  });
+}
+
+function fmtKIndex(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "k";
+  return String(n);
+}
+
 // ── App ─────────────────────────────────────────────────────────────────────
 interface CmdDef {
   name: string;
@@ -1041,6 +1169,7 @@ function App() {
   const historyIdx      = useRef(-1);
   const browsingHistory = useRef(false);
   const completeTick    = useRef(0);
+  const [slashSelectedIdx, setSlashSelectedIdx] = useState(-1);
 
   // ── 消息队列 (agent busy 时暂存输入) ─────────────────────────────────────
   const msgQueue = useRef(new Map<string, string[]>());
@@ -1200,6 +1329,45 @@ function App() {
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `📊 告警 (${alerts.length} 条):\n${text}\n\n/alerts ack <code> 确认` });
     } },
     { name: "quit",    desc: "exit the TUI",                handler: () => requestExit() },
+    { name: "budget", desc: "/budget [Nk|N|off] — set/clear token budget", handler: (args) => {
+      const raw = args[0];
+      if (!raw || raw === "off") {
+        setTokenBudget(0);
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: "💰 token 预算已清除" });
+        return;
+      }
+      const lower = raw.toLowerCase();
+      const multiplier = lower.endsWith("k") ? 1_000 : lower.endsWith("m") ? 1_000_000 : 1;
+      const n = parseFloat(lower) * multiplier;
+      if (isNaN(n) || n <= 0) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: "用法: /budget 100k  /budget 50000  /budget off" });
+        return;
+      }
+      setTokenBudget(Math.round(n));
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `💰 token 预算已设为 ${fmtKIndex(Math.round(n))} tokens（超过 80%/95% 时会警告）` });
+    } },
+    { name: "test", desc: "/test [headless|unit|full|e2e] — run test suite inside TUI", handler: (args) => {
+      const suite = args[0] ?? "headless";
+      if (suite === "full") {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: "🧪 /test full 启动 — 结果在 test-monitor 面板" });
+        new TestSuite().run().catch((e) => {
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: `⚠ TestSuite 崩溃: ${String(e)}` });
+        });
+      } else if (suite === "e2e") {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: "🧪 /test e2e 启动 — 结果在 e2e-monitor 面板" });
+        new E2ESuite().run().catch((e) => {
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: `⚠ E2ESuite 崩溃: ${String(e)}` });
+        });
+      } else {
+        runTestSuite(suite);
+      }
+    } },
   ];
 
   const runCommand = (cmd: string) => {
@@ -1210,9 +1378,28 @@ function App() {
   };
 
   const slashHead = input.startsWith("/") ? input.slice(1).split(/\s+/)[0]! : "";
+  // slashMatches drives Tab completion — stays empty on bare "/" so Tab never
+  // triggers completeTick++ (which remounts InputBar and drops the next keystroke).
   const slashMatches = slashHead
     ? COMMANDS.filter((c) => c.name.startsWith(slashHead))
     : [];
+  // slashDisplay drives the visible dropdown — shows everything on bare "/"
+  const slashDisplay = input === "/" ? COMMANDS : slashMatches;
+
+  // Reset selection when the displayed list changes (user typed another char)
+  const prevSlashKey = useRef("");
+  const slashKey = slashDisplay.map((c) => c.name).join(",");
+  if (prevSlashKey.current !== slashKey) {
+    prevSlashKey.current = slashKey;
+    if (slashSelectedIdx !== -1) setSlashSelectedIdx(-1);
+  }
+
+  const SLASH_MAX_VISIBLE = 8;
+  const slashScrollStart = slashSelectedIdx < 0
+    ? 0
+    : Math.min(Math.max(0, slashSelectedIdx - SLASH_MAX_VISIBLE + 1),
+               Math.max(0, slashDisplay.length - SLASH_MAX_VISIBLE));
+  const slashVisible = slashDisplay.slice(slashScrollStart, slashScrollStart + SLASH_MAX_VISIBLE);
 
   const pmStarted = useRef(false);
 
@@ -1552,6 +1739,18 @@ function App() {
       }
     }
 
+    // 斜杠补全选择 — ↑/↓ 在列表中移动，优先于历史导航
+    if (input.startsWith("/") && slashDisplay.length > 0) {
+      if (key.upArrow) {
+        setSlashSelectedIdx((p) => (p <= 0 ? slashDisplay.length - 1 : p - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSlashSelectedIdx((p) => (p >= slashDisplay.length - 1 ? 0 : p + 1));
+        return;
+      }
+    }
+
     // 命令历史 — ↑ 回溯, ↓ 前进
     if (key.upArrow && (input === "" || browsingHistory.current)) {
       if (cmdHistory.current.length === 0) return;
@@ -1574,19 +1773,24 @@ function App() {
     }
 
     if (key.tab) {
-      // 斜杠命令补全
-      if (input.startsWith("/") && slashMatches.length === 1) {
-        setInput("/" + slashMatches[0]!.name + " ");
-        completeTick.current++;
+      if (input.startsWith("/")) {
+        // 斜杠模式：有选中项则补全选中，否则 LCP 补全
+        const selected = slashSelectedIdx >= 0 ? slashDisplay[slashSelectedIdx] : undefined;
+        if (selected) {
+          setInput("/" + selected.name + " ");
+          setSlashSelectedIdx(-1);
+          completeTick.current++;
+        } else if (slashMatches.length === 1) {
+          setInput("/" + slashMatches[0]!.name + " ");
+          completeTick.current++;
+        } else if (slashMatches.length > 1) {
+          const commonPrefix = lcp(slashMatches.map((m) => m.name));
+          const newInput = "/" + commonPrefix;
+          if (newInput !== input) { setInput(newInput); completeTick.current++; }
+        }
         return;
       }
-      if (input.startsWith("/") && slashMatches.length > 1) {
-        const commonPrefix = lcp(slashMatches.map((m) => m.name));
-        setInput("/" + commonPrefix);
-        completeTick.current++;
-        return;
-      }
-      // agent 切换
+      // agent 切换 — 仅在非斜杠模式
       const ids = agentList;
       if (!ids.length) return;
       const idx = ids.indexOf(sel);
@@ -1625,6 +1829,28 @@ function App() {
         {effortSelecting
           ? <EffortBar current={effort} onConfirm={confirmEffort} onCancel={() => setEffortSelecting(false)} />
           : <>
+              {slashDisplay.length > 0 && (
+                <>
+                  <Box>
+                    <Text dimColor>{"─".repeat(process.stdout.columns ?? 80)}</Text>
+                  </Box>
+                  <Box paddingX={2} flexDirection="column" flexShrink={1}>
+                    {slashVisible.map((c, i) => {
+                      const absIdx = slashScrollStart + i;
+                      const selected = absIdx === slashSelectedIdx;
+                      return (
+                        <Box key={c.name}>
+                          <Text color="cyan" inverse={selected}>{`/${c.name}`.padEnd(12)}</Text>
+                          <Text dimColor={!selected}> {c.desc}</Text>
+                        </Box>
+                      );
+                    })}
+                    {slashDisplay.length > SLASH_MAX_VISIBLE && (
+                      <Text dimColor>  {"·".repeat(3)} {slashDisplay.length - SLASH_MAX_VISIBLE} more</Text>
+                    )}
+                  </Box>
+                </>
+              )}
               <InputBar
                 key={completeTick.current}
                 focused={pending.length === 0}
@@ -1649,16 +1875,6 @@ function App() {
                       })()
                 }
               />
-              {slashMatches.length > 0 && (
-                <Box paddingX={2} flexDirection="column">
-                  {slashMatches.map((c) => (
-                    <Box key={c.name}>
-                      <Text color="cyan">{`/${c.name}`.padEnd(12)}</Text>
-                      <Text dimColor>{c.desc}</Text>
-                    </Box>
-                  ))}
-                </Box>
-              )}
             </>
         }
         <StatusBar demo={DEMO} exitConfirm={exitConfirm} exitSecsLeft={exitSecsLeft} effort={effort} />

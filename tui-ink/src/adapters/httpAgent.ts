@@ -15,6 +15,140 @@ const VALID_TYPES = new Set([
   // Bash approval protocol: leader approves/rejects destructive worker commands
   "tool.approved", "tool.rejected",
 ]);
+
+// ── Pure protocol parser — extracted for testability ──────────────────────────
+// Parses fullText (raw LLM output) into TuiEvents, calling emitFn for each.
+// No HTTP, no class state — safe to import and test in isolation.
+export function parseAgentOutput(
+  fullText: string,
+  agentId: string,
+  emitFn: (ev: TuiEvent) => void,
+): void {
+  const VALID_JSON_ESC = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+  const repairJsonLiterals = (s: string): string => {
+    let out = "", inStr = false, esc = false;
+    for (const ch of s) {
+      if (esc) {
+        esc = false;
+        if (inStr && !VALID_JSON_ESC.has(ch)) { out += "\\" + ch; } else { out += ch; }
+        continue;
+      }
+      if (ch === "\\" && inStr)   { esc = true;  out += ch; continue; }
+      if (ch === '"')             { inStr = !inStr; out += ch; continue; }
+      if (inStr && ch === "\n")   { out += "\\n"; continue; }
+      if (inStr && ch === "\r")   { out += "\\r"; continue; }
+      if (inStr && ch === "\t")   { out += "\\t"; continue; }
+      out += ch;
+    }
+    return out;
+  };
+
+  const emitParsed = (raw: string) => {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const repaired = repairJsonLiterals(raw);
+      try {
+        parsed = JSON.parse(repaired);
+      } catch (e2) {
+        let closed: any = null;
+        for (let extra = 1; extra <= 3; extra++) {
+          try { closed = JSON.parse(repaired + "}".repeat(extra)); break; } catch { /* try more */ }
+        }
+        if (closed) {
+          parsed = closed;
+        } else {
+          process.stderr.write(
+            `[${agentId}] JSON parse FAILED: ${(e2 as Error).message}\n` +
+            `  raw(${raw.length}): ${raw.slice(0, 300)}\n`,
+          );
+          parsed = null;
+        }
+      }
+    }
+    if (parsed) try {
+      if (parsed?.type === "think") {
+        const thought = String(parsed.thought ?? parsed.text ?? "").slice(0, 120);
+        if (thought) emitFn({ v: 1, type: "step", agent: agentId, text: `💭 ${thought}` } as TuiEvent);
+        return;
+      }
+      if (parsed?.type && VALID_TYPES.has(String(parsed.type))) {
+        const ev = { v: 1 as const, ...parsed, agent: parsed.agent ?? agentId } as TuiEvent;
+        emitFn(ev);
+        return;
+      }
+    } catch { /* not valid protocol JSON */ }
+    emitFn({ v: 1, type: "message", agent: agentId, to: "user", text: raw.trim() } as TuiEvent);
+  };
+
+  let jsonBuf = "";
+  let depth = 0;
+  let jsonInStr = false;
+  let jsonEsc = false;
+  let inThinking = false;
+  let thinkingStepEmitted = false;
+
+  for (const line of fullText.split("\n")) {
+    const trimmed = line.trim();
+    if (/^```/.test(trimmed)) continue;
+    if (!inThinking && trimmed.includes("<thinking>")) {
+      inThinking = true;
+      if (!thinkingStepEmitted) {
+        thinkingStepEmitted = true;
+        emitFn({ v: 1, type: "step", agent: agentId, text: "thinking…" } as TuiEvent);
+      }
+    }
+    if (inThinking) {
+      if (trimmed.includes("</thinking>")) inThinking = false;
+      continue;
+    }
+    if (!trimmed) {
+      if (depth === 0 && !jsonInStr && jsonBuf) {
+        emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false;
+      }
+      continue;
+    }
+    if (depth === 0 && !jsonInStr && !trimmed.startsWith("{")) {
+      if (jsonBuf) { emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false; }
+      const inlineJson = trimmed.indexOf('{"');
+      if (inlineJson > 0) {
+        const prose = trimmed.slice(0, inlineJson).trim();
+        if (prose) emitParsed(prose);
+        const jsonPart = trimmed.slice(inlineJson);
+        jsonBuf = jsonPart;
+        for (const ch of jsonPart) {
+          if (jsonEsc)                  { jsonEsc = false; continue; }
+          if (ch === "\\" && jsonInStr) { jsonEsc = true; continue; }
+          if (ch === '"')               { jsonInStr = !jsonInStr; continue; }
+          if (jsonInStr)                continue;
+          if (ch === "{")  depth++;
+          else if (ch === "}") depth--;
+        }
+        if (depth <= 0 && !jsonInStr) {
+          emitParsed(jsonBuf); jsonBuf = ""; depth = 0; jsonInStr = false; jsonEsc = false;
+        }
+      } else {
+        emitParsed(trimmed);
+      }
+      continue;
+    }
+    jsonBuf += (jsonBuf ? "\n" : "") + trimmed;
+    for (const ch of trimmed) {
+      if (jsonEsc)               { jsonEsc = false; continue; }
+      if (ch === "\\" && jsonInStr) { jsonEsc = true; continue; }
+      if (ch === '"')            { jsonInStr = !jsonInStr; continue; }
+      if (jsonInStr)             continue;
+      if (ch === "{")            depth++;
+      else if (ch === "}")       depth--;
+    }
+    if (depth <= 0 && !jsonInStr) {
+      emitParsed(jsonBuf);
+      jsonBuf = ""; depth = 0; jsonInStr = false; jsonEsc = false;
+    }
+  }
+  if (jsonBuf.trim()) emitParsed(jsonBuf);
+}
 const LOG = !!process.env.LOG_EVENTS;
 
 export class HttpConvAgent extends EventEmitter {
@@ -149,6 +283,8 @@ export class HttpConvAgent extends EventEmitter {
     const MAX_RETRIES = 3;
     let lastErr: any;
     let fullText = "";
+    let promptTokens = 0;
+    let completionTokens = 0;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -165,9 +301,12 @@ export class HttpConvAgent extends EventEmitter {
       }
       try {
         const pc = this.cfg.providerCfg;
-        fullText = pc.provider === "anthropic"
+        const result = pc.provider === "anthropic"
           ? await this._callAnthropic()
           : await this._callOpenAI();
+        fullText = result.text;
+        promptTokens = result.promptTokens;
+        completionTokens = result.completionTokens;
         lastErr = null;
         break; // success
       } catch (err: any) {
@@ -186,175 +325,19 @@ export class HttpConvAgent extends EventEmitter {
 
       if (LOG) process.stderr.write(`[${this.cfg.id}] raw response:\n${fullText}\n---\n`);
 
-      // 解析协议 JSON。支持单行和多行格式，用大括号深度计数累积完整对象。
-      // inStr/esc MUST persist across lines so multi-line string values (e.g. a Python
-      // script embedded in a Bash args field) don't cause {} inside strings to corrupt depth.
-      let jsonBuf = "";
-      let depth = 0;
-      let jsonInStr = false;
-      let jsonEsc = false;
-
-      // Repair JSON strings with two classes of problems common in LLM output:
-      //   1. Literal control chars inside string values (\n \r \t) → escaped sequences
-      //   2. Invalid JSON escape sequences (e.g. \| \d \w \s from shell/regex patterns)
-      //      → double the backslash so the char is preserved (\ + | becomes \\ + |)
-      // Valid JSON escapes (" \ / b f n r t u) are passed through untouched.
-      const VALID_JSON_ESC = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
-      const repairJsonLiterals = (s: string): string => {
-        let out = "", inStr = false, esc = false;
-        for (const ch of s) {
-          if (esc) {
-            esc = false;
-            if (inStr && !VALID_JSON_ESC.has(ch)) {
-              // Invalid escape: the leading \ was already output; add another \ so the
-              // sequence becomes \\ + ch (a valid JSON escaped backslash + literal char).
-              out += "\\" + ch;
-            } else {
-              out += ch;
-            }
-            continue;
-          }
-          if (ch === "\\" && inStr)   { esc = true;  out += ch; continue; }
-          if (ch === '"')             { inStr = !inStr; out += ch; continue; }
-          if (inStr && ch === "\n")   { out += "\\n"; continue; }
-          if (inStr && ch === "\r")   { out += "\\r"; continue; }
-          if (inStr && ch === "\t")   { out += "\\t"; continue; }
-          out += ch;
-        }
-        return out;
-      };
-
-      const emitParsed = (raw: string) => {
-        let parsed: any;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          const repaired = repairJsonLiterals(raw);
-          try {
-            parsed = JSON.parse(repaired);
-          } catch (e2) {
-            // Last resort: try closing unclosed braces (truncated LLM response)
-            let closed: any = null;
-            for (let extra = 1; extra <= 3; extra++) {
-              try { closed = JSON.parse(repaired + "}".repeat(extra)); break; } catch { /* try more */ }
-            }
-            if (closed) {
-              process.stderr.write(
-                `[${this.cfg.id}] JSON repaired by closing ${raw.length < repaired.length + 3 ? "braces" : "?"}: ${raw.slice(0, 120)}\n`
-              );
-              parsed = closed;
-            } else {
-              // Always log parse failures to stderr — capture with: npm run dev 2>debug.log
-              process.stderr.write(
-                `[${this.cfg.id}] JSON parse FAILED: ${(e2 as Error).message}\n` +
-                `  raw(${raw.length}): ${raw.slice(0, 300)}\n`
-              );
-              parsed = null;
-            }
-          }
-        }
-        if (parsed) try {
-          // Internal thinking block — show as step status, never as conversation message
-          if (parsed?.type === "think") {
-            const thought = String(parsed.thought ?? parsed.text ?? "").slice(0, 120);
-            if (thought) this.emit("event", {
-              v: 1, type: "step", agent: this.cfg.id, text: `💭 ${thought}`,
-            } as TuiEvent);
-            return;
-          }
-          if (parsed?.type && VALID_TYPES.has(String(parsed.type))) {
-            const ev = { v: 1 as const, ...parsed, agent: parsed.agent ?? this.cfg.id } as TuiEvent;
-            if (LOG) process.stderr.write(`[${this.cfg.id}] event: ${JSON.stringify(ev)}\n`);
-            this.emit("event", ev);
-            return;
-          }
-        } catch { /* not valid protocol JSON */ }
-        // 非协议 JSON 或解析失败 → 散文消息
-        if (LOG) process.stderr.write(`[${this.cfg.id}] prose: ${raw}\n`);
+      // Emit token usage before parsing so the store is updated even if parsing crashes.
+      if (promptTokens > 0 || completionTokens > 0) {
         this.emit("event", {
-          v: 1, type: "message", agent: this.cfg.id, to: "user", text: raw.trim(),
+          v: 1, type: "token.usage", agent: this.cfg.id,
+          prompt: promptTokens, completion: completionTokens,
         } as TuiEvent);
-      };
-
-      // State for stripping <thinking>...</thinking> blocks (DeepSeek embeds in content)
-      let inThinking = false;
-      let thinkingStepEmitted = false;
-
-      for (const line of fullText.split("\n")) {
-        const trimmed = line.trim();
-
-        // Skip markdown fences (```json, ```, etc.) — LLMs sometimes wrap JSON in fences
-        if (/^```/.test(trimmed)) continue;
-
-        // Strip <thinking>...</thinking> blocks; show a single "thinking…" step instead
-        if (!inThinking && trimmed.includes("<thinking>")) {
-          inThinking = true;
-          if (!thinkingStepEmitted) {
-            thinkingStepEmitted = true;
-            this.emit("event", { v: 1, type: "step", agent: this.cfg.id, text: "thinking…" } as TuiEvent);
-          }
-        }
-        if (inThinking) {
-          if (trimmed.includes("</thinking>")) inThinking = false;
-          continue;
-        }
-
-        if (!trimmed) {
-          // 空行：如果当前不在 JSON 块里，忽略；否则继续累积（理论上不该有空行）
-          if (depth === 0 && !jsonInStr && jsonBuf) {
-            emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false;
-          }
-          continue;
-        }
-
-        if (depth === 0 && !jsonInStr && !trimmed.startsWith("{")) {
-          // 散文行（不以 { 开头）。但 LLM 有时把 JSON 拼在散文末尾同一行，
-          // 例如："分析完成。{"v":1,"type":"step",...}" — 拆分后分别处理。
-          if (jsonBuf) { emitParsed(jsonBuf); jsonBuf = ""; jsonInStr = false; jsonEsc = false; }
-          const inlineJson = trimmed.indexOf('{"');
-          if (inlineJson > 0) {
-            const prose = trimmed.slice(0, inlineJson).trim();
-            if (prose) emitParsed(prose);
-            // 剩余部分当 JSON 起点，下面的 jsonBuf 累积逻辑会接手
-            const jsonPart = trimmed.slice(inlineJson);
-            jsonBuf = jsonPart;
-            for (const ch of jsonPart) {
-              if (jsonEsc)                  { jsonEsc = false; continue; }
-              if (ch === "\\" && jsonInStr) { jsonEsc = true; continue; }
-              if (ch === '"')               { jsonInStr = !jsonInStr; continue; }
-              if (jsonInStr)                continue;
-              if (ch === "{")  depth++;
-              else if (ch === "}") depth--;
-            }
-            if (depth <= 0 && !jsonInStr) {
-              emitParsed(jsonBuf); jsonBuf = ""; depth = 0; jsonInStr = false; jsonEsc = false;
-            }
-          } else {
-            emitParsed(trimmed);
-          }
-          continue;
-        }
-
-        // 计大括号深度，正确跳过字符串内的括号
-        // jsonInStr/jsonEsc are declared outside the line loop so multi-line string
-        // values (e.g. Python scripts in Bash args) don't corrupt depth tracking.
-        jsonBuf += (jsonBuf ? "\n" : "") + trimmed;
-        for (const ch of trimmed) {
-          if (jsonEsc)               { jsonEsc = false; continue; }
-          if (ch === "\\" && jsonInStr) { jsonEsc = true; continue; }
-          if (ch === '"')            { jsonInStr = !jsonInStr; continue; }
-          if (jsonInStr)             continue;
-          if (ch === "{")            depth++;
-          else if (ch === "}")       depth--;
-        }
-
-        if (depth <= 0 && !jsonInStr) {
-          // 对象闭合
-          emitParsed(jsonBuf);
-          jsonBuf = ""; depth = 0; jsonInStr = false; jsonEsc = false;
-        }
       }
-      if (jsonBuf.trim()) emitParsed(jsonBuf);
+
+      // Delegate to the extracted pure parser (also exported for headless tests).
+      parseAgentOutput(fullText, this.cfg.id, (ev) => {
+        if (LOG) process.stderr.write(`[${this.cfg.id}] event: ${JSON.stringify(ev)}\n`);
+        this.emit("event", ev);
+      });
 
       this.emit("event", {
         v: 1, type: "agent.state", agent: this.cfg.id,
@@ -416,8 +399,10 @@ export class HttpConvAgent extends EventEmitter {
     return result;
   }
 
-  private async _callAnthropic(): Promise<string> {
+  private async _callAnthropic(): Promise<{ text: string; promptTokens: number; completionTokens: number }> {
     const pc = this.cfg.providerCfg;
+    let promptTokens = 0;
+    let completionTokens = 0;
 
     // ── Prompt caching 支持 ────────────────────────────────────────────
     // 如果 systemPrompt 存在，用数组格式并标记 cache_control: ephemeral
@@ -460,20 +445,31 @@ export class HttpConvAgent extends EventEmitter {
       body,
     );
 
-    return this._readStream(stream, (chunk) => {
+    const text = await this._readStream(stream, (chunk) => {
       // Anthropic SSE: data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
       try {
         const parsed = JSON.parse(chunk);
+        // Capture input tokens from message_start
+        if (parsed?.type === "message_start" && parsed.message?.usage) {
+          promptTokens = parsed.message.usage.input_tokens ?? 0;
+        }
+        // Capture output tokens from message_delta
+        if (parsed?.type === "message_delta" && parsed.usage) {
+          completionTokens = parsed.usage.output_tokens ?? 0;
+        }
         if (parsed?.type === "content_block_delta" && parsed.delta?.text) {
           return parsed.delta.text;
         }
       } catch { /* skip non-JSON */ }
       return null;
     });
+    return { text, promptTokens, completionTokens };
   }
 
-  private async _callOpenAI(): Promise<string> {
+  private async _callOpenAI(): Promise<{ text: string; promptTokens: number; completionTokens: number }> {
     const pc = this.cfg.providerCfg;
+    let promptTokens = 0;
+    let completionTokens = 0;
     const baseUrl = pc.baseUrl || "https://api.openai.com";
     const url = new URL(baseUrl);
     const port = url.port ? parseInt(url.port, 10) : undefined;
@@ -488,6 +484,7 @@ export class HttpConvAgent extends EventEmitter {
         ...this._trimmedHistory().map((m) => ({ role: m.role, content: m.content })),
       ],
       stream: true,
+      stream_options: { include_usage: true },
     });
 
     const stream = await this._doStream(
@@ -502,7 +499,7 @@ export class HttpConvAgent extends EventEmitter {
       port,
     );
 
-    return this._readStream(stream, (chunk) => {
+    const text = await this._readStream(stream, (chunk) => {
       // OpenAI/DeepSeek SSE: data: {"choices":[{"delta":{"content":"...","reasoning_content":"..."}}]}
       // Reasoning models (deepseek-v4-flash, o1, etc.) stream thinking into reasoning_content
       // and the actual answer into content. We capture both: reasoning shown as step, content
@@ -510,6 +507,11 @@ export class HttpConvAgent extends EventEmitter {
       if (chunk === "[DONE]") return null;
       try {
         const parsed = JSON.parse(chunk);
+        // Capture usage from the final chunk (stream_options.include_usage)
+        if (parsed?.usage) {
+          promptTokens = parsed.usage.prompt_tokens ?? 0;
+          completionTokens = parsed.usage.completion_tokens ?? 0;
+        }
         const delta = parsed?.choices?.[0]?.delta;
         if (!delta) return null;
 
@@ -527,6 +529,7 @@ export class HttpConvAgent extends EventEmitter {
         return typeof content === "string" && content ? content : null;
       } catch { return null; }
     });
+    return { text, promptTokens, completionTokens };
   }
 
   private _doStream(

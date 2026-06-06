@@ -6,6 +6,8 @@ import type {
   AgentInfo, Message, TodoItem, TuiEvent, Session, LogLevel,
 } from "./protocol.js";
 
+interface TokenBucket { prompt: number; completion: number }
+
 interface State {
   agents: Map<string, AgentInfo>;
   selectedAgent: string;          // 当前选中,渲染右栏用
@@ -24,6 +26,10 @@ interface State {
   agentPaneScroll: number;   // manual scroll offset for the left agent panel
   effort: "min" | "mid" | "high" | "max";
   minLevel: LogLevel;
+  // Token supervision
+  tokensByAgent: Map<string, TokenBucket>;
+  sessionTokens: TokenBucket;
+  tokenBudget: number;  // 0 = unlimited
 }
 
 const state: State = {
@@ -44,6 +50,9 @@ const state: State = {
   agentPaneScroll: 0,
   effort: "mid",
   minLevel: "info",
+  tokensByAgent: new Map(),
+  sessionTokens: { prompt: 0, completion: 0 },
+  tokenBudget: 0,
 };
 
 const listeners = new Set<() => void>();
@@ -159,6 +168,20 @@ export function setLayout(l: "v1" | "v3"): void {
 export function setEffort(e: "min" | "mid" | "high" | "max"): void {
   state.effort = e;
   notify();
+}
+
+export function setTokenBudget(n: number): void {
+  state.tokenBudget = Math.max(0, n);
+  notify();
+}
+
+/** Returns { prompt, completion, total } for the current session. */
+export function getSessionTokens(): { prompt: number; completion: number; total: number } {
+  return {
+    prompt: state.sessionTokens.prompt,
+    completion: state.sessionTokens.completion,
+    total: state.sessionTokens.prompt + state.sessionTokens.completion,
+  };
 }
 
 export function setMinLevel(l: LogLevel): void {
@@ -363,6 +386,28 @@ export function applyEvent(e: TuiEvent) {
         level: "info",
       });
       break;
+    case "token.usage": {
+      const existing = state.tokensByAgent.get(e.agent) ?? { prompt: 0, completion: 0 };
+      state.tokensByAgent.set(e.agent, {
+        prompt: existing.prompt + e.prompt,
+        completion: existing.completion + e.completion,
+      });
+      state.sessionTokens.prompt += e.prompt;
+      state.sessionTokens.completion += e.completion;
+      // Budget warning: push a system message once when crossing 80% and 95%
+      if (state.tokenBudget > 0) {
+        const total = state.sessionTokens.prompt + state.sessionTokens.completion;
+        const pct = total / state.tokenBudget;
+        if (pct >= 0.95 && total - e.prompt - e.completion < state.tokenBudget * 0.95) {
+          pushMessage("pm", { agent: "pm", to: "user", kind: "system",
+            text: `⚠️ TOKEN 预算已用 ${Math.round(pct * 100)}% — 接近上限！`, level: "error" });
+        } else if (pct >= 0.80 && total - e.prompt - e.completion < state.tokenBudget * 0.80) {
+          pushMessage("pm", { agent: "pm", to: "user", kind: "system",
+            text: `⚠️ TOKEN 预算已用 ${Math.round(pct * 100)}%`, level: "warn" });
+        }
+      }
+      break;
+    }
     case "task.notification": {
       const status = e.success ? "成功" : "失败";
       const reason = e.reason ? `。理由: ${e.reason}` : "";
@@ -446,6 +491,20 @@ function shortArgs(args: unknown): string {
   } catch { return ""; }
 }
 
+/** Remove only the specified agent IDs from the store (used by E2ESuite phases). */
+export function _resetAgents(agentIds: string[]): void {
+  for (const id of agentIds) {
+    state.agents.delete(id);
+    state.messagesByAgent.delete(id);
+    state.todosByAgent.delete(id);
+    state.stepByAgent.delete(id);
+    state.tokensByAgent.delete(id);
+    state.sessionsByAgent.delete(id);
+    state.currentSessionByAgent.delete(id);
+  }
+  state.sessionTokens = { prompt: 0, completion: 0 };
+}
+
 export function _resetForTest(): void {
   state.agents.clear();
   state.selectedAgent = "pm";
@@ -464,4 +523,7 @@ export function _resetForTest(): void {
   state.agentPaneScroll = 0;
   state.effort = "mid";
   state.minLevel = "info";
+  state.tokensByAgent.clear();
+  state.sessionTokens = { prompt: 0, completion: 0 };
+  state.tokenBudget = 0;
 }

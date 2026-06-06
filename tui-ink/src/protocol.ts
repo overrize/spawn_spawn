@@ -106,7 +106,9 @@ export type TuiEvent =
       decision: "apply" | "reject"; reason?: string }
   // leader → TUI: approve/reject a destructive Bash call from a worker
   | { v: 1; type: "tool.approved"; id: string; reason?: string }
-  | { v: 1; type: "tool.rejected"; id: string; reason?: string };
+  | { v: 1; type: "tool.rejected"; id: string; reason?: string }
+  // Token usage — emitted by httpAgent after each LLM turn (not parsed from LLM output)
+  | { v: 1; type: "token.usage"; agent: string; prompt: number; completion: number };
 
 // TUI → agent  (写到 agent.stdin)
 export type AgentCommand =
