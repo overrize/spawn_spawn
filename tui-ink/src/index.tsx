@@ -280,6 +280,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let gaveUp = false;
   let nudgePending = false; // true when the next run turn is a system-initiated nudge
 
+  // Quality tracking — emitted as structured stderr log on agent.done
+  let qualTurns = 0;
+  let qualNudges = 0;
+  let qualHandup = false;
+
   a.on("event", (e: TuiEvent) => {
     // Spawn — pre-check then dispatch to correct handler
     if (e.type === "spawn") {
@@ -332,7 +337,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
     if (e.type === "agent.state" && e.state === "run") {
       actedThisTurn = false;
       if (!nudgePending) { continuations = 0; gaveUp = false; }
+      else qualNudges++; // nudgePending=true means this run was system-initiated
       nudgePending = false;
+      qualTurns++;
     }
 
     if (e.type === "tool.call") {
@@ -358,7 +365,29 @@ function startLeaderAgent(opts: LeaderOpts): void {
       }
     }
 
-    if (e.type === "agent.done") actedThisTurn = true;
+    if (e.type === "agent.done") {
+      actedThisTurn = true;
+      const tok = getState().tokensByAgent.get(opts.id);
+      const rejects = (getState().messagesByAgent.get(opts.id) ?? [])
+        .filter((m) => m.kind === "tool_result" && m.text.startsWith("Tool rejected")).length;
+      const score = Math.max(0, Math.min(100,
+        100
+        - qualNudges * 8
+        - (gaveUp ? 25 : 0)
+        - (qualHandup ? 15 : 0)
+        - (e.success ? 0 : 20)
+        - rejects * 10
+        + (e.evidence?.length ? 10 : 0)
+        + (qualNudges === 0 ? 10 : 0)
+      ));
+      process.stderr.write(
+        `[quality] ${opts.id} session=${mem.session_hash ?? "?"} score=${score}` +
+        ` success=${e.success} turns=${qualTurns} nudges=${qualNudges}` +
+        ` handup=${qualHandup} gaveUp=${gaveUp} rejects=${rejects}` +
+        ` tokens_in=${tok?.prompt ?? 0} tokens_out=${tok?.completion ?? 0}` +
+        ` evidence=${e.evidence?.length ?? 0}\n`,
+      );
+    }
     // Tech Lead completion — notify parent PM + ingest memory upward
     if (e.type === "agent.done" && opts.parentId) {
       const pmSec = secretaries.get("pm");
@@ -381,6 +410,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
       }
       deleteAgentMemory(opts.id);
     }
+
+    if (e.type === "unit.handup") qualHandup = true;
 
     // unit.handup — forward to parent
     if (e.type === "unit.handup" && opts.parentId) {
@@ -626,6 +657,11 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   let workerCorrectedThisTurn = false; // deduplicate illegal_message corrections per turn
   let workerNudgePending = false; // true when the next run turn is a system-initiated nudge
 
+  // Quality tracking for worker
+  let wQualTurns = 0;
+  let wQualNudges = 0;
+  let wQualHandup = false;
+
   a.on("event", (ev: TuiEvent) => {
     // spawn: pre-check BEFORE applyEvent to prevent ghost agents in store
     if (ev.type === "spawn") {
@@ -708,8 +744,30 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         });
       }
     }
+    if (ev.type === "agent.state" && ev.state === "run") {
+      if (workerNudgePending) wQualNudges++;
+      wQualTurns++;
+    }
+    if (ev.type === "unit.handup") wQualHandup = true;
     if (ev.type === "agent.done") {
       workerActedThisTurn = true;
+      const wTok = getState().tokensByAgent.get(e.child);
+      const wScore = Math.max(0, Math.min(100,
+        100
+        - wQualNudges * 8
+        - (workerGaveUp ? 25 : 0)
+        - (wQualHandup ? 15 : 0)
+        - (ev.success ? 0 : 20)
+        + (ev.evidence?.length ? 10 : 0)
+        + (wQualNudges === 0 ? 10 : 0)
+      ));
+      process.stderr.write(
+        `[quality] ${e.child} session=${mem.session_hash ?? "?"} score=${wScore}` +
+        ` success=${ev.success} turns=${wQualTurns} nudges=${wQualNudges}` +
+        ` handup=${wQualHandup} gaveUp=${workerGaveUp}` +
+        ` tokens_in=${wTok?.prompt ?? 0} tokens_out=${wTok?.completion ?? 0}` +
+        ` evidence=${ev.evidence?.length ?? 0}\n`,
+      );
       const parentAgent = agents.get(e.parent);
       if (parentAgent instanceof HttpConvAgent) {
         if (ev.success) {
