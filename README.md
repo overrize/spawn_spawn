@@ -132,6 +132,7 @@ Agent 可调用的工具（共 8 个）：
 |---|---|
 | `/sessions` | 列出所有历史会话 |
 | `/resume [agentId\|hash]` | 从 memory snapshot 恢复会话 |
+| `/rate good\|bad [说明]` | 对刚完成的会话评分（记入 debug.log） |
 | `/fanout <N>` | 设置最大并发子节点数（默认 4） |
 | `/connect <role> <preset> <model> <key>` | 配置 LLM provider |
 | `/palette paper\|green\|amber` | 切换配色方案 |
@@ -193,15 +194,88 @@ src/tests/
 
 ```bash
 # Linux / macOS
-LOG_EVENTS=1 npm start 2>debug.log
+npm start 2>debug.log
 tail -f debug.log
 
 # Windows PowerShell
-$env:LOG_EVENTS=1; npm start 2>debug.log
+npm start 2>debug.log
 Get-Content debug.log -Wait -Tail 50
 ```
 
-`LOG_EVENTS=1` 开启完整 LLM 原始响应日志。不设置时只输出关键节点（resume 加载、网络重试、历史截断等）。
+开启完整 LLM 原始响应日志（每轮 raw 输出）：
+
+```bash
+LOG_EVENTS=1 npm start 2>debug.log
+```
+
+不设置时只输出关键节点：resume 加载、网络重试、历史截断、质量评分等。
+
+---
+
+## 质量评分体系
+
+每次 PM 任务完成后，系统自动在 debug.log 里写入一行结构化评分，同时在状态栏提示用户评分。
+
+### 自动评分（客观信号）
+
+任务结束时自动计算并写入 stderr：
+
+```
+[quality] pm session=abc1234 score=82 success=true turns=4 nudges=1 handup=false gaveUp=false rejects=0 tokens_in=4200 tokens_out=890 evidence=2
+```
+
+| 字段 | 说明 |
+|---|---|
+| `score` | 0–100，综合自动评分 |
+| `success` | agent.done 是否成功 |
+| `turns` | LLM 轮次数 |
+| `nudges` | 系统催促次数（越多说明 agent 越被动） |
+| `handup` | 是否触发了 unit.handup |
+| `gaveUp` | 是否 3 次 nudge 全部失效 |
+| `rejects` | 用户拒绝工具调用次数 |
+| `tokens_in/out` | 本次会话 token 消耗 |
+| `evidence` | agent.done 携带的证据条数 |
+
+评分规则：基础 100 分，每次 nudge -8，gaveUp -25，handup -15，失败 -20，用户拒绝工具 -10；有 evidence +10，零 nudge +10。
+
+### 人工评分（主观反馈）
+
+任务完成后状态栏出现提示：
+
+```
+Session done — /rate good [comment] or /rate bad [comment] to rate
+```
+
+输入评分命令（comment 为可选文字说明）：
+
+```
+/rate good 这次 worker 很流畅，没有卡顿
+/rate bad PM 问了三次才开始做事，handup 太频繁
+```
+
+写入 debug.log：
+
+```
+[rating] pm session=abc1234 human=1 comment="这次 worker 很流畅，没有卡顿"
+[rating] pm session=abc1234 human=-1 comment="PM 问了三次才开始做事"
+```
+
+`human=1` 为好评，`human=-1` 为差评。发送下一条消息时提示自动消失。
+
+### 如何分析数据
+
+```bash
+# 提取全部评分行
+grep '\[quality\]\|\[rating\]' debug.log
+
+# 只看差评会话
+grep 'human=-1' debug.log
+
+# 查看低分会话（score < 60）
+grep '\[quality\]' debug.log | awk -F'score=' '{print $2}' | awk '$1+0 < 60'
+```
+
+**反馈数据上传**：把 `debug.log` 上传到 GitHub issue 或直接发给开发者，`[quality]` 和 `[rating]` 行不包含任务内容，只有数字和你填写的 comment，隐私安全。
 
 ---
 
