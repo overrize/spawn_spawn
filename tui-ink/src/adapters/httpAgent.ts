@@ -14,6 +14,8 @@ const VALID_TYPES = new Set([
   "pm.alert", "proposal.new", "proposal.decision",
   // Bash approval protocol: leader approves/rejects destructive worker commands
   "tool.approved", "tool.rejected",
+  // Parent can kill a child agent
+  "agent.kill",
 ]);
 
 // ── Pure protocol parser — extracted for testability ──────────────────────────

@@ -107,6 +107,8 @@ export type TuiEvent =
   // leader → TUI: approve/reject a destructive Bash call from a worker
   | { v: 1; type: "tool.approved"; id: string; reason?: string }
   | { v: 1; type: "tool.rejected"; id: string; reason?: string }
+  // leader → TUI: kill a child agent (same effect as ESC on that agent's pane)
+  | { v: 1; type: "agent.kill"; agent: string; target: string; reason?: string }
   // Token usage — emitted by httpAgent after each LLM turn (not parsed from LLM output)
   | { v: 1; type: "token.usage"; agent: string; prompt: number; completion: number };
 

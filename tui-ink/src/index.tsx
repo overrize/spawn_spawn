@@ -212,6 +212,15 @@ interface LeaderOpts {
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
 }
 
+function killAgent(id: string, reason = "interrupted"): void {
+  agents.get(id)?.kill?.();
+  abortAgent(id);
+  const st = getState().agents.get(id)?.state;
+  if (st === "run" || st === "idle") {
+    applyEvent({ v: 1, type: "agent.state", agent: id, state: "err", sub: reason });
+  }
+}
+
 function startLeaderAgent(opts: LeaderOpts): void {
   if (DEMO && !opts.parentId) { return runDemo(opts.firstMessage ?? "demo"); }
   if (agents.has(opts.id)) return;
@@ -310,6 +319,17 @@ function startLeaderAgent(opts: LeaderOpts): void {
       return;
     }
 
+    // PM can kill a child agent via protocol — same effect as ESC on that pane
+    if (e.type === "agent.kill") {
+      const targetState = getState().agents.get(e.target)?.state;
+      if (targetState === "run" || targetState === "idle") {
+        killAgent(e.target, e.reason ?? "killed by parent");
+        applyEvent({ v: 1, type: "message", agent: opts.id, to: "user",
+          text: `⏹ ${opts.id} killed ${e.target}${e.reason ? ": " + e.reason : ""}` });
+      }
+      return;
+    }
+
     if (e.type === "message" && !checkMessageLegal(e)) return;
 
     // Approve/reject destructive Bash from a child agent
@@ -397,6 +417,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
       const pmSec = secretaries.get("pm");
       if (pmSec) pmSec.ingestChildMemory(secretary.getMemory() as any);
       const parentAgent = agents.get(opts.parentId);
+      // Don't wake a dead/interrupted parent — it was killed intentionally
+      const parentState = getState().agents.get(opts.parentId)?.state;
+      if (parentState === "err" || parentState === "done") return;
       if (parentAgent instanceof HttpConvAgent) {
         if (e.success) {
           const evidenceLines = e.evidence?.length
@@ -773,7 +796,9 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         ` evidence=${ev.evidence?.length ?? 0}\n`,
       );
       const parentAgent = agents.get(e.parent);
-      if (parentAgent instanceof HttpConvAgent) {
+      // Don't wake a dead/interrupted parent — it was killed intentionally
+      const parentSt = getState().agents.get(e.parent)?.state;
+      if (parentSt !== "err" && parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
         if (ev.success) {
           const evidenceLines = ev.evidence?.length
             ? "\n证据:\n" + ev.evidence.map((s) => `  - ${s}`).join("\n")
@@ -1732,25 +1757,9 @@ function App() {
     const selId = getState().selectedAgent;
     const selState = getState().agents.get(selId)?.state;
     if (selState === "run" || selState === "idle") {
-      // Kill the selected agent and all its descendants so child events
-      // don't cause the parent to resume after the interrupt.
-      const allAgents = Array.from(getState().agents.values());
-      const toKill = [selId];
-      // BFS to collect all descendants
-      for (let i = 0; i < toKill.length; i++) {
-        const id = toKill[i]!;
-        allAgents.filter((a) => a.parent === id).forEach((a) => toKill.push(a.id));
-      }
-      toKill.forEach((id) => {
-        agents.get(id)?.kill?.();
-        abortAgent(id);
-        const st = getState().agents.get(id)?.state;
-        if (st === "run" || st === "idle") {
-          applyEvent({ v: 1, type: "agent.state", agent: id, state: "err", sub: "interrupted" });
-        }
-      });
+      killAgent(selId);
       applyEvent({ v: 1, type: "message", agent: selId, to: "user",
-        text: `⏹ interrupted — killed: ${toKill.join(", ")}` });
+        text: `⏹ interrupted by user` });
     } else {
       // 无 agent 运行时：加载最后一条 user message 到输入框供编辑
       const msgs = getState().messagesByAgent.get(selId);

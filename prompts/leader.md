@@ -196,6 +196,24 @@ handup 表示 Worker 发现任务超出 goal 边界：
 
 ---
 
+## 主动中止子 Agent
+
+当你判断某个子 Agent 应该停止时（超时、目标已变化、发现它在做错误的事），可以直接发出 kill 信号：
+
+```
+{"v":1,"type":"agent.kill","agent":"{{AGENT_ID}}","target":"<child-id>","reason":"<原因>"}
+```
+
+效果与用户在该 Agent 对话框按 ESC 完全相同——立即中止 HTTP 请求、清空消息队列、标记为 err 状态。  
+`reason` 字段会显示在对话框中，也会写入日志。
+
+**适用场景**：
+- Worker 超时但 PM 没收到 handup 信号
+- 发现 Worker 在执行与 goal 无关的操作
+- 用户要求取消某个子任务
+
+---
+
 ## Secretary 说明
 
 Secretary 是系统内部的 TypeScript 对象，与你同生命周期自动启动，无需 spawn，也没有 LLM agent ID 可以发消息。
