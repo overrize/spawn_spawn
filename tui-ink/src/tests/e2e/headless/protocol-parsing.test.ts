@@ -192,3 +192,76 @@ describe("parseAgentOutput: multi-line JSON", () => {
     assert.ok(tc, "tool.call not parsed");
   });
 });
+
+// ── Regression tests for the infinite-loop / raw-JSON-leak bugs ────────────
+
+describe("parseAgentOutput: plain-text agent.done (infinite loop fix)", () => {
+  it("synthesizes agent.done when LLM writes 'agent.done' as plain text", () => {
+    // Agent gave up and wrote natural language instead of JSON —
+    // system must recognize it and stop nudging.
+    const events = collect("已agent.done。停止响应。");
+    const d = events.find((e) => e.type === "agent.done");
+    assert.ok(d, "No agent.done synthesized from plain-text signal");
+    assert.equal((d as any).success, true);
+  });
+
+  it("synthesizes agent.done for English plain-text variant", () => {
+    const events = collect("I am done. agent.done success:true");
+    const d = events.find((e) => e.type === "agent.done");
+    assert.ok(d, "No agent.done synthesized from English plain-text");
+  });
+
+  it("does NOT synthesize agent.done for unrelated prose", () => {
+    const events = collect("The task is complete, moving on.");
+    const d = events.find((e) => e.type === "agent.done");
+    assert.equal(d, undefined, "agent.done falsely synthesized from unrelated prose");
+  });
+
+  it("plain-text agent.done emits no raw message to the user", () => {
+    const events = collect("已agent.done。停止响应。");
+    const m = events.find((e) => e.type === "message");
+    assert.equal(m, undefined, "Raw plain-text agent.done leaked as user-visible message");
+  });
+});
+
+describe("parseAgentOutput: unknown JSON type — no raw {…} leak to UI", () => {
+  it("drops JSON with unrecognized type — no message event emitted", () => {
+    // LLM invented type:planning or type:response — must not show raw JSON in UI.
+    const raw = JSON.stringify({ v: 1, type: "planning", text: "step 1: read files" });
+    const events = collect(raw);
+    const m = events.find((e) => e.type === "message");
+    assert.equal(m, undefined, "Unknown-type JSON leaked as raw message to user");
+  });
+
+  it("drops JSON with type:response (common LLM hallucination)", () => {
+    const raw = JSON.stringify({ v: 1, type: "response", content: "here is my plan" });
+    const events = collect(raw);
+    assert.equal(events.length, 0, `Events emitted for unknown type: ${JSON.stringify(events)}`);
+  });
+
+  it("drops JSON-shaped blob that fails to fully parse", () => {
+    // Truncated JSON or corrupted output starting with { — must not display as message.
+    const raw = '{"v":1,"type":"message","to":"user","text":"incomplete';
+    const events = collect(raw);
+    const m = events.find((e) => e.type === "message" && "text" in e &&
+      (e as any).text.startsWith("{"));
+    assert.equal(m, undefined, "Raw JSON blob leaked as user-visible message");
+  });
+
+  it("still emits plain prose that does not look like JSON", () => {
+    // Non-JSON text should still reach the user as a message.
+    const events = collect("Task complete, all files updated.");
+    const m = events.find((e) => e.type === "message");
+    assert.ok(m && "text" in m && (m as any).text === "Task complete, all files updated.");
+  });
+
+  it("type:think JSON becomes a 💭 step event, not a raw message", () => {
+    const raw = JSON.stringify({ type: "think", thought: "should I spawn a TL?" });
+    const events = collect(raw);
+    const m = events.find((e) => e.type === "message");
+    assert.equal(m, undefined, "type:think JSON leaked as raw message");
+    const step = events.find((e) => e.type === "step" && "text" in e &&
+      (e as any).text.startsWith("💭"));
+    assert.ok(step, "type:think was not converted to a 💭 step event");
+  });
+});
