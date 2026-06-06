@@ -9,11 +9,22 @@ import TextInput from "ink-text-input";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { execSync } from "node:child_process";
 import { useStore, approve, reject, switchSession, getSessionTokens } from "./store.js";
 import type {
   AgentInfo, Message, TodoItem, AgentRunState,
 } from "./protocol.js";
 import type { PaletteName } from "./config.js";
+
+// ── Version ──────────────────────────────────────────────────────────────────
+const APP_VERSION = process.env["npm_package_version"] ?? "0.1.0";
+const GIT_HASH = (() => {
+  try {
+    return execSync("git rev-parse --short HEAD",
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  } catch { return ""; }
+})();
+const VERSION_LABEL = GIT_HASH ? `v${APP_VERSION}·${GIT_HASH}` : `v${APP_VERSION}`;
 
 // ── Layout debug logger ──────────────────────────────────────────────────────
 // Writes to OS temp dir so it never touches the project or TUI output.
@@ -112,6 +123,7 @@ function TitleBar({ tabs = ["[Tab]switch", "[P]ause", "[F]ork", "[C]onfig", "[q]
       <Box>
         <Text dimColor>● ● ● </Text>
         <Text bold>multi-agent · inbox</Text>
+        <Text dimColor>  {VERSION_LABEL}</Text>
         {pending.length > 0 && (
           <Text color={p.warn} bold>
             {"  "}⚠ {first!.agent}: {first!.tool_name ?? "tool"} — y/n approve ({pending.length})
@@ -433,8 +445,9 @@ export function ConvPane({ scrollOffset = 0, completionRows = 0 }: { scrollOffse
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   const pendingRows = pending.length > 0 ? 5 : 0;
-  // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1 - completionList)
-  const availRows = Math.max(4, termRows - 10 - pendingRows - completionRows);
+  const activityRow = a?.state === "run" ? 1 : 0;
+  // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1 - completionList - activityRow)
+  const availRows = Math.max(4, termRows - 10 - pendingRows - completionRows - activityRow);
 
   // Measure the actual rendered width of the ConvPane content box (post-layout).
   // This is the ground truth — process.stdout.columns can report wrong values on
@@ -511,6 +524,12 @@ export function ConvPane({ scrollOffset = 0, completionRows = 0 }: { scrollOffse
       {recapText && (
         <Box paddingLeft={2}>
           <Text dimColor wrap="truncate-end">○ {truncate(recapText, contentCols - 4)}</Text>
+        </Box>
+      )}
+      {a?.state === "run" && (
+        <Box paddingLeft={2}>
+          <Text color={p.accent}>◐ </Text>
+          <Text dimColor wrap="truncate-end">{truncate(a.sub ?? "working…", contentCols - 4)}</Text>
         </Box>
       )}
 
