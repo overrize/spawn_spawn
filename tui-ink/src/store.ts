@@ -232,8 +232,10 @@ export function applyEvent(e: TuiEvent) {
         if (e.sub !== undefined) a.sub = e.sub;
         else if (e.state === "idle" || e.state === "done" || e.state === "err") a.sub = "";
       }
-      // Agent actually started processing — clear pending-input flag
-      if (e.state === "run") state.pendingInputAgents.delete(e.agent);
+      // Clear pending-input flag: run = agent started processing; err/done = no more processing
+      if (e.state === "run" || e.state === "err" || e.state === "done") {
+        state.pendingInputAgents.delete(e.agent);
+      }
       break;
     }
     case "todo.set":

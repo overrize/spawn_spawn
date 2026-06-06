@@ -1885,8 +1885,12 @@ function App() {
                   pending.length > 0
                     ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
                     : (() => {
-                        const selState = getState().agents.get(getState().selectedAgent)?.state;
-                        return selState === "run" ? "working… (message queued)" : undefined;
+                        const sel = getState().selectedAgent;
+                        const selState = getState().agents.get(sel)?.state;
+                        const hasPendingInput = getState().pendingInputAgents.has(sel);
+                        if (selState === "run") return "working… (ESC to interrupt)";
+                        if (hasPendingInput)    return "message queued, waiting for agent…";
+                        return undefined;
                       })()
                 }
               />
