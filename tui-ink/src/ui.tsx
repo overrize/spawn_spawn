@@ -3,7 +3,7 @@
 // 配色:paper 主题用 Ink 默认终端色;状态点用文字字形。
 
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { Box, Text, measureElement, useInput } from "ink";
+import { Box, Text, measureElement, useInput, useStdin } from "ink";
 import type { DOMElement } from "ink";
 import TextInput from "ink-text-input";
 import * as fs from "node:fs";
@@ -421,7 +421,7 @@ function ScrollBar({ total, visible, offset }: { total: number; visible: number;
 }
 
 // ── 中栏:conversation ──────────────────────────────────────────────────────
-export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
+export function ConvPane({ scrollOffset = 0, completionRows = 0 }: { scrollOffset?: number; completionRows?: number }) {
   const p = usePalette();
   const sel = useStore((s) => s.selectedAgent);
   const a = useStore((s) => s.agents.get(s.selectedAgent));
@@ -433,8 +433,8 @@ export function ConvPane({ scrollOffset = 0 }: { scrollOffset?: number }) {
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   const pendingRows = pending.length > 0 ? 5 : 0;
-  // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1)
-  const availRows = Math.max(4, termRows - 10 - pendingRows);
+  // rows available for message content (total - TitleBar3 - InputBar3 - StatusBar1 - header2 - marginTop1 - completionList)
+  const availRows = Math.max(4, termRows - 10 - pendingRows - completionRows);
 
   // Measure the actual rendered width of the ConvPane content box (post-layout).
   // This is the ground truth — process.stdout.columns can report wrong values on
@@ -962,11 +962,29 @@ export function InputBar({
   onESC?: () => void;
 }) {
   const p = usePalette();
+  const { isRawModeSupported } = useStdin();
   useInput((_char, key) => {
     if (key.escape && focused && onESC) {
       onESC();
     }
   });
+  if (!isRawModeSupported && focused) {
+    // Fallback: no raw mode — render as a simple text input without ink's raw mode requirement
+    return (
+      <Box borderStyle="single" borderColor="gray" borderLeft={false} borderRight={false}
+           paddingX={1} flexShrink={0}>
+        <Text color={p.warn}>⚠ </Text>
+        <Box flexGrow={1} overflow="hidden">
+          <TextInput
+            value={value}
+            onChange={onChange}
+            onSubmit={onSubmit}
+            placeholder={hint ?? "type a message · @agent to switch · /command"}
+          />
+        </Box>
+      </Box>
+    );
+  }
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   // › (2) + paddingX*2 (2) + borders (0, borderLeft/Right=false) + counter (5 max)
   const availInputCols = termCols - 9;

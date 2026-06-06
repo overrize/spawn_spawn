@@ -1152,7 +1152,8 @@ function App() {
   const { stdin, isRawModeSupported } = useStdin();
   const [input, setInput] = useState("");
 
-  const agentList = useStore((s) => Array.from(s.agents.keys()));
+  const agentList = useStore((s) =>
+    Array.from(s.agents.entries()).filter(([, a]) => !a.hidden).map(([id]) => id));
   const sel = useStore((s) => s.selectedAgent);
   const pending = useStore((s) => s.pendingApprovals);
   const [paletteName, setPaletteName] = useState<PaletteName>(loadConfig().palette);
@@ -1400,6 +1401,10 @@ function App() {
     : Math.min(Math.max(0, slashSelectedIdx - SLASH_MAX_VISIBLE + 1),
                Math.max(0, slashDisplay.length - SLASH_MAX_VISIBLE));
   const slashVisible = slashDisplay.slice(slashScrollStart, slashScrollStart + SLASH_MAX_VISIBLE);
+  // 1 separator + visible items + 1 "N more" line if truncated
+  const slashPaneRows = slashDisplay.length > 0
+    ? 1 + slashVisible.length + (slashDisplay.length > SLASH_MAX_VISIBLE ? 1 : 0)
+    : 0;
 
   const pmStarted = useRef(false);
 
@@ -1805,7 +1810,7 @@ function App() {
         {layout === "v3" ? (
           <Box flexDirection="column" flexGrow={1}>
             <DagView maxHeight={12} />
-            <ConvPane scrollOffset={scrollOffset} />
+            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
           </Box>
         ) : (
           // Responsive sidebar widths: shrink panes on narrow terminals so
@@ -1819,7 +1824,7 @@ function App() {
               <Box flexGrow={1}>
                 <AgentsPane width={agW} scroll={agentPaneScroll} />
                 <VDivider />
-                <ConvPane scrollOffset={scrollOffset} />
+                <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
                 <VDivider />
                 <TodoPane width={toW} />
               </Box>
@@ -1920,7 +1925,7 @@ process.stdin.pipe(filteredStdin, { end: false });
 
 Object.defineProperties(filteredStdin, {
   isTTY: { get: () => process.stdin.isTTY },
-  setRawMode: { value: (mode: boolean) => process.stdin.setRawMode(mode) },
+  setRawMode: { value: (mode: boolean) => { try { process.stdin.setRawMode(mode); } catch { /* non-TTY fallback */ } } },
   ref: { value: () => process.stdin.ref() },
   unref: { value: () => process.stdin.unref() },
 });

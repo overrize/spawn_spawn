@@ -25,7 +25,7 @@ import type { ProviderConfig } from "../../../config.js";
 import type { TuiEvent } from "../../../protocol.js";
 import {
   applyEvent, ensureAgent, getState, selectAgent,
-  getSessionTokens, _resetAgents,
+  getSessionTokens, _resetAgents, _deleteAgents,
 } from "../../../store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -103,6 +103,19 @@ export class E2ESuite extends TestSuite {
     }
 
     this.outputReport();
+
+    // Clean up all transient test agents so they don't pollute the Tab list.
+    _deleteAgents([
+      // H2 phaseCommands
+      "prune-test", "prune-run", "prune-done",
+      // H3 phaseFork
+      "fork-tl-01", "fork-worker-01",
+      // E2 phaseAgentHttp
+      "http-pm", "http-tl",
+      // E3 phaseE2ELongSession
+      "ls-pm", "ls-tl", "ls-w1", "ls-w2",
+    ]);
+
     applyEvent({
       v: 1, type: "agent.done",
       agent: this.monitorId,

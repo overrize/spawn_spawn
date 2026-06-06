@@ -29,6 +29,7 @@ import {
   setTokenBudget,
   getSessionTokens,
   _resetForTest,
+  _deleteAgents,
 } from "../../../store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -78,6 +79,17 @@ export class TestSuite {
     await this.runPhase("5. Token 统计验证",        (chk) => this.phaseTokens(chk));
 
     this.outputReport();
+
+    // Remove transient test agents created across all phases.
+    _deleteAgents([
+      "prune-test", "prune-run", "prune-done",       // phase 2
+      "fork-tl-01", "fork-worker-01",                // phase 3
+      "ls-tl-01", "ls-tl-02",                        // phase 4
+      "ls-tl-01-worker-1", "ls-tl-01-worker-2",
+      "ls-tl-02-worker-1", "ls-tl-02-worker-2",
+      "tok-pm", "tok-tl", "budget-ag",               // phase 5
+    ]);
+
     applyEvent({
       v: 1, type: "agent.done",
       agent: this.monitorId,

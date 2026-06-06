@@ -491,8 +491,8 @@ function shortArgs(args: unknown): string {
   } catch { return ""; }
 }
 
-/** Remove only the specified agent IDs from the store (used by E2ESuite phases). */
-export function _resetAgents(agentIds: string[]): void {
+/** Remove specified agents from the store without touching anything else. */
+export function _deleteAgents(agentIds: string[]): void {
   for (const id of agentIds) {
     state.agents.delete(id);
     state.messagesByAgent.delete(id);
@@ -502,6 +502,11 @@ export function _resetAgents(agentIds: string[]): void {
     state.sessionsByAgent.delete(id);
     state.currentSessionByAgent.delete(id);
   }
+}
+
+/** Remove specified agents and reset session token counters (used by E2ESuite phases). */
+export function _resetAgents(agentIds: string[]): void {
+  _deleteAgents(agentIds);
   state.sessionTokens = { prompt: 0, completion: 0 };
 }
 
