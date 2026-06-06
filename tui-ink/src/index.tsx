@@ -446,6 +446,17 @@ function startLeaderAgent(opts: LeaderOpts): void {
             v: 1, type: "message", agent: opts.id, to: "user",
             text: `⚠ ${opts.id} 回复后 3 次推进仍停滞。未完成项：${pendingTodos}。\n请选择：① 重试  ② 换策略  ③ 放弃`,
           });
+        } else if (!hasRun && !hasTodo && continuations < 3) {
+          // Agent replied (e.g. after resume) but emitted no todo.set and has no children.
+          // Without a todo list the system has no signal to nudge — force one.
+          continuations++;
+          nudgePending = true;
+          setImmediate(() => {
+            a.sendCommand({
+              type: "user.message",
+              text: `【系统】你回复了但没有输出 todo.set。立刻输出 todo.set 列出当前计划，然后执行第一步。`,
+            });
+          });
         }
       } else if (!actedThisTurn && !gaveUp) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
@@ -1294,7 +1305,23 @@ function App() {
         const deadNote = deadWorkers.length > 0
           ? `\n\n⚠️ 以下 agent 在上次会话中存在，当前已不在线：${deadWorkers.join(", ")}。请重新 spawn 或调整计划。`
           : "";
-        const resumeHint = (mem.tombstone.resume_hint ?? "Resume from last checkpoint") + deadNote;
+        const hint = mem.tombstone.resume_hint ?? "上次会话中断";
+        const lastTodoLines = (() => {
+          try {
+            return mem.tombstone.last_todo
+              ? (JSON.parse(mem.tombstone.last_todo) as Array<{state: string; text: string}>)
+                  .map((t) => `  [${t.state}] ${t.text}`).join("\n")
+              : "  (无记录)";
+          } catch { return "  (无法解析)"; }
+        })();
+        const resumeHint = [
+          `[系统-恢复指令] 上次中断：${hint}${deadNote}`,
+          ``,
+          `上次 TODO 状态：`,
+          lastTodoLines,
+          ``,
+          `**立刻输出 todo.set**，把上次已完成的项标为 done，把需要继续的项标为 todo/run，然后直接继续执行。不要等待确认，不要只说"收到"。`,
+        ].join("\n");
         process.stderr.write(`[resume] starting ${id} — firstMessage: "${resumeHint.slice(0, 200)}"\n`);
         pmStarted.current = false;
         startLeaderAgent({ id, firstMessage: resumeHint, resumedMemoryId: id, promptFile: isRootAgent ? "pm" : "leader" });
