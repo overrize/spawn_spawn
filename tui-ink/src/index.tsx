@@ -1919,6 +1919,13 @@ function lcp(strs: string[]): string {
 }
 
 // ── boot ────────────────────────────────────────────────────────────────────
+// Windows cmd/PowerShell defaults to GBK; force UTF-8 so Chinese log lines
+// written to stderr are not garbled. No-op on Linux/macOS.
+if (process.platform === "win32") {
+  process.stderr.setEncoding("utf8");
+  try { execSync("chcp 65001", { stdio: "ignore" }); } catch { /* best-effort */ }
+}
+
 const banner = DEMO
   ? "running in --demo mode (no real claude subprocess; fake events on first message)"
   : `live mode — will spawn 'claude' on first message (model=${MODEL})`;
