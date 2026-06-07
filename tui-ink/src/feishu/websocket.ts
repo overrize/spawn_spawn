@@ -34,6 +34,51 @@ export interface FeishuWsOptions {
   onStatus?: (msg: string) => void;
 }
 
+/**
+ * Minimal protobuf parser: extracts a single bytes field from a binary frame.
+ * Feishu WS v2 sends Frame messages where field 6 (Payload) is the JSON event.
+ * Wire types: 0=varint, 1=64bit, 2=length-delimited, 5=32bit
+ */
+function extractProtobufBytes(buf: Buffer, targetField: number): Buffer | null {
+  let pos = 0;
+  while (pos < buf.length) {
+    let tag = 0, shift = 0;
+    do {
+      if (pos >= buf.length) return null;
+      const b = buf[pos++]!;
+      tag |= (b & 0x7f) << shift;
+      shift += 7;
+      if (!(b & 0x80)) break;
+    } while (shift < 64);
+
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 0x7;
+
+    if (wireType === 0) {
+      // varint — skip
+      while (pos < buf.length && (buf[pos++]! & 0x80)) {}
+    } else if (wireType === 1) {
+      pos += 8;
+    } else if (wireType === 5) {
+      pos += 4;
+    } else if (wireType === 2) {
+      let len = 0; shift = 0;
+      do {
+        if (pos >= buf.length) return null;
+        const b = buf[pos++]!;
+        len |= (b & 0x7f) << shift;
+        shift += 7;
+        if (!(b & 0x80)) break;
+      } while (shift < 64);
+      if (fieldNum === targetField) return buf.subarray(pos, pos + len);
+      pos += len;
+    } else {
+      return null; // unknown wire type, bail
+    }
+  }
+  return null;
+}
+
 async function fetchWsEndpoint(appId: string, appSecret: string): Promise<{ url: string; reconnectInterval: number }> {
   const resp = await fetch(BOOTSTRAP_URL, {
     method: 'POST',
@@ -110,8 +155,18 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
 
     ws.on('message', (data: Buffer | string) => {
       try {
-        const rawStr = typeof data === 'string' ? data : data.toString('utf-8');
-        const frame = JSON.parse(rawStr) as Record<string, unknown>;
+        // Feishu WS v2 frames are protobuf-encoded.
+        // Field 6 (Payload) contains the JSON event body.
+        let jsonStr: string;
+        if (Buffer.isBuffer(data)) {
+          const payload = extractProtobufBytes(data, 6);
+          if (!payload) return; // no payload field — ping/control frame
+          jsonStr = payload.toString('utf-8');
+        } else {
+          jsonStr = data;
+        }
+
+        const frame = JSON.parse(jsonStr) as Record<string, unknown>;
 
         const header = frame['header'] as Record<string, unknown> | undefined;
         const eventType = header?.['event_type'] as string | undefined;
