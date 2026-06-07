@@ -35,7 +35,9 @@ async function sendMessage(
   token: string,
   params: FeishuMessageRequest
 ): Promise<FeishuMessageResponse['data']> {
-  const url = 'https://open.feishu.cn/open-apis/im/v1/messages';
+  // receive_id_type must be a query parameter, not in the body
+  const url = `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${params.receive_id_type}`;
+  const { receive_id_type: _, ...body } = params;
 
   let response: Response;
   try {
@@ -45,7 +47,7 @@ async function sendMessage(
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json; charset=utf-8',
       },
-      body: JSON.stringify(params),
+      body: JSON.stringify(body),
     });
   } catch (err) {
     // 网络层面的异常（DNS 失败、连接拒绝等）
