@@ -251,6 +251,10 @@ function connectFeishu(appId: string, appSecret: string): void {
   startFeishuWebSocket({
     appId,
     appSecret,
+    onStatus: (msg: string) => {
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `[飞书WS] ${msg}` } as TuiEvent);
+    },
     onMessage: (openId: string, text: string, chatId: string, chatType: string) => {
       const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
       // For group chats reply to the chat; for p2p reply to the user's open_id

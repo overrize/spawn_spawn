@@ -1,17 +1,13 @@
-// 飞书 WebSocket 长连接客户端
-// 协议：先 POST /callback/ws/endpoint 获取动态 URL，再连接
-// 只处理 im.message.receive_v1 事件
+// Feishu WebSocket long-connection client
+// Protocol: POST /callback/ws/endpoint first to get a dynamic auth URL, then connect
+// Only handles im.message.receive_v1 events
 
 import WebSocket from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
-// 重连配置
 const MAX_RECONNECT_ATTEMPTS = 5;
-
-// Bootstrap endpoint (PascalCase body required)
 const BOOTSTRAP_URL = 'https://open.feishu.cn/callback/ws/endpoint';
 
-// im.message.receive_v1 事件结构
 interface ImMessageReceiveV1 {
   sender: {
     sender_id: {
@@ -22,7 +18,7 @@ interface ImMessageReceiveV1 {
   };
   message: {
     message_id: string;
-    content: string; // JSON 字符串
+    content: string;
     chat_type: string;
     chat_id: string;
     message_type: string;
@@ -34,11 +30,10 @@ export interface FeishuWsOptions {
   appSecret: string;
   /** Called for each incoming im.message.receive_v1 event */
   onMessage?: (openId: string, text: string, chatId: string, chatType: string) => void;
+  /** Called with status updates so the TUI can display them */
+  onStatus?: (msg: string) => void;
 }
 
-/**
- * 获取飞书 WebSocket 动态连接 URL
- */
 async function fetchWsEndpoint(appId: string, appSecret: string): Promise<{ url: string; reconnectInterval: number }> {
   const resp = await fetch(BOOTSTRAP_URL, {
     method: 'POST',
@@ -46,10 +41,14 @@ async function fetchWsEndpoint(appId: string, appSecret: string): Promise<{ url:
     body: JSON.stringify({ AppID: appId, AppSecret: appSecret }),
   });
 
-  const json = await resp.json() as { code: number; msg: string; data?: { URL: string; ClientConfig?: { ReconnectInterval?: number } } };
+  const json = await resp.json() as {
+    code: number;
+    msg: string;
+    data?: { URL: string; ClientConfig?: { ReconnectInterval?: number } };
+  };
 
   if (json.code !== 0) {
-    throw new Error(`飞书 WebSocket bootstrap 失败: code=${json.code} msg=${json.msg}`);
+    throw new Error(`Feishu WS bootstrap failed: code=${json.code} msg=${json.msg}`);
   }
 
   return {
@@ -59,47 +58,51 @@ async function fetchWsEndpoint(appId: string, appSecret: string): Promise<{ url:
 }
 
 /**
- * 启动飞书 WebSocket 长连接客户端
+ * Start the Feishu WebSocket long-connection client.
  *
- * 协议：
- * 1. POST /callback/ws/endpoint 获取含认证参数的动态 WSS URL
- * 2. 连接到该 URL（URL 本身携带 ticket 等认证信息，无需额外 login 帧）
- * 3. 监听 im.message.receive_v1 事件，调用 opts.onMessage
+ * Flow:
+ * 1. POST /callback/ws/endpoint (PascalCase body) → dynamic WSS URL with auth ticket
+ * 2. Connect to that URL (no separate login frame needed — auth is in the URL)
+ * 3. Listen for im.message.receive_v1 events, call opts.onMessage
  *
- * 自动重连，最多 MAX_RECONNECT_ATTEMPTS 次，每次重新 bootstrap 获取新 URL
+ * Auto-reconnects up to MAX_RECONNECT_ATTEMPTS times with exponential back-off.
+ * Each reconnect re-runs the bootstrap to get a fresh URL.
  */
 export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void> {
-  const { appId, appSecret, onMessage } = opts;
+  const { appId, appSecret, onMessage, onStatus } = opts;
+
+  const log = (msg: string) => {
+    process.stderr.write(`[FeishuWS] ${msg}\n`);
+    onStatus?.(msg);
+  };
 
   const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY ||
                    process.env.http_proxy  || process.env.HTTP_PROXY;
   const wsOpts = proxyUrl ? { agent: new HttpsProxyAgent(proxyUrl) } : {};
+  if (proxyUrl) log(`using proxy ${proxyUrl}`);
 
   let reconnectAttempt = 0;
 
   const connect = async (): Promise<void> => {
-    process.stderr.write('[FeishuWS] 正在获取连接 URL...\n');
+    log('fetching connection URL...');
 
     let wsUrl: string;
     let reconnectInterval: number;
     try {
       ({ url: wsUrl, reconnectInterval } = await fetchWsEndpoint(appId, appSecret));
     } catch (err) {
-      process.stderr.write(`[FeishuWS] bootstrap 失败: ${err instanceof Error ? err.message : String(err)}\n`);
+      log(`bootstrap failed: ${err instanceof Error ? err.message : String(err)}`);
       scheduleReconnect();
       return;
     }
 
-    process.stderr.write('[FeishuWS] 正在连接...\n');
+    log('connecting...');
     const ws = new WebSocket(wsUrl, wsOpts);
-
-    // Reconnect timer set by server's ReconnectInterval
     let pingTimer: ReturnType<typeof setInterval> | null = null;
 
     ws.on('open', () => {
-      process.stderr.write('[FeishuWS] 连接成功\n');
+      log('connected');
       reconnectAttempt = 0;
-      // Keep-alive ping
       pingTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.ping();
       }, reconnectInterval * 1000 * 0.8);
@@ -110,10 +113,8 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const rawStr = typeof data === 'string' ? data : data.toString('utf-8');
         const frame = JSON.parse(rawStr) as Record<string, unknown>;
 
-        // 飞书 WS 帧结构：frame.type / frame.header.event_type
         const header = frame['header'] as Record<string, unknown> | undefined;
         const eventType = header?.['event_type'] as string | undefined;
-
         if (eventType !== 'im.message.receive_v1') return;
 
         const event = frame['event'] as Record<string, unknown> | undefined;
@@ -134,32 +135,32 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const chatId = msgEvent.message?.chat_id || openId;
         const chatType = msgEvent.message?.chat_type || 'p2p';
 
-        process.stderr.write(`[FeishuWS] 消息 from=${openId.slice(-6)} chat_type=${chatType}: ${text.slice(0, 60)}\n`);
+        log(`msg from=...${openId.slice(-6)} chat_type=${chatType}: ${text.slice(0, 60)}`);
         onMessage?.(openId, text, chatId, chatType);
       } catch (err) {
-        process.stderr.write(`[FeishuWS] 消息处理异常: ${err instanceof Error ? err.message : String(err)}\n`);
+        log(`message error: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
 
     ws.on('error', (err: Error) => {
-      process.stderr.write(`[FeishuWS] 连接错误: ${err.message}\n`);
+      log(`error: ${err.message}`);
     });
 
     ws.on('close', (code: number) => {
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-      process.stderr.write(`[FeishuWS] 连接关闭 code=${code}\n`);
+      log(`closed (code=${code})`);
       scheduleReconnect();
     });
   };
 
   const scheduleReconnect = () => {
     if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-      process.stderr.write('[FeishuWS] 已达最大重连次数，停止重连\n');
+      log('max reconnect attempts reached, giving up');
       return;
     }
     const delay = Math.pow(2, reconnectAttempt) * 1000;
     reconnectAttempt++;
-    process.stderr.write(`[FeishuWS] ${delay / 1000}s 后尝试第 ${reconnectAttempt} 次重连...\n`);
+    log(`reconnecting in ${delay / 1000}s (attempt ${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})...`);
     setTimeout(() => { connect(); }, delay);
   };
 
