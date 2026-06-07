@@ -251,8 +251,11 @@ function connectFeishu(appId: string, appSecret: string): void {
   startFeishuWebSocket({
     appId,
     appSecret,
-    onMessage: (openId: string, text: string) => {
+    onMessage: (openId: string, text: string, chatId: string, chatType: string) => {
       const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
+      // For group chats reply to the chat; for p2p reply to the user's open_id
+      const replyId   = chatType === 'group' ? chatId : openId;
+      const replyType = chatType === 'group' ? 'chat_id' : 'open_id';
       if (!feishuSessions.has(openId)) {
         feishuSessions.set(openId, pmId);
         ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
@@ -263,19 +266,41 @@ function connectFeishu(appId: string, appSecret: string): void {
           firstMessage: text,
           promptFile: "pm",
           replyHook: (replyText: string) => {
-            sendTextMessage(openId, 'open_id', replyText, tokenManager)
+            sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
               .catch((err) => {
                 process.stderr.write(`[FeishuBridge] 回复失败 ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
               });
           },
         });
       } else {
-        userMessage(pmId, text);
-        const a = agents.get(pmId);
+        const existingPmId = feishuSessions.get(openId)!;
+        const a = agents.get(existingPmId);
         if (a instanceof HttpConvAgent) {
-          killedAgents.delete(pmId);
-          markPendingInput(pmId);
+          userMessage(existingPmId, text);
+          killedAgents.delete(existingPmId);
+          markPendingInput(existingPmId);
           a.sendCommand({ type: "user.message", text });
+        } else {
+          // PM finished — start a fresh session
+          feishuSessions.delete(openId);
+          // Re-enter this branch as a new session on next tick
+          setImmediate(() => {
+            // Synthetic re-dispatch: create new PM for the returning user
+            const newPmId = `feishu-${crypto.createHash("sha256").update(openId + Date.now()).digest("hex").slice(0, 8)}`;
+            feishuSessions.set(openId, newPmId);
+            ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
+              sub: "飞书会话", model: cfg.agents.leader.model });
+            userMessage(newPmId, text);
+            startLeaderAgent({
+              id: newPmId, firstMessage: text, promptFile: "pm",
+              replyHook: (replyText: string) => {
+                sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
+                  .catch((err) => {
+                    process.stderr.write(`[FeishuBridge] 回复失败 ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
+                  });
+              },
+            });
+          });
         }
       }
     },
