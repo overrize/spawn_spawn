@@ -247,6 +247,8 @@ function connectFeishu(appId: string, appSecret: string): void {
   process.env.FEISHU_APP_ID = appId;
   process.env.FEISHU_APP_SECRET = appSecret;
   const tokenManager = new TokenManager();
+  // Pre-warm token so the first reply doesn't pay cold-fetch latency
+  tokenManager.getToken().catch(() => { /* will retry on first send */ });
   const cfg = loadConfig();
   startFeishuWebSocket({
     appId,
@@ -270,9 +272,11 @@ function connectFeishu(appId: string, appSecret: string): void {
           firstMessage: text,
           promptFile: "pm",
           replyHook: (replyText: string) => {
+            const t0 = Date.now();
             sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
+              .then(() => { process.stderr.write(`[FeishuBridge] reply sent in ${Date.now()-t0}ms\n`); })
               .catch((err) => {
-                process.stderr.write(`[FeishuBridge] reply failed ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
+                process.stderr.write(`[FeishuBridge] reply failed ${openId.slice(-6)} after ${Date.now()-t0}ms: ${err instanceof Error ? err.message : String(err)}\n`);
               });
           },
         });
