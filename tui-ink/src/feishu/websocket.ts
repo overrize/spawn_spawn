@@ -35,51 +35,9 @@ export interface FeishuWsOptions {
 }
 
 /**
- * Minimal protobuf parser: extracts a single bytes field from a binary frame.
- * Feishu WS v2 sends Frame messages where field 6 (Payload) is the JSON event.
- * Wire types: 0=varint, 1=64bit, 2=length-delimited, 5=32bit
+ * Minimal protobuf parser — returns all length-delimited fields keyed by field number.
+ * Feishu WS v2 Frame: field 8 = JSON event payload (confirmed empirically).
  */
-function extractProtobufBytes(buf: Buffer, targetField: number): Buffer | null {
-  let pos = 0;
-  while (pos < buf.length) {
-    let tag = 0, shift = 0;
-    do {
-      if (pos >= buf.length) return null;
-      const b = buf[pos++]!;
-      tag |= (b & 0x7f) << shift;
-      shift += 7;
-      if (!(b & 0x80)) break;
-    } while (shift < 64);
-
-    const fieldNum = tag >>> 3;
-    const wireType = tag & 0x7;
-
-    if (wireType === 0) {
-      // varint — skip
-      while (pos < buf.length && (buf[pos++]! & 0x80)) {}
-    } else if (wireType === 1) {
-      pos += 8;
-    } else if (wireType === 5) {
-      pos += 4;
-    } else if (wireType === 2) {
-      let len = 0; shift = 0;
-      do {
-        if (pos >= buf.length) return null;
-        const b = buf[pos++]!;
-        len |= (b & 0x7f) << shift;
-        shift += 7;
-        if (!(b & 0x80)) break;
-      } while (shift < 64);
-      if (fieldNum === targetField) return buf.subarray(pos, pos + len);
-      pos += len;
-    } else {
-      return null; // unknown wire type, bail
-    }
-  }
-  return null;
-}
-
-/** Returns ALL bytes-type fields found in a protobuf message, keyed by field number */
 function extractAllProtobufBytesFields(buf: Buffer): Record<number, Buffer> {
   const result: Record<number, Buffer> = {};
   let pos = 0;
@@ -194,11 +152,11 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         // Field 6 (Payload) contains the JSON event body.
         let jsonStr: string;
         if (Buffer.isBuffer(data)) {
-          // Debug: dump all bytes-fields found in frame
+          // Feishu WS v2 Frame: JSON event payload is in field 8 (not field 6).
+          // Field 5 = headers (nested proto), field 8 = event JSON, field 9/11 = message IDs.
           const allFields = extractAllProtobufBytesFields(data);
-          log(`proto frame ${data.length}B fields: ${Object.entries(allFields).map(([k,v]) => `f${k}=${v.length}B "${v.toString('utf-8').slice(0,40).replace(/\n/g,' ')}"`).join(' | ')}`);
-          const payload = allFields[6];
-          if (!payload) return;
+          const payload = allFields[8];
+          if (!payload || payload.length === 0) return; // ping/control frame
           jsonStr = payload.toString('utf-8');
         } else {
           jsonStr = data;
