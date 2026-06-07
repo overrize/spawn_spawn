@@ -589,6 +589,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
           .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"));
         if (activeChildren.length > 0) {
           // PM has delegated work; wait for agent.done to come back before doing anything
+        } else if (sentToUserThisTurn && !hasTodo) {
+          // PM replied to user and has no pending tasks — done, nothing to nudge
         } else if (hasRun && !hasTodo) {
           // All items are "run" with nothing pending → auto-close
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));

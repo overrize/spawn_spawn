@@ -119,6 +119,9 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
   const wsOpts = proxyUrl ? { agent: new HttpsProxyAgent(proxyUrl) } : {};
   if (proxyUrl) log(`using proxy ${proxyUrl}`);
 
+  // Feishu uses at-least-once delivery — deduplicate by event_id
+  const seenEventIds = new Set<string>();
+
   let reconnectAttempt = 0;
 
   const connect = async (): Promise<void> => {
@@ -167,6 +170,18 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const header = frame['header'] as Record<string, unknown> | undefined;
         const eventType = header?.['event_type'] as string | undefined;
         if (eventType !== 'im.message.receive_v1') return;
+
+        // Deduplicate: Feishu may deliver the same event multiple times
+        const eventId = header?.['event_id'] as string | undefined;
+        if (eventId) {
+          if (seenEventIds.has(eventId)) { log(`dup event ${eventId.slice(-8)}, skipped`); return; }
+          seenEventIds.add(eventId);
+          if (seenEventIds.size > 500) {
+            // Evict oldest entries to bound memory (Set preserves insertion order)
+            const first = seenEventIds.values().next().value;
+            if (first) seenEventIds.delete(first);
+          }
+        }
 
         const event = frame['event'] as Record<string, unknown> | undefined;
         if (!event) return;
