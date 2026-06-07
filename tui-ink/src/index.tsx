@@ -480,10 +480,6 @@ function startLeaderAgent(opts: LeaderOpts): void {
             const { ok, output } = results[i]!;
             applyEvent({ v: 1, type: "tool.result", agent: opts.id, id, ok, output });
           }
-          const combined = batch.map((c, i) =>
-            `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
-          ).join("\n\n");
-          a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
       } else if (actedThisTurn) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
@@ -895,19 +891,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
-
           for (let i = 0; i < batch.length; i++) {
             const { id } = batch[i]!;
             const { ok, output } = results[i]!;
             applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
           }
-
           const combined = batch.map((c, i) =>
             `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
           ).join("\n\n");
           a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
-      } else if (workerActedThisTurn) {
         // Worker acted but may still have pending todos — auto-close or nudge
         const todos = getState().todosByAgent.get(e.child) ?? [];
         const hasRun  = todos.some((t) => t.state === "run");
@@ -2114,10 +2107,11 @@ Object.defineProperties(filteredStdin, {
   unref: { value: () => process.stdin.unref() },
 });
 
-// Re-disable on exit in case the terminal re-enabled tracking during the session
-process.on("exit", () => {
-  process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
-});
+// Re-disable on exit — covers clean exit, SIGINT (Ctrl+C), and SIGTERM
+const TERM_RESET = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h";
+process.on("exit", () => { process.stdout.write(TERM_RESET); });
+process.on("SIGINT", () => { process.stdout.write(TERM_RESET); process.exit(130); });
+process.on("SIGTERM", () => { process.stdout.write(TERM_RESET); process.exit(143); });
 
 // ── Synchronized output — prevent lower-half flicker ───────────────────────
 // Ink's log-update writes each frame as one stream.write() call:
