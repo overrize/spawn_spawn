@@ -272,7 +272,7 @@ function connectFeishu(appId: string, appSecret: string): void {
           replyHook: (replyText: string) => {
             sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
               .catch((err) => {
-                process.stderr.write(`[FeishuBridge] 回复失败 ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
+                process.stderr.write(`[FeishuBridge] reply failed ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
               });
           },
         });
@@ -300,7 +300,7 @@ function connectFeishu(appId: string, appSecret: string): void {
               replyHook: (replyText: string) => {
                 sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
                   .catch((err) => {
-                    process.stderr.write(`[FeishuBridge] 回复失败 ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
+                    process.stderr.write(`[FeishuBridge] reply failed ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
                   });
               },
             });
@@ -312,7 +312,7 @@ function connectFeishu(appId: string, appSecret: string): void {
     feishuConnected = false; // allow retry after failure
     applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
       text: `❌ 飞书 WebSocket 连接失败: ${err instanceof Error ? err.message : String(err)}` } as TuiEvent);
-    process.stderr.write(`[FeishuWS] 启动失败: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`[FeishuWS] startup failed: ${err instanceof Error ? err.message : String(err)}\n`);
   });
 }
 
