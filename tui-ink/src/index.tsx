@@ -45,6 +45,12 @@ import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/re
 import type { AgentRole } from "./tools/registry.js";
 import { TestSuite } from "./tests/e2e/runner/TestSuite.js";
 import { E2ESuite } from "./tests/e2e/runner/E2ESuite.js";
+import { TokenManager } from "./feishu/auth.js";
+import { sendTextMessage } from "./feishu/message.js";
+import { startFeishuWebSocket } from "./feishu/websocket.js";
+import { config as dotenvConfig } from "dotenv";
+// Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
+dotenvConfig();
 
 // ── 路径 ───────────────────────────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -126,6 +132,9 @@ function readIfExists(p: string): string {
 const agents = new Map<string, HttpConvAgent>();
 const secretaries = new Map<string, SecretaryProxy>(); // agentId → Secretary
 const pm = new ProcessManager();
+// Feishu: open_id → pmId (e.g. "feishu-a1b2c3d4")
+const feishuSessions = new Map<string, string>();
+let feishuConnected = false;
 
 // Agents that were explicitly killed by the user (ESC) or by a parent agent.kill event.
 // Used to suppress child→parent notifications after a kill so the parent isn't restarted.
@@ -214,6 +223,7 @@ interface LeaderOpts {
   resumedMemoryId?: string;
   promptFile?: string;      // "pm" for root, "leader" for tech leads
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
+  replyHook?: (text: string) => void; // called when message.to=user (Feishu bridge)
 }
 
 function killAgent(id: string, _reason = "interrupted"): void {
@@ -222,6 +232,59 @@ function killAgent(id: string, _reason = "interrupted"): void {
   abortAgent(id);           // clears pending approvals in store
   // Do NOT set state:err — httpAgent emits state:idle after AbortError,
   // which returns the agent to ready state so the user can resend immediately.
+}
+
+// ── 飞书桥接 ───────────────────────────────────────────────────────────────
+// Starts the Feishu WebSocket and routes messages to per-user PM sessions.
+// Safe to call from both useEffect (auto-startup) and /feishu command (runtime).
+function connectFeishu(appId: string, appSecret: string): void {
+  if (feishuConnected) {
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+      text: "⚡ 飞书 WebSocket 已在运行中，无需重复连接。" } as TuiEvent);
+    return;
+  }
+  feishuConnected = true;
+  process.env.FEISHU_APP_ID = appId;
+  process.env.FEISHU_APP_SECRET = appSecret;
+  const tokenManager = new TokenManager();
+  const cfg = loadConfig();
+  startFeishuWebSocket({
+    appId,
+    appSecret,
+    onMessage: (openId: string, text: string) => {
+      const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
+      if (!feishuSessions.has(openId)) {
+        feishuSessions.set(openId, pmId);
+        ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
+          sub: "飞书会话", model: cfg.agents.leader.model });
+        userMessage(pmId, text);
+        startLeaderAgent({
+          id: pmId,
+          firstMessage: text,
+          promptFile: "pm",
+          replyHook: (replyText: string) => {
+            sendTextMessage(openId, 'open_id', replyText, tokenManager)
+              .catch((err) => {
+                process.stderr.write(`[FeishuBridge] 回复失败 ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
+              });
+          },
+        });
+      } else {
+        userMessage(pmId, text);
+        const a = agents.get(pmId);
+        if (a instanceof HttpConvAgent) {
+          killedAgents.delete(pmId);
+          markPendingInput(pmId);
+          a.sendCommand({ type: "user.message", text });
+        }
+      }
+    },
+  }).catch((err: unknown) => {
+    feishuConnected = false; // allow retry after failure
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+      text: `❌ 飞书 WebSocket 连接失败: ${err instanceof Error ? err.message : String(err)}` } as TuiEvent);
+    process.stderr.write(`[FeishuWS] 启动失败: ${err instanceof Error ? err.message : String(err)}\n`);
+  });
 }
 
 function startLeaderAgent(opts: LeaderOpts): void {
@@ -292,6 +355,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let continuations = 0;
   let gaveUp = false;
   let nudgePending = false; // true when the next run turn is a system-initiated nudge
+  let sentToUserThisTurn = false; // true when PM sent message.to=user this turn
 
   // Quality tracking — emitted as structured stderr log on agent.done
   let qualTurns = 0;
@@ -360,6 +424,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "agent.state" && e.state === "run") {
       actedThisTurn = false;
+      sentToUserThisTurn = false;
       if (!nudgePending) { continuations = 0; gaveUp = false; }
       else qualNudges++; // nudgePending=true means this run was system-initiated
       nudgePending = false;
@@ -385,6 +450,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "message") {
       actedThisTurn = true;
+      if (e.to === "user") {
+        sentToUserThisTurn = true;
+        if (opts.replyHook) opts.replyHook(e.text);
+      }
       if (e.to !== "user") {
         const target = agents.get(e.to);
         if (target instanceof HttpConvAgent) {
@@ -494,6 +563,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
         } else if (hasRun && !hasTodo) {
           // All items are "run" with nothing pending → auto-close
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
+          applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
+        } else if (hasTodo && sentToUserThisTurn) {
+          // PM already delivered final report and has no active children —
+          // stale todos are a known PM protocol bug. Auto-close to stop the loop.
+          const closed = todos.map((t) => ({ ...t, state: (t.state === "run" || t.state === "todo") ? "done" : t.state }));
           applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
         } else if (hasTodo && continuations < 3) {
           // Agent replied/acted but still has pending todos — nudge it to continue
@@ -1464,6 +1538,33 @@ function App() {
     { name: "palette", desc: "切换配色 paper | green | amber", handler: (args) => { const name = args[0] as PaletteName; if (name && name in PALETTES) { setPaletteName(name); savePalette(name); } } },
     { name: "layout",  desc: "切换布局 v1 | v3",             handler: (args) => { const l = args[0]; if (l === "v1" || l === "v3") { setLayout(l); saveLayout(l); } } },
     { name: "log",     desc: "日志级别 debug | info | warn | error", handler: (args) => { const l = args[0] as LogLevel; if (["debug","info","warn","error"].includes(l)) setMinLevel(l); } },
+    { name: "feishu", desc: "/feishu <app_id> <app_secret> — 连接飞书 WebSocket（无参数显示状态）", handler: (args) => {
+      const [appId, appSecret] = args;
+      if (!appId || !appSecret) {
+        const status = feishuConnected ? "✅ 已连接" : "❌ 未连接";
+        const sessions = feishuSessions.size;
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: `飞书状态: ${status}  活跃会话: ${sessions} 个\n用法: /feishu <app_id> <app_secret>` } as TuiEvent);
+        return;
+      }
+      // Persist to .env for next startup
+      const envPath = path.join(__dirname, "..", ".env");
+      try {
+        let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf-8") : "";
+        const set = (key: string, val: string) => {
+          const re = new RegExp(`^${key}=.*$`, "m");
+          return re.test(envContent) ? envContent.replace(re, `${key}=${val}`) : envContent + `\n${key}=${val}`;
+        };
+        envContent = set("FEISHU_APP_ID", appId);
+        envContent = set("FEISHU_APP_SECRET", appSecret);
+        fs.writeFileSync(envPath, envContent.trimStart(), "utf-8");
+        process.env.FEISHU_APP_ID = appId;
+        process.env.FEISHU_APP_SECRET = appSecret;
+      } catch { /* non-fatal */ }
+      connectFeishu(appId, appSecret);
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `飞书连接中... (${appId}) 凭证已保存到 .env` } as TuiEvent);
+    } },
     { name: "connect", desc: "/connect <role> <preset> <model> <apiKey> — preset: anthropic|deepseek|openai|ollama", handler: (args) => {
       const [role, preset, model, apiKey] = args;
       if (!role || !preset || !model || !apiKey) return;
@@ -1627,6 +1728,13 @@ function App() {
         : "";
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
         text: `🔔 检测到上次未完成的会话 (${hash})\n上次状态：${hint}${deadNote}\n\n/resume — 继续上次任务\n直接发消息 — 开始新会话（上次记录保留，可稍后 /resume）` });
+    }
+
+    // Auto-connect Feishu if credentials are present in .env
+    const feishuAppId = process.env.FEISHU_APP_ID;
+    const feishuAppSecret = process.env.FEISHU_APP_SECRET;
+    if (feishuAppId && feishuAppSecret) {
+      connectFeishu(feishuAppId, feishuAppSecret);
     }
   }, []);
 
