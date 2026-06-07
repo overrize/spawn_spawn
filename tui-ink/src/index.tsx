@@ -280,16 +280,20 @@ function connectFeishu(appId: string, appSecret: string): void {
         const existingPmId = feishuSessions.get(openId)!;
         const a = agents.get(existingPmId);
         if (a instanceof HttpConvAgent) {
+          process.stderr.write(`[FeishuBridge] routing to existing PM ${existingPmId}\n`);
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: `[飞书路由] → ${existingPmId} (existing)` } as TuiEvent);
           userMessage(existingPmId, text);
           killedAgents.delete(existingPmId);
           markPendingInput(existingPmId);
           a.sendCommand({ type: "user.message", text });
         } else {
+          process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone (type=${typeof a}), starting fresh\n`);
+          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+            text: `[飞书路由] PM ${existingPmId} 已结束，新建会话` } as TuiEvent);
           // PM finished — start a fresh session
           feishuSessions.delete(openId);
-          // Re-enter this branch as a new session on next tick
           setImmediate(() => {
-            // Synthetic re-dispatch: create new PM for the returning user
             const newPmId = `feishu-${crypto.createHash("sha256").update(openId + Date.now()).digest("hex").slice(0, 8)}`;
             feishuSessions.set(openId, newPmId);
             ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
