@@ -79,6 +79,41 @@ function extractProtobufBytes(buf: Buffer, targetField: number): Buffer | null {
   return null;
 }
 
+/** Returns ALL bytes-type fields found in a protobuf message, keyed by field number */
+function extractAllProtobufBytesFields(buf: Buffer): Record<number, Buffer> {
+  const result: Record<number, Buffer> = {};
+  let pos = 0;
+  while (pos < buf.length) {
+    let tag = 0, shift = 0;
+    do {
+      if (pos >= buf.length) return result;
+      const b = buf[pos++]!;
+      tag |= (b & 0x7f) << shift;
+      shift += 7;
+      if (!(b & 0x80)) break;
+    } while (shift < 64);
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 0x7;
+    if (wireType === 0) {
+      while (pos < buf.length && (buf[pos++]! & 0x80)) {}
+    } else if (wireType === 1) { pos += 8;
+    } else if (wireType === 5) { pos += 4;
+    } else if (wireType === 2) {
+      let len = 0; shift = 0;
+      do {
+        if (pos >= buf.length) return result;
+        const b = buf[pos++]!;
+        len |= (b & 0x7f) << shift;
+        shift += 7;
+        if (!(b & 0x80)) break;
+      } while (shift < 64);
+      result[fieldNum] = buf.subarray(pos, pos + len);
+      pos += len;
+    } else { return result; }
+  }
+  return result;
+}
+
 async function fetchWsEndpoint(appId: string, appSecret: string): Promise<{ url: string; reconnectInterval: number }> {
   const resp = await fetch(BOOTSTRAP_URL, {
     method: 'POST',
@@ -159,8 +194,11 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         // Field 6 (Payload) contains the JSON event body.
         let jsonStr: string;
         if (Buffer.isBuffer(data)) {
-          const payload = extractProtobufBytes(data, 6);
-          if (!payload) return; // no payload field — ping/control frame
+          // Debug: dump all bytes-fields found in frame
+          const allFields = extractAllProtobufBytesFields(data);
+          log(`proto frame ${data.length}B fields: ${Object.entries(allFields).map(([k,v]) => `f${k}=${v.length}B "${v.toString('utf-8').slice(0,40).replace(/\n/g,' ')}"`).join(' | ')}`);
+          const payload = allFields[6];
+          if (!payload) return;
           jsonStr = payload.toString('utf-8');
         } else {
           jsonStr = data;
