@@ -393,6 +393,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let gaveUp = false;
   let nudgePending = false; // true when the next run turn is a system-initiated nudge
   let sentToUserThisTurn = false; // true when PM sent message.to=user this turn
+  let reportedToParent = false;   // true when TL/Worker sent message to their parent this turn
 
   // Quality tracking — emitted as structured stderr log on agent.done
   let qualTurns = 0;
@@ -462,6 +463,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
     if (e.type === "agent.state" && e.state === "run") {
       actedThisTurn = false;
       sentToUserThisTurn = false;
+      reportedToParent = false;
       if (!nudgePending) { continuations = 0; gaveUp = false; }
       else qualNudges++; // nudgePending=true means this run was system-initiated
       nudgePending = false;
@@ -490,6 +492,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
       if (e.to === "user") {
         sentToUserThisTurn = true;
         if (opts.replyHook) opts.replyHook(e.text);
+      }
+      if (opts.parentId && e.to === opts.parentId) {
+        reportedToParent = true;
       }
       if (e.to !== "user") {
         const target = agents.get(e.to);
@@ -596,7 +601,13 @@ function startLeaderAgent(opts: LeaderOpts): void {
         const activeChildren = Array.from(getState().agents.values())
           .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"));
         if (activeChildren.length > 0) {
-          // PM has delegated work; wait for agent.done to come back before doing anything
+          // Agent has delegated work — wait silently for children to finish
+        } else if (reportedToParent) {
+          // TL/Worker already sent their result to parent — close stale todos, stop nudging
+          if (hasTodo) {
+            const closed = todos.map((t) => ({ ...t, state: (t.state === "run" || t.state === "todo") ? "done" : t.state }));
+            applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
+          }
         } else if (sentToUserThisTurn && !hasTodo) {
           // PM replied to user and has no pending tasks — done, nothing to nudge
         } else if (hasRun && !hasTodo) {
