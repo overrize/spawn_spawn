@@ -17,7 +17,7 @@
     "test:e2e:regression": "node --import tsx/esm --test src/tests/e2e/regression/fence-strip.test.ts src/tests/e2e/regression/thinking-strip.test.ts src/tests/e2e/regression/inline-json.test.ts src/tests/e2e/regression/esc-double.test.ts src/tests/e2e/regression/dup-tl.test.ts",
     "test:e2e:agent": "node --import tsx/esm --test src/tests/e2e/agent/pm-reply.test.ts src/tests/e2e/agent/tl-spawn.test.ts src/tests/e2e/agent/latency-measure.test.ts",
     "test:e2e:stability": "node --import tsx/esm --test src/tests/e2e/stability/long-session.test.ts src/tests/e2e/stability/resume.test.ts",
-    "test:headless": "node --import tsx/esm --test src/tests/e2e/headless/store-events.test.ts src/tests/e2e/headless/protocol-parsing.test.ts src/tests/e2e/headless/pm-rules.test.ts src/tests/e2e/headless/latency-fields.test.ts",
+    "test:headless": "node --import tsx/esm --test src/tests/e2e/headless/store-events.test.ts src/tests/e2e/headless/protocol-parsing.test.ts src/tests/e2e/headless/pm-rules.test.ts src/tests/e2e/headless/latency-fields.test.ts src/tests/e2e/headless/stage0-parsing.test.ts src/tests/e2e/headless/stage0-prompt-guard.test.ts",
     "test:full": "node --import tsx/esm src/tests/e2e/runner/run-full.ts",
     "test:e2e:full": "node --import tsx/esm src/tests/e2e/runner/run-e2e.ts"
   },
