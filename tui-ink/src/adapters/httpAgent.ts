@@ -317,6 +317,8 @@ export class HttpConvAgent extends EventEmitter {
     let fullText = "";
     let promptTokens = 0;
     let completionTokens = 0;
+    let ttftMs = 0;
+    let totalMs = 0;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -339,6 +341,8 @@ export class HttpConvAgent extends EventEmitter {
         fullText = result.text;
         promptTokens = result.promptTokens;
         completionTokens = result.completionTokens;
+        ttftMs = result.ttftMs;
+        totalMs = result.totalMs;
         lastErr = null;
         break; // success
       } catch (err: any) {
@@ -364,13 +368,12 @@ export class HttpConvAgent extends EventEmitter {
 
       if (LOG) process.stderr.write(`[${this.cfg.id}] raw response:\n${fullText}\n---\n`);
 
-      // Emit token usage before parsing so the store is updated even if parsing crashes.
-      if (promptTokens > 0 || completionTokens > 0) {
-        this.emit("event", {
-          v: 1, type: "token.usage", agent: this.cfg.id,
-          prompt: promptTokens, completion: completionTokens,
-        } as TuiEvent);
-      }
+      // Always emit token.usage so timing data is always available in the log.
+      this.emit("event", {
+        v: 1, type: "token.usage", agent: this.cfg.id,
+        prompt: promptTokens, completion: completionTokens,
+        ttft_ms: ttftMs, total_ms: totalMs,
+      } as TuiEvent);
 
       // Delegate to the extracted pure parser (also exported for headless tests).
       parseAgentOutput(fullText, this.cfg.id, (ev) => {
@@ -438,10 +441,11 @@ export class HttpConvAgent extends EventEmitter {
     return result;
   }
 
-  private async _callAnthropic(): Promise<{ text: string; promptTokens: number; completionTokens: number }> {
+  private async _callAnthropic(): Promise<{ text: string; promptTokens: number; completionTokens: number; ttftMs: number; totalMs: number }> {
     const pc = this.cfg.providerCfg;
     let promptTokens = 0;
     let completionTokens = 0;
+    let ttftMs = 0;
 
     // ── Prompt caching 支持 ────────────────────────────────────────────
     // 如果 systemPrompt 存在，用数组格式并标记 cache_control: ephemeral
@@ -472,6 +476,7 @@ export class HttpConvAgent extends EventEmitter {
       stream: true,
     });
 
+    const t0 = Date.now();
     const stream = await this._doStream(
       "api.anthropic.com",
       "POST",
@@ -497,18 +502,22 @@ export class HttpConvAgent extends EventEmitter {
           completionTokens = parsed.usage.output_tokens ?? 0;
         }
         if (parsed?.type === "content_block_delta" && parsed.delta?.text) {
-          return parsed.delta.text;
+          const delta = parsed.delta.text;
+          if (!ttftMs && delta) ttftMs = Date.now() - t0;
+          return delta;
         }
       } catch { /* skip non-JSON */ }
       return null;
     });
-    return { text, promptTokens, completionTokens };
+    const totalMs = Date.now() - t0;
+    return { text, promptTokens, completionTokens, ttftMs, totalMs };
   }
 
-  private async _callOpenAI(): Promise<{ text: string; promptTokens: number; completionTokens: number }> {
+  private async _callOpenAI(): Promise<{ text: string; promptTokens: number; completionTokens: number; ttftMs: number; totalMs: number }> {
     const pc = this.cfg.providerCfg;
     let promptTokens = 0;
     let completionTokens = 0;
+    let ttftMs = 0;
     const baseUrl = pc.baseUrl || "https://api.openai.com";
     const url = new URL(baseUrl);
     const port = url.port ? parseInt(url.port, 10) : undefined;
@@ -526,6 +535,7 @@ export class HttpConvAgent extends EventEmitter {
       stream_options: { include_usage: true },
     });
 
+    const t0 = Date.now();
     const stream = await this._doStream(
       url.hostname,
       "POST",
@@ -565,10 +575,13 @@ export class HttpConvAgent extends EventEmitter {
 
         // Actual answer — accumulate into fullText for protocol parsing
         const content = delta.content;
-        return typeof content === "string" && content ? content : null;
+        const result = typeof content === "string" && content ? content : null;
+        if (result && !ttftMs) ttftMs = Date.now() - t0;
+        return result;
       } catch { return null; }
     });
-    return { text, promptTokens, completionTokens };
+    const totalMs = Date.now() - t0;
+    return { text, promptTokens, completionTokens, ttftMs, totalMs };
   }
 
   private _doStream(

@@ -29,8 +29,10 @@ export interface ScriptedResponse {
    */
   events?: ProtocolEvent[];
   rawContent?: string;
-  /** Milliseconds to pause between each event chunk. */
+  /** Milliseconds to pause between each event chunk (simulates streaming speed). */
   delayMs?: number;
+  /** Milliseconds to pause before sending the first chunk (simulates TTFT / model latency). */
+  startDelayMs?: number;
 }
 
 export interface MockCall {
@@ -55,6 +57,14 @@ export class MockLLMServer {
   /** Pre-load one or more responses in order. */
   enqueue(...responses: ScriptedResponse[]): void {
     this.queue.push(...responses);
+  }
+
+  /**
+   * Pre-load responses that simulate a server-side start delay before the first chunk.
+   * Useful for testing ttft_ms accuracy.
+   */
+  enqueueDelayed(startDelayMs: number, ...responses: ScriptedResponse[]): void {
+    this.queue.push(...responses.map((r) => ({ ...r, startDelayMs })));
   }
 
   /** Clear the queue and call log (call between tests). */
@@ -117,6 +127,8 @@ export class MockLLMServer {
       Connection: "keep-alive",
       "X-Mock-Agent": agentId ?? "unknown",
     });
+
+    if (scripted.startDelayMs) await sleep(scripted.startDelayMs);
 
     if (scripted.rawContent !== undefined) {
       // Emit raw string verbatim — for regression tests

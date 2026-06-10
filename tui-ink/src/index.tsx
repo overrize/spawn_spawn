@@ -46,7 +46,13 @@ import type { AgentRole } from "./tools/registry.js";
 import { TestSuite } from "./tests/e2e/runner/TestSuite.js";
 import { E2ESuite } from "./tests/e2e/runner/E2ESuite.js";
 import { TokenManager } from "./feishu/auth.js";
-import { sendTextMessage } from "./feishu/message.js";
+import {
+  sendTextMessage, addProcessingReaction, deleteProcessingReaction,
+  patchCardMessage, splitForStreaming, buildAnswerCard,
+} from "./feishu/message.js";
+import { taskRegistry, cardIndex, pmCurrentTask } from "./feishu/session.js";
+import { PMBridgeBase } from "./feishu/pm-bridge.js";
+import { createTask, createCardRenderer } from "./feishu/card-renderer.js";
 import { startFeishuWebSocket } from "./feishu/websocket.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
@@ -135,6 +141,18 @@ const pm = new ProcessManager();
 // Feishu: open_id → pmId (e.g. "feishu-a1b2c3d4")
 const feishuSessions = new Map<string, string>();
 let feishuConnected = false;
+// Per-PM message queue: messages that arrived while the agent was mid-turn
+const feishuMsgQueue = new Map<string, string[]>();
+// Set of PM IDs currently processing a turn (busy = don't inject new messages)
+const feishuBusy = new Set<string>();
+// Where to reply: stored per-PM so queued delivery can route correctly
+const feishuReplyTarget = new Map<string, { replyId: string; replyType: 'open_id' | 'chat_id' }>();
+// Shared tokenManager + event bridge (set once in connectFeishu)
+let feishuTokenManager: TokenManager | null = null;
+const feishuBridge = new PMBridgeBase();
+// Dedup: skip already-processed message IDs and same-content bursts within 5s
+const feishuSeenMsgIds = new Set<string>();
+const feishuRecentTexts = new Map<string, { text: string; time: number }>(); // openId → last msg
 
 // Agents that were explicitly killed by the user (ESC) or by a parent agent.kill event.
 // Used to suppress child→parent notifications after a kill so the parent isn't restarted.
@@ -224,6 +242,7 @@ interface LeaderOpts {
   promptFile?: string;      // "pm" for root, "leader" for tech leads
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
   replyHook?: (text: string) => void; // called when message.to=user (Feishu bridge)
+  conversationMode?: boolean;          // if true: stop after each user reply, no auto-nudge
 }
 
 function killAgent(id: string, _reason = "interrupted"): void {
@@ -247,9 +266,50 @@ function connectFeishu(appId: string, appSecret: string): void {
   process.env.FEISHU_APP_ID = appId;
   process.env.FEISHU_APP_SECRET = appSecret;
   const tokenManager = new TokenManager();
-  // Pre-warm token so the first reply doesn't pay cold-fetch latency
-  tokenManager.getToken().catch(() => { /* will retry on first send */ });
+  feishuTokenManager = tokenManager;
+  tokenManager.getToken().catch(() => { /* pre-warm; will retry on first send */ });
+
+  // Wire card renderer to the bridge (one-time subscription per connection)
+  feishuBridge.subscribe(createCardRenderer(tokenManager));
+
   const cfg = loadConfig();
+
+  // Helper: start a new task for pmId, emit task_spawned, send placeholder card
+  const startTask = (pmId: string, rt: { replyId: string; replyType: 'open_id' | 'chat_id' }, msgId: string): void => {
+    const task = createTask({ pmId, ...rt, rootMessageId: msgId }, tokenManager);
+    taskRegistry.set(task.taskId, task);
+    pmCurrentTask.set(pmId, task.taskId);
+    feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🦞 PM' });
+    // Reaction-only indicator — reply card is created on first PM response (no placeholder)
+    if (msgId) {
+      addProcessingReaction(msgId, tokenManager)
+        .then((rid) => { task.reactionId = rid; })
+        .catch(() => {});
+    }
+  };
+
+  // replyHook: PM calls this with the final answer text.
+  // We emit delta events (simulating streaming via splitForStreaming) then task_done.
+  // All card patching is handled by the subscribed card renderer via PatchScheduler.
+  const makeReplyHook = (pmIdLocal: string) => (replyText: string): void => {
+    const taskId = pmCurrentTask.get(pmIdLocal);
+    if (!taskId) return;
+    const segments = splitForStreaming(replyText);
+    const delayMs = segments.length > 12 ? 50 : 80;
+    let i = 0;
+    const emitNext = () => {
+      if (i < segments.length) {
+        feishuBridge.emit({ type: 'agent_delta', taskId, agentPath: 'PM', text: segments[i++]! });
+        if (i < segments.length) setTimeout(emitNext, delayMs);
+        else setTimeout(() => {
+          feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM' });
+          feishuBridge.emit({ type: 'task_done', taskId, summary: replyText });
+        }, delayMs);
+      }
+    };
+    emitNext();
+  };
+
   startFeishuWebSocket({
     appId,
     appSecret,
@@ -257,61 +317,68 @@ function connectFeishu(appId: string, appSecret: string): void {
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
         text: `[飞书WS] ${msg}` } as TuiEvent);
     },
-    onMessage: (openId: string, text: string, chatId: string, chatType: string) => {
+    onMessage: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => {
+      // Dedup: message-ID guard (Feishu can deliver same event twice)
+      if (feishuSeenMsgIds.has(messageId)) {
+        process.stderr.write(`[FeishuBridge] dup msgId=${messageId}, skipped\n`);
+        return;
+      }
+      feishuSeenMsgIds.add(messageId);
+      // Short-time same-content guard (5s window per user — catches rapid re-sends)
+      const recentMsg = feishuRecentTexts.get(openId);
+      if (recentMsg && recentMsg.text === text && Date.now() - recentMsg.time < 5000) {
+        process.stderr.write(`[FeishuBridge] dup content from ${openId} within 5s, skipped\n`);
+        return;
+      }
+      feishuRecentTexts.set(openId, { text, time: Date.now() });
+
       const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
-      // For group chats reply to the chat; for p2p reply to the user's open_id
       const replyId   = chatType === 'group' ? chatId : openId;
-      const replyType = chatType === 'group' ? 'chat_id' : 'open_id';
+      const replyType: 'open_id' | 'chat_id' = chatType === 'group' ? 'chat_id' : 'open_id';
+      const rt = { replyId, replyType };
+
       if (!feishuSessions.has(openId)) {
+        // New session
         feishuSessions.set(openId, pmId);
+        feishuBusy.add(pmId);
+        feishuReplyTarget.set(pmId, rt);
+        startTask(pmId, rt, messageId);
         ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
           sub: "飞书会话", model: cfg.agents.leader.model });
         userMessage(pmId, text);
-        startLeaderAgent({
-          id: pmId,
-          firstMessage: text,
-          promptFile: "pm",
-          replyHook: (replyText: string) => {
-            const t0 = Date.now();
-            sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
-              .then(() => { process.stderr.write(`[FeishuBridge] reply sent in ${Date.now()-t0}ms\n`); })
-              .catch((err) => {
-                process.stderr.write(`[FeishuBridge] reply failed ${openId.slice(-6)} after ${Date.now()-t0}ms: ${err instanceof Error ? err.message : String(err)}\n`);
-              });
-          },
-        });
+        startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
+          conversationMode: true, replyHook: makeReplyHook(pmId) });
       } else {
         const existingPmId = feishuSessions.get(openId)!;
         const a = agents.get(existingPmId);
         if (a instanceof HttpConvAgent) {
-          process.stderr.write(`[FeishuBridge] routing to existing PM ${existingPmId}\n`);
-          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-            text: `[飞书路由] → ${existingPmId} (existing)` } as TuiEvent);
-          userMessage(existingPmId, text);
-          killedAgents.delete(existingPmId);
-          markPendingInput(existingPmId);
-          a.sendCommand({ type: "user.message", text });
+          if (feishuBusy.has(existingPmId)) {
+            const q = feishuMsgQueue.get(existingPmId) ?? [];
+            q.push(text);
+            feishuMsgQueue.set(existingPmId, q);
+            process.stderr.write(`[FeishuBridge] queued msg for ${existingPmId} (busy), queue len=${q.length}\n`);
+          } else {
+            feishuBusy.add(existingPmId);
+            feishuReplyTarget.set(existingPmId, rt);
+            startTask(existingPmId, rt, messageId);
+            userMessage(existingPmId, text);
+            killedAgents.delete(existingPmId);
+            markPendingInput(existingPmId);
+            a.sendCommand({ type: "user.message", text });
+          }
         } else {
-          process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone (type=${typeof a}), starting fresh\n`);
-          applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-            text: `[飞书路由] PM ${existingPmId} 已结束，新建会话` } as TuiEvent);
-          // PM finished — start a fresh session
+          process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone, starting fresh session\n`);
           feishuSessions.delete(openId);
           setImmediate(() => {
             const newPmId = `feishu-${crypto.createHash("sha256").update(openId + Date.now()).digest("hex").slice(0, 8)}`;
             feishuSessions.set(openId, newPmId);
+            feishuReplyTarget.set(newPmId, rt);
+            startTask(newPmId, rt, messageId);
             ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
               sub: "飞书会话", model: cfg.agents.leader.model });
             userMessage(newPmId, text);
-            startLeaderAgent({
-              id: newPmId, firstMessage: text, promptFile: "pm",
-              replyHook: (replyText: string) => {
-                sendTextMessage(replyId, replyType as 'open_id' | 'chat_id', replyText, tokenManager)
-                  .catch((err) => {
-                    process.stderr.write(`[FeishuBridge] reply failed ${openId.slice(-6)}: ${err instanceof Error ? err.message : String(err)}\n`);
-                  });
-              },
-            });
+            startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
+              conversationMode: true, replyHook: makeReplyHook(newPmId) });
           });
         }
       }
@@ -394,28 +461,44 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let nudgePending = false; // true when the next run turn is a system-initiated nudge
   let sentToUserThisTurn = false; // true when PM sent message.to=user this turn
   let reportedToParent = false;   // true when TL/Worker sent message to their parent this turn
+  let lastToolCallKey = "";       // loop detection: last "tool:argsJSON" key
+  let sameToolCallCount = 0;      // how many consecutive times same tool+args was called
 
   // Quality tracking — emitted as structured stderr log on agent.done
   let qualTurns = 0;
   let qualNudges = 0;
   let qualHandup = false;
+  let lastTtftMs = 0;
+  let lastTotalMs = 0;
 
   a.on("event", (e: TuiEvent) => {
     // Spawn — pre-check then dispatch to correct handler
     if (e.type === "spawn") {
-      const parentRole = getState().agents.get(e.parent)?.role;
-      const check = pm.preCheckSpawn(e, parentRole);
+      // Guard 1: reject before store write if the child ID already exists.
+      // LLMs sometimes hallucinate reusing an existing agent ID (e.g. spawning the PM
+      // itself as a worker), which would corrupt the store entry and stall the parent.
+      if (agents.has(e.child)) {
+        process.stderr.write(`[${opts.id}] spawn REJECTED: child="${e.child}" already exists in agents Map\n`);
+        a.sendCommand({ type: "user.message", text: `[系统] spawn 失败：agent ID "${e.child}" 已被占用。请使用一个唯一的新 ID（如 worker-${Date.now().toString(36).slice(-4)}）。` });
+        return;
+      }
+      // Guard 2: normalize parent to opts.id — LLM sometimes outputs a stale/wrong parent
+      // (e.g. "pm" when the actual Feishu PM ID is "feishu-xxxxxxxx"). If we leave it as-is,
+      // the child's parent field in the store won't match opts.id and activeChildren = 0.
+      const normalized: typeof e = e.parent !== opts.id ? { ...e, parent: opts.id } : e;
+      // Use opts.id (not e.parent) for role lookup — e.parent may be stale
+      const parentRole = getState().agents.get(opts.id)?.role;
+      const check = pm.preCheckSpawn(normalized, parentRole);
       if (!check.ok) {
-        applyEvent({ v: 1, type: "agent.error", agent: e.parent, code: check.code, detail: check.detail });
+        applyEvent({ v: 1, type: "agent.error", agent: opts.id, code: check.code, detail: check.detail });
         return;
       }
       actedThisTurn = true;
-      applyEvent(e);
-      pm.observe(e);
-      secretary.observe(e);
-      // Register auto-background spawn (foreground tracking)
-      if (pm.registerSpawn) pm.registerSpawn(e.child, e.parent);
-      startWorker(e); // routes Leader role to startLeaderAgent internally
+      applyEvent(normalized);
+      pm.observe(normalized);
+      secretary.observe(normalized);
+      process.stderr.write(`[${opts.id}] spawn child=${normalized.child} role=${normalized.role ?? "?"} goal="${(normalized.goal ?? "").slice(0, 80)}"\n`);
+      startWorker(normalized); // foreground tracking registered inside startWorker for both Leader+Worker
       return;
     }
 
@@ -460,10 +543,29 @@ function startLeaderAgent(opts: LeaderOpts): void {
     pm.observe(e);
     secretary.observe(e);
 
+    // ── per-event debug logging ──────────────────────────────────────────────
+    if (e.type === "agent.state") {
+      process.stderr.write(`[${opts.id}] state→${e.state} acted=${actedThisTurn} sentUser=${sentToUserThisTurn} reportedParent=${reportedToParent} cont=${continuations} gaveUp=${gaveUp}\n`);
+    }
+    if (e.type === "message") {
+      process.stderr.write(`[${opts.id}] message to=${e.to} "${e.text.slice(0, 120)}"\n`);
+    }
+    if (e.type === "todo.set") {
+      actedThisTurn = true;
+      const summary = (e.items as Array<{state: string; text: string}>).map((t) => `[${t.state}]${t.text.slice(0,30)}`).join(", ");
+      process.stderr.write(`[${opts.id}] todo.set ${e.items.length} items: ${summary}\n`);
+    }
+    if (e.type === "tool.call") {
+      process.stderr.write(`[${opts.id}] tool.call ${e.name}(${JSON.stringify(e.args).slice(0, 100)})\n`);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     if (e.type === "agent.state" && e.state === "run") {
       actedThisTurn = false;
       sentToUserThisTurn = false;
       reportedToParent = false;
+      lastToolCallKey = "";
+      sameToolCallCount = 0;
       if (!nudgePending) { continuations = 0; gaveUp = false; }
       else qualNudges++; // nudgePending=true means this run was system-initiated
       nudgePending = false;
@@ -472,12 +574,17 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "tool.call") {
       actedThisTurn = true;
+      const toolKey = `${e.name}:${JSON.stringify(e.args)}`;
+      if (toolKey === lastToolCallKey) { sameToolCallCount++; } else { lastToolCallKey = toolKey; sameToolCallCount = 1; }
       if (!toolNeedsApproval(e.name, e.args as Record<string, unknown>)) {
         toolQueue.push(e);
-      } else {
-        // Destructive tool: Leaders route to parent for approval; root PM has no parent
-        // so send an error result immediately instead of silently dropping the call.
-        // Without this, PM waits forever for a result that never comes.
+      } else if (opts.conversationMode) {
+        // Feishu/conversation mode: PM is the authority — auto-approve destructive tools.
+        // No human is watching the TUI to click y/n.
+        process.stderr.write(`[${opts.id}] auto-approve tool "${e.name}" (conversationMode)\n`);
+        toolQueue.push(e);
+      } else if (!opts.parentId) {
+        // Root PM in normal mode has no parent to approve — return error so agent can recover.
         setImmediate(() => {
           applyEvent({ v: 1, type: "tool.result", agent: opts.id, id: e.id, ok: false,
             output: `Tool "${e.name}" requires approval. Root leader has no parent to approve — use a non-destructive alternative or rephrase the command.` });
@@ -485,13 +592,27 @@ function startLeaderAgent(opts: LeaderOpts): void {
             output: `Tool "${e.name}" requires approval. Root leader has no parent to approve — use a non-destructive alternative or rephrase the command.` });
         });
       }
+      // else: non-root leader routes to parent via leaderApprovalQueue (handled below)
     }
 
     if (e.type === "message") {
       actedThisTurn = true;
       if (e.to === "user") {
         sentToUserThisTurn = true;
-        if (opts.replyHook) opts.replyHook(e.text);
+        if (opts.replyHook) {
+          // In conversationMode, only send to Feishu when there are no active children.
+          // Messages like "已派 tl-xx 去..." are intermediate status and should not reach the user.
+          // The final answer comes after all children finish.
+          const activeChildrenNow = opts.conversationMode
+            ? Array.from(getState().agents.values())
+                .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
+            : [];
+          if (!opts.conversationMode || activeChildrenNow.length === 0) {
+            opts.replyHook(e.text);
+          } else {
+            process.stderr.write(`[${opts.id}] suppressed intermediate msg to Feishu (${activeChildrenNow.length} active children): "${e.text.slice(0, 60)}"\n`);
+          }
+        }
       }
       if (opts.parentId && e.to === opts.parentId) {
         reportedToParent = true;
@@ -507,6 +628,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
           });
         }
       }
+    }
+
+    if (e.type === "token.usage") {
+      if (e.ttft_ms !== undefined) lastTtftMs = e.ttft_ms;
+      if (e.total_ms !== undefined) lastTotalMs = e.total_ms;
     }
 
     if (e.type === "agent.done") {
@@ -530,7 +656,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
         ` success=${e.success} turns=${qualTurns} nudges=${qualNudges}` +
         ` handup=${qualHandup} gaveUp=${gaveUp} rejects=${rejects}` +
         ` tokens_in=${tok?.prompt ?? 0} tokens_out=${tok?.completion ?? 0}` +
-        ` evidence=${e.evidence?.length ?? 0}\n`,
+        ` evidence=${e.evidence?.length ?? 0}` +
+        ` latency=${opts.id}:${lastTtftMs}/${lastTotalMs}\n`,
       );
       // Only ask for human rating on root PM sessions (not every sub-leader)
       if (!opts.parentId) setPendingRating(opts.id, sessionHash);
@@ -539,6 +666,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
     if (e.type === "agent.done" && opts.parentId) {
       const pmSec = secretaries.get("pm");
       if (pmSec) pmSec.ingestChildMemory(secretary.getMemory() as any);
+      // Resolve foreground tracking so parent's pm.getForegroundChildren() reflects completion
+      pm.completeForeground(opts.id, { success: e.success, reason: e.reason, evidence: e.evidence });
       const parentAgent = agents.get(opts.parentId);
       // Don't wake a killed/finished parent — child completion should not restart it
       if (killedAgents.has(opts.parentId)) return;
@@ -583,6 +712,14 @@ function startLeaderAgent(opts: LeaderOpts): void {
     if (e.type === "agent.state" && e.state === "idle") {
       if (getState().agents.get(opts.id)?.state === "done") return;
       if (toolQueue.length > 0) {
+        // Loop detection: warn before draining if same tool called 2+ times in a row
+        if (sameToolCallCount >= 2) {
+          const loopTool = lastToolCallKey.split(":")[0] ?? "";
+          process.stderr.write(`[${opts.id}] loop-detect: ${loopTool} called same args ${sameToolCallCount}x\n`);
+          const warnMsg = `【系统-循环检测】你已连续 ${sameToolCallCount} 次调用相同的 ${loopTool}，得到相同结果。换一个不同的工具或不同参数，否则任务将无法推进。`;
+          setImmediate(() => { a.sendCommand({ type: "user.message", text: warnMsg }); });
+          sameToolCallCount = 0;
+        }
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
@@ -591,46 +728,83 @@ function startLeaderAgent(opts: LeaderOpts): void {
             const { ok, output } = results[i]!;
             applyEvent({ v: 1, type: "tool.result", agent: opts.id, id, ok, output });
           }
+          // Feed combined results back to the LLM — without this the PM hangs indefinitely
+          const combined = batch.map((c, i) =>
+            `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
+          ).join("\n\n");
+          a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
         });
       } else if (actedThisTurn) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
         const hasRun = todos.some((t) => t.state === "run");
         const hasTodo = todos.some((t) => t.state === "todo");
-        // If children are actively running, PM should wait silently — nudging causes
-        // PM to reply "waiting for feedback" which burns continuations for nothing.
         const activeChildren = Array.from(getState().agents.values())
           .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"));
-        if (activeChildren.length > 0) {
-          // Agent has delegated work — wait silently for children to finish
-        } else if (reportedToParent) {
-          // TL/Worker already sent their result to parent — close stale todos, stop nudging
-          if (hasTodo) {
-            const closed = todos.map((t) => ({ ...t, state: (t.state === "run" || t.state === "todo") ? "done" : t.state }));
+        process.stderr.write(`[${opts.id}] idle/acted hasTodo=${hasTodo} hasRun=${hasRun} activeChildren=${activeChildren.length} sentUser=${sentToUserThisTurn} reportedParent=${reportedToParent} convMode=${!!opts.conversationMode} cont=${continuations}\n`);
+        // Belt-and-suspenders: also check foreground spawn handles (registered synchronously,
+        // not subject to the spawn→run state transition race that activeChildren can miss)
+        const foregroundChildren = pm.getForegroundChildren(opts.id);
+        const hasActiveChildren = activeChildren.length > 0 || foregroundChildren.length > 0;
+        if (hasActiveChildren) {
+          process.stderr.write(`[${opts.id}] idle → waiting for children: store=[${activeChildren.map(c => c.id).join(",")}] fg=[${foregroundChildren.join(",")}]\n`);
+        } else if (reportedToParent && !hasTodo) {
+          process.stderr.write(`[${opts.id}] idle → reportedToParent+done, closing run items\n`);
+          if (hasRun) {
+            const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
             applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
+          }
+        } else if (sentToUserThisTurn && opts.conversationMode && !hasTodo && !hasActiveChildren) {
+          // Conversation mode: replied to user, no pending todos, no in-flight children → done
+          process.stderr.write(`[${opts.id}] idle → conversationMode replied+no-todos+no-children, done\n`);
+          feishuBusy.delete(opts.id);
+          const nextMsg = feishuMsgQueue.get(opts.id)?.shift();
+          if (nextMsg) {
+            process.stderr.write(`[${opts.id}] delivering queued msg: "${nextMsg.slice(0, 60)}"\n`);
+            feishuBusy.add(opts.id);
+            // Create a new task for this queued message turn
+            const rt = feishuReplyTarget.get(opts.id);
+            if (rt && feishuTokenManager) {
+              const task = createTask({ pmId: opts.id, ...rt, rootMessageId: '' }, feishuTokenManager);
+              taskRegistry.set(task.taskId, task);
+              pmCurrentTask.set(opts.id, task.taskId);
+              feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🦞 PM' });
+            }
+            setImmediate(() => {
+              userMessage(opts.id, nextMsg);
+              a.sendCommand({ type: "user.message", text: nextMsg });
+            });
+          }
+        } else if (sentToUserThisTurn && opts.conversationMode && hasTodo) {
+          // Conversation mode: replied to user but still has todos → nudge to finish work
+          process.stderr.write(`[${opts.id}] idle → conversationMode replied but hasTodo, nudging cont=${continuations}\n`);
+          if (continuations < 3) {
+            continuations++;
+            nudgePending = true;
+            const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+            setImmediate(() => {
+              a.sendCommand({ type: "user.message", text: `【系统】你回复了用户但还有未完成任务：${pendingTodos}。立刻执行。` });
+            });
           }
         } else if (sentToUserThisTurn && !hasTodo) {
           // PM replied to user and has no pending tasks — done, nothing to nudge
+          process.stderr.write(`[${opts.id}] idle → replied+no-todos, done\n`);
         } else if (hasRun && !hasTodo) {
-          // All items are "run" with nothing pending → auto-close
+          process.stderr.write(`[${opts.id}] idle → hasRun+no-todo, auto-close run items\n`);
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
           applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
-        } else if (hasTodo && sentToUserThisTurn) {
-          // PM already delivered final report and has no active children —
-          // stale todos are a known PM protocol bug. Auto-close to stop the loop.
-          const closed = todos.map((t) => ({ ...t, state: (t.state === "run" || t.state === "todo") ? "done" : t.state }));
-          applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
         } else if (hasTodo && continuations < 3) {
-          // Agent replied/acted but still has pending todos — nudge it to continue
           continuations++;
           const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
+          process.stderr.write(`[${opts.id}] idle → nudge cont=${continuations} pending="${pendingTodos.slice(0,80)}"\n`);
           nudgePending = true;
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
-              text: `【系统-自检】你回复了用户但 todo 列表仍有未完成项：${pendingTodos}。\n立刻输出 step + tool.call 执行第一步，不允许回复完就停止。`,
+              text: `【系统】todo 未完成：${pendingTodos}。立刻执行下一步（tool.call 或 spawn 或直接回答）。`,
             });
           });
         } else if (hasTodo) {
+          process.stderr.write(`[${opts.id}] idle → gaveUp after 3 nudges\n`);
           gaveUp = true;
           const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
           applyEvent({
@@ -648,20 +822,29 @@ function startLeaderAgent(opts: LeaderOpts): void {
               text: `【系统】你回复了但没有输出 todo.set。立刻输出 todo.set 列出当前计划，然后执行第一步。`,
             });
           });
+        } else if (opts.conversationMode) {
+          // Defensive fall-through: acted (spawn/tool/message) but no branch above matched.
+          // This happens when PM spawned a TL that died before completing, or exhausted nudges
+          // without ever sending a user reply. Release the serial queue to prevent deadlock.
+          process.stderr.write(`[${opts.id}] idle → actedThisTurn+conversationMode+no-branch-matched, releasing feishuBusy\n`);
+          feishuBusy.delete(opts.id);
         }
       } else if (!actedThisTurn && !gaveUp) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
         const hasPending = todos.some((t) => t.state === "todo" || t.state === "run");
-        // Same guard: if children are running, no nudge needed — they'll call back when done
         const activeChildren2 = Array.from(getState().agents.values())
           .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"));
+        process.stderr.write(`[${opts.id}] idle/no-action hasPending=${hasPending} activeChildren=${activeChildren2.length} cont=${continuations}\n`);
         if (hasPending && activeChildren2.length > 0) {
-          // waiting for children — do nothing
+          process.stderr.write(`[${opts.id}] idle → waiting for children: ${activeChildren2.map(c => c.id).join(",")}\n`);
         } else if (hasPending && continuations < 3) {
           continuations++;
+          const pendingTodos = todos.filter((t) => t.state === "todo" || t.state === "run").map((t) => t.text).join("; ");
+          process.stderr.write(`[${opts.id}] idle → nudge(no-action) cont=${continuations} pending="${pendingTodos.slice(0,80)}"\n`);
           nudgePending = true;
           setImmediate(() => {
-            a.sendCommand({ type: "user.message", text: `【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call 或 spawn，不要只规划。` });
+            const pending2 = todos.filter((t: {state:string;text:string}) => t.state === "todo" || t.state === "run").map((t: {text:string}) => t.text).join("; ");
+            a.sendCommand({ type: "user.message", text: `【系统-强制执行】你已经规划了 todo 但没有采取任何行动。现在必须立刻输出以下之一：\n1. spawn 指令（如果需要 TL 执行）\n2. tool.call 指令（如果 PM 自己能处理）\n3. message.to=user（如果可以直接回答）\n未完成项：${pending2}\n不允许再次只输出 todo.set 或 step。` });
           });
         } else if (hasPending) {
           gaveUp = true;
@@ -752,6 +935,20 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       dispatch: e.dispatch,
       promptFile: "leader",
     });
+    // Register foreground tracking for TL (same pattern as Worker below).
+    // Must happen AFTER startLeaderAgent so the child is in the agents Map.
+    const tlHandle = pm.registerSpawn(e.child, e.parent);
+    tlHandle.promise.then((syncResult) => {
+      if (syncResult === null) {
+        const parentAgent = agents.get(e.parent);
+        if (parentAgent instanceof HttpConvAgent) {
+          parentAgent.sendCommand({
+            type: "user.message",
+            text: `[系统] ${e.child} 已超过 2 分钟，自动切换为后台模式。完成时会通过 task-notification 通知你。`,
+          });
+        }
+      }
+    });
     return;
   }
 
@@ -816,26 +1013,39 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   let workerGaveUp = false;
   let workerCorrectedThisTurn = false; // deduplicate illegal_message corrections per turn
   let workerNudgePending = false; // true when the next run turn is a system-initiated nudge
+  let wLastToolKey = "";
+  let wSameToolCount = 0;
+  let wDoneNotified = false; // guard: only send completion notification to parent once
 
   // Quality tracking for worker
   let wQualTurns = 0;
   let wQualNudges = 0;
   let wQualHandup = false;
+  let wLastTtftMs = 0;
+  let wLastTotalMs = 0;
 
   a.on("event", (ev: TuiEvent) => {
     // spawn: pre-check BEFORE applyEvent to prevent ghost agents in store
     if (ev.type === "spawn") {
-      const parentRole = getState().agents.get(ev.parent)?.role;
-      const check = pm.preCheckSpawn(ev, parentRole);
+      // Reject before store write if child ID is already taken
+      if (agents.has(ev.child)) {
+        process.stderr.write(`[${e.child}] spawn REJECTED: child="${ev.child}" already exists\n`);
+        a.sendCommand({ type: "user.message", text: `[系统] spawn 失败：agent ID "${ev.child}" 已被占用。请使用唯一的新 ID。` });
+        return;
+      }
+      // Normalize parent to actual spawner ID
+      const normalizedEv: typeof ev = ev.parent !== e.child ? ev : { ...ev, parent: e.child };
+      const parentRole = getState().agents.get(e.child)?.role;
+      const check = pm.preCheckSpawn(normalizedEv, parentRole);
       if (!check.ok) {
-        applyEvent({ v: 1, type: "agent.error", agent: ev.parent, code: check.code, detail: check.detail });
+        applyEvent({ v: 1, type: "agent.error", agent: e.child, code: check.code, detail: check.detail });
         return;
       }
       workerActedThisTurn = true;
-      applyEvent(ev);
-      pm.observe(ev);
-      secretary.observe(ev);
-      startWorker(ev);
+      applyEvent(normalizedEv);
+      pm.observe(normalizedEv);
+      secretary.observe(normalizedEv);
+      startWorker(normalizedEv);
       return;
     }
 
@@ -893,6 +1103,22 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     pm.observe(ev);
     secretary.observe(ev);
 
+    // ── per-event debug logging ──────────────────────────────────────────────
+    if (ev.type === "agent.state") {
+      process.stderr.write(`[${e.child}] state→${ev.state} acted=${workerActedThisTurn} cont=${workerContinuations} gaveUp=${workerGaveUp}\n`);
+    }
+    if (ev.type === "message") {
+      process.stderr.write(`[${e.child}] message to=${ev.to} "${ev.text.slice(0, 120)}"\n`);
+    }
+    if (ev.type === "todo.set") {
+      const summary = (ev.items as Array<{state: string; text: string}>).map((t) => `[${t.state}]${t.text.slice(0,30)}`).join(", ");
+      process.stderr.write(`[${e.child}] todo.set ${ev.items.length} items: ${summary}\n`);
+    }
+    if (ev.type === "tool.call") {
+      process.stderr.write(`[${e.child}] tool.call ${ev.name}(${JSON.stringify(ev.args).slice(0, 100)})\n`);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // ── Forward worker→parent communication to the parent LLM ────────────────
     // Without this, leader spawns a worker but never hears back — hangs forever.
     if (ev.type === "message" && ev.to === e.parent) {
@@ -904,7 +1130,13 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         });
       }
     }
+    if (ev.type === "token.usage") {
+      if (ev.ttft_ms !== undefined) wLastTtftMs = ev.ttft_ms;
+      if (ev.total_ms !== undefined) wLastTotalMs = ev.total_ms;
+    }
     if (ev.type === "agent.state" && ev.state === "run") {
+      wLastToolKey = "";
+      wSameToolCount = 0;
       if (workerNudgePending) wQualNudges++;
       wQualTurns++;
     }
@@ -926,13 +1158,18 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         ` success=${ev.success} turns=${wQualTurns} nudges=${wQualNudges}` +
         ` handup=${wQualHandup} gaveUp=${workerGaveUp}` +
         ` tokens_in=${wTok?.prompt ?? 0} tokens_out=${wTok?.completion ?? 0}` +
-        ` evidence=${ev.evidence?.length ?? 0}\n`,
+        ` evidence=${ev.evidence?.length ?? 0}` +
+        ` latency=${e.child}:${wLastTtftMs}/${wLastTotalMs}\n`,
       );
+      // Resolve foreground tracking so parent's pm.getForegroundChildren() reflects completion
+      pm.completeForeground(e.child, { success: ev.success, reason: ev.reason, evidence: ev.evidence });
       const parentAgent = agents.get(e.parent);
       // Don't wake a killed/finished parent
       if (killedAgents.has(e.parent)) return;
       const parentSt = getState().agents.get(e.parent)?.state;
-      if (parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
+      // Guard: only notify parent once — workers can emit agent.done multiple times if nudged
+      if (!wDoneNotified && parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
+        wDoneNotified = true;
         if (ev.success) {
           const evidenceLines = ev.evidence?.length
             ? "\n证据:\n" + ev.evidence.map((s) => `  - ${s}`).join("\n")
@@ -979,6 +1216,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     // Destructive Bash commands are routed to leader instead of asking user directly.
     if (ev.type === "tool.call") {
       workerActedThisTurn = true;
+      const wToolKey = `${ev.name}:${JSON.stringify(ev.args)}`;
+      if (wToolKey === wLastToolKey) { wSameToolCount++; } else { wLastToolKey = wToolKey; wSameToolCount = 1; }
       const mustApprove = toolNeedsApproval(ev.name, ev.args as Record<string, unknown>);
       if (!mustApprove) {
         toolQueue.push(ev);
@@ -1012,6 +1251,13 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (ev.type === "agent.state" && ev.state === "idle") {
       if (getState().agents.get(e.child)?.state === "done") return;
       if (toolQueue.length > 0) {
+        if (wSameToolCount >= 2) {
+          const loopTool = wLastToolKey.split(":")[0] ?? "";
+          process.stderr.write(`[${e.child}] loop-detect: ${loopTool} called same args ${wSameToolCount}x\n`);
+          const warnMsg = `【系统-循环检测】你已连续 ${wSameToolCount} 次调用相同的 ${loopTool}，得到相同结果。换一个不同的工具或不同参数。`;
+          setImmediate(() => { a.sendCommand({ type: "user.message", text: warnMsg }); });
+          wSameToolCount = 0;
+        }
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
@@ -1960,6 +2206,7 @@ function App() {
     if (exitConfirm) {
       if (exitConfirmTimer.current) clearInterval(exitConfirmTimer.current);
       exit();
+      process.exit(0);
       return;
     }
     setExitSecsLeft(3);
@@ -2234,6 +2481,25 @@ if (process.platform === "win32") {
   process.stderr.setEncoding("utf8");
   try { execSync("chcp 65001", { stdio: "ignore" }); } catch { /* best-effort */ }
 }
+
+// Tee stderr to a UTF-8 log file so it can be viewed correctly on Windows
+// regardless of the terminal's codepage.
+const LOG_FILE = path.join(process.cwd(), "tui.log");
+(function setupLogFile() {
+  const logStream = fs.createWriteStream(LOG_FILE, { encoding: "utf8", flags: "a" });
+  const sessionStart = Date.now();
+  logStream.write(`\n--- session ${new Date().toISOString()} ---\n`);
+  const origWrite = process.stderr.write.bind(process.stderr) as typeof process.stderr.write;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (process.stderr as any).write = (chunk: any, encodingOrCb?: any, cb?: any): boolean => {
+    const text = typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8");
+    // Prepend +elapsed ms timestamp to each line (skip blank lines and escape sequences)
+    const elapsed = `+${((Date.now() - sessionStart) / 1000).toFixed(1)}s`;
+    const timestamped = text.replace(/^(?!\x1b)(.)/mg, `${elapsed} $1`);
+    logStream.write(timestamped);
+    return origWrite(chunk, encodingOrCb, cb);
+  };
+})();
 
 const banner = DEMO
   ? "running in --demo mode (no real claude subprocess; fake events on first message)"

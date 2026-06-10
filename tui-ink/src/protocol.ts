@@ -110,7 +110,10 @@ export type TuiEvent =
   // leader → TUI: kill a child agent (same effect as ESC on that agent's pane)
   | { v: 1; type: "agent.kill"; agent: string; target: string; reason?: string }
   // Token usage — emitted by httpAgent after each LLM turn (not parsed from LLM output)
-  | { v: 1; type: "token.usage"; agent: string; prompt: number; completion: number };
+  | { v: 1; type: "token.usage"; agent: string; prompt: number; completion: number;
+      ttft_ms?: number;   // time-to-first-token: request start → first content chunk (ms)
+      total_ms?: number;  // total call duration: request start → stream end (ms)
+    };
 
 // TUI → agent  (写到 agent.stdin)
 export type AgentCommand =
