@@ -12,6 +12,23 @@ export interface ProviderConfig {
   model: string;
   apiKey: string;
   baseUrl?: string;
+  maxTokens?: number;
+}
+
+/**
+ * Return the max_tokens budget for a given agent role and depth.
+ * PM (leader, depth=0) is conservative; TL (depth=1) larger; worker largest.
+ * Callers pass providerCfg.maxTokens first — this is the fallback when unset.
+ */
+export function resolveMaxTokens(role: string, depth?: number): number {
+  if (role === "Secretary") return 1024;
+  if (role === "Worker")    return 8192;
+  if (role === "Leader") {
+    if (depth === 0) return 2048; // PM: conservative budget
+    if (depth === 1) return 4096; // TL: more room for planning
+    return 8192;                  // deep leaders or unknown depth
+  }
+  return 8192; // unknown role: safe default
 }
 
 export const PROVIDER_PRESETS: Record<string, Omit<ProviderConfig, "model" | "apiKey">> = {

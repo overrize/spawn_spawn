@@ -3,6 +3,7 @@ import https from "node:https";
 import http from "node:http";
 import type { TuiEvent, AgentCommand, DispatchSpec, CacheSafeParams } from "../protocol.js";
 import type { ProviderConfig } from "../config.js";
+import { resolveMaxTokens } from "../config.js";
 import { loadMessages } from "../memory/MemoryStore.js";
 import { serializeCachePrefix } from "../cache/CachePrefixManager.js";
 
@@ -189,6 +190,7 @@ export class HttpConvAgent extends EventEmitter {
   constructor(public cfg: {
     id: string;
     role: string;
+    depth?: number;
     providerCfg: ProviderConfig;
     systemPrompt?: string;
     resumeFrom?: string; // S3: agentId to resume messages from
@@ -470,7 +472,7 @@ export class HttpConvAgent extends EventEmitter {
 
     const body = JSON.stringify({
       model: pc.model,
-      max_tokens: 8192,
+      max_tokens: pc.maxTokens ?? resolveMaxTokens(this.cfg.role, this.cfg.depth),
       ...(systemBlock ? { system: systemBlock } : {}),
       messages,
       stream: true,
@@ -526,7 +528,7 @@ export class HttpConvAgent extends EventEmitter {
       : [];
     const body = JSON.stringify({
       model: pc.model,
-      max_tokens: 8192,
+      max_tokens: pc.maxTokens ?? resolveMaxTokens(this.cfg.role, this.cfg.depth),
       messages: [
         ...sysMsg,
         ...this._trimmedHistory().map((m) => ({ role: m.role, content: m.content })),
