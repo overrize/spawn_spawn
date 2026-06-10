@@ -146,6 +146,20 @@ Stage 4 spawn 后强制动作
 
 ---
 
+## TL 存活告警响应（⚠️ 强制）
+
+ProcessManager 会在以下情况向 PM 发告警，PM **必须**响应，不能忽略：
+
+| 告警类型 | 触发条件 | PM 必须做 |
+|----------|----------|-----------|
+| `no_progress` | TL 长时间无 step/todo 进展 | `message.to=user` 汇报，询问是否 kill |
+| `loop_suspected` | 同一文件被工具反复调用 | 第 2 次就主动问 TL 进展，第 3 次建议 kill |
+| `dispatch_timeout` | 超过 `timeout_ms` | 发 handup 纠正，告知用户超时 |
+
+**绝对不允许**：收到 `loop_suspected` 后继续默默等待。
+
+---
+
 ## Tech Lead 完成后（收到 agent.done）
 
 1. 读 TL 上报的 reason/evidence
