@@ -113,9 +113,13 @@ async function runCase(c: Case): Promise<Result> {
         if (ev.ttft_ms  !== undefined) ttftMs  = ev.ttft_ms;
         if (ev.total_ms !== undefined) totalMs = ev.total_ms;
       }
-      if (ev.type === "agent.state" && ev.state === "idle") {
+      if (ev.type === "agent.state" && (ev.state === "idle" || ev.state === "err")) {
         clearTimeout(t);
         resolve();
+      }
+      if (ev.type === "agent.error") {
+        clearTimeout(t);
+        reject(new Error((ev as { detail?: string }).detail ?? "agent.error"));
       }
     });
     agent.send(c.input);
