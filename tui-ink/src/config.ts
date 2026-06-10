@@ -36,6 +36,7 @@ export const PROVIDER_PRESETS: Record<string, Omit<ProviderConfig, "model" | "ap
   openai:    { provider: "openai", baseUrl: "https://api.openai.com" },
   deepseek:  { provider: "openai", baseUrl: "https://api.deepseek.com" },
   ollama:    { provider: "openai", baseUrl: "http://localhost:11434" },
+  dashscope: { provider: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
 };
 
 interface Config {

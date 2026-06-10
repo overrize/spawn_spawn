@@ -7,6 +7,29 @@ import { resolveMaxTokens } from "../config.js";
 import { loadMessages } from "../memory/MemoryStore.js";
 import { serializeCachePrefix } from "../cache/CachePrefixManager.js";
 
+/**
+ * Build the /chat/completions path from a baseUrl.
+ *
+ * Callers pass the full baseUrl (e.g. "https://api.openai.com" or
+ * "https://dashscope.aliyuncs.com/compatible-mode/v1"). We always want to
+ * hit <root>/v1/chat/completions, so we only append "/v1" when the pathname
+ * does not already end with it.
+ *
+ * Examples:
+ *   "https://api.openai.com"                          → /v1/chat/completions
+ *   "https://api.deepseek.com"                        → /v1/chat/completions
+ *   "http://localhost:11434"                          → /v1/chat/completions
+ *   "https://dashscope.aliyuncs.com/compatible-mode/v1" → /compatible-mode/v1/chat/completions
+ *   "http://localhost:8080/api/v1"                    → /api/v1/chat/completions
+ */
+export function buildChatPath(baseUrl: string): string {
+  const { pathname } = new URL(baseUrl);
+  const base = pathname.replace(/\/?$/, ""); // strip trailing slash
+  return base.endsWith("/v1")
+    ? base + "/chat/completions"
+    : base + "/v1/chat/completions";
+}
+
 const VALID_TYPES = new Set([
   "todo.set", "step", "tool.call", "tool.result", "message",
   "spawn", "agent.done", "agent.error", "agent.state",
@@ -541,7 +564,7 @@ export class HttpConvAgent extends EventEmitter {
     const stream = await this._doStream(
       url.hostname,
       "POST",
-      url.pathname.replace(/\/?$/, "") + "/v1/chat/completions",
+      buildChatPath(baseUrl),
       {
         "Authorization": `Bearer ${pc.apiKey}`,
         "content-type": "application/json",
