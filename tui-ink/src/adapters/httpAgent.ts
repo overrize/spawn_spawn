@@ -6,6 +6,7 @@ import type { ProviderConfig } from "../config.js";
 import { resolveMaxTokens } from "../config.js";
 import { loadMessages } from "../memory/MemoryStore.js";
 import { serializeCachePrefix } from "../cache/CachePrefixManager.js";
+import { globalBus } from "../bus/Bus.js";
 
 /**
  * Build the /chat/completions path from a baseUrl.
@@ -41,6 +42,11 @@ const VALID_TYPES = new Set([
   // Parent can kill a child agent
   "agent.kill",
 ]);
+
+// Module-level counter — bare-text→message fallback is a prompt health metric.
+let _fallbackWarnCount = 0;
+export function getFallbackCount(): number { return _fallbackWarnCount; }
+export function resetFallbackCount(): void  { _fallbackWarnCount = 0; }
 
 // ── Pure protocol parser — extracted for testability ──────────────────────────
 // Parses fullText (raw LLM output) into TuiEvents, calling emitFn for each.
@@ -126,7 +132,9 @@ export function parseAgentOutput(
       process.stderr.write(`[${agentId}] raw JSON-like output dropped: ${trimmed.slice(0, 120)}\n`);
       return;
     }
-    emitFn({ v: 1, type: "message", agent: agentId, to: "user", text: trimmed } as TuiEvent);
+    _fallbackWarnCount++;
+    process.stderr.write(`[${agentId}] PROMPT_HEALTH fallback #${_fallbackWarnCount}: ${trimmed.slice(0, 80)}\n`);
+    emitFn({ v: 1, type: "message", agent: agentId, to: "user", text: trimmed, _fallback: true } as TuiEvent);
   };
 
   let jsonBuf = "";
@@ -255,6 +263,14 @@ export class HttpConvAgent extends EventEmitter {
     }
   }
 
+  /** Forward every "event" emission to the global bus (additive — existing listeners unaffected). */
+  override emit(event: string, ...args: unknown[]): boolean {
+    if (event === "event" && args.length === 1) {
+      try { globalBus.publish(args[0] as TuiEvent); } catch { /* never block super.emit */ }
+    }
+    return super.emit(event, ...args);
+  }
+
   /**
    * setCachePrefix — 设置/更新当前缓存前缀参数
    * 供 Fork 子 agent 在初始化后复用父 agent 的缓存前缀
@@ -325,7 +341,8 @@ export class HttpConvAgent extends EventEmitter {
   }
 
   async send(text: string): Promise<void> {
-    if (this._busy) return;
+    // Bug B fix: busy → enqueue, never silently drop.
+    if (this._busy) { this._queue.push(text); return; }
     this._busy = true;
     this._abort = new AbortController();
     this.messages.push({ role: "user", content: text });
@@ -344,6 +361,10 @@ export class HttpConvAgent extends EventEmitter {
     let completionTokens = 0;
     let ttftMs = 0;
     let totalMs = 0;
+    // Bug C fix: AbortError inside the retry loop previously returned early,
+    // bypassing the outer finally and leaving _busy=true forever.
+    // Solution: break out of the loop and let the outer try/finally handle cleanup.
+    let abortedDuringRetry = false;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -372,12 +393,8 @@ export class HttpConvAgent extends EventEmitter {
         break; // success
       } catch (err: any) {
         if (err.name === "AbortError") {
-          // Emit idle so the UI returns to ready state (not stuck on "run")
-          this.emit("event", {
-            v: 1, type: "agent.state", agent: this.cfg.id,
-            state: "idle", sub: "",
-          } as TuiEvent);
-          return;
+          abortedDuringRetry = true;
+          break; // exit loop → outer finally clears _busy and drains queue
         }
         lastErr = err;
         if (!HttpConvAgent._isRetryable(err) || attempt >= MAX_RETRIES) break;
@@ -385,6 +402,14 @@ export class HttpConvAgent extends EventEmitter {
     }
 
     try {
+      if (abortedDuringRetry) {
+        // Emit idle so the UI returns to ready state — _busy is cleared in finally below.
+        this.emit("event", {
+          v: 1, type: "agent.state", agent: this.cfg.id,
+          state: "idle", sub: "",
+        } as TuiEvent);
+        return;
+      }
       if (lastErr) throw lastErr;
 
       this.messages.push({ role: "assistant", content: fullText });

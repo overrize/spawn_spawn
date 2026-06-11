@@ -48,12 +48,14 @@ import { E2ESuite } from "./tests/e2e/runner/E2ESuite.js";
 import { TokenManager } from "./feishu/auth.js";
 import {
   sendTextMessage, addProcessingReaction, deleteProcessingReaction,
-  patchCardMessage, splitForStreaming, buildAnswerCard,
+  patchCardMessage,
 } from "./feishu/message.js";
 import { taskRegistry, cardIndex, pmCurrentTask } from "./feishu/session.js";
 import { PMBridgeBase } from "./feishu/pm-bridge.js";
 import { createTask, createCardRenderer } from "./feishu/card-renderer.js";
 import { startFeishuWebSocket } from "./feishu/websocket.js";
+import { FeishuReplyAggregator } from "./feishu/replyAggregator.js";
+import { globalBus } from "./bus/Bus.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -141,8 +143,9 @@ const pm = new ProcessManager();
 // Feishu: open_id → pmId (e.g. "feishu-a1b2c3d4")
 const feishuSessions = new Map<string, string>();
 let feishuConnected = false;
-// Per-PM message queue: messages that arrived while the agent was mid-turn
-const feishuMsgQueue = new Map<string, string[]>();
+// Per-PM message queue: messages that arrived while the agent was mid-turn.
+// Stores { text, messageId } so the dequeue path can anchor the reply card correctly.
+const feishuMsgQueue = new Map<string, Array<{ text: string; messageId: string }>>();
 // Set of PM IDs currently processing a turn (busy = don't inject new messages)
 const feishuBusy = new Set<string>();
 // Where to reply: stored per-PM so queued delivery can route correctly
@@ -153,6 +156,8 @@ const feishuBridge = new PMBridgeBase();
 // Dedup: skip already-processed message IDs and same-content bursts within 5s
 const feishuSeenMsgIds = new Set<string>();
 const feishuRecentTexts = new Map<string, { text: string; time: number }>(); // openId → last msg
+// Per-PM reply aggregator: coalesces N fallback fragments into one Feishu send per turn
+const feishuAggregators = new Map<string, FeishuReplyAggregator>(); // pmId → aggregator
 
 // Agents that were explicitly killed by the user (ESC) or by a parent agent.kill event.
 // Used to suppress child→parent notifications after a kill so the parent isn't restarted.
@@ -242,6 +247,7 @@ interface LeaderOpts {
   promptFile?: string;      // "pm" for root, "leader" for tech leads
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
   replyHook?: (text: string) => void; // called when message.to=user (Feishu bridge)
+  turnEndHook?: () => void;            // called when Feishu PM turn ends — flushes aggregator
   conversationMode?: boolean;          // if true: stop after each user reply, no auto-nudge
 }
 
@@ -249,6 +255,9 @@ function killAgent(id: string, _reason = "interrupted"): void {
   killedAgents.add(id);
   agents.get(id)?.kill?.(); // clears queue, pops unresponded user msg, aborts HTTP
   abortAgent(id);           // clears pending approvals in store
+  globalBus.unregisterAgent(id);
+  // Release feishu serial lock so the next message for this PM isn't queued forever.
+  feishuBusy.delete(id);
   // Do NOT set state:err — httpAgent emits state:idle after AbortError,
   // which returns the agent to ready state so the user can resend immediately.
 }
@@ -288,26 +297,21 @@ function connectFeishu(appId: string, appSecret: string): void {
     }
   };
 
-  // replyHook: PM calls this with the final answer text.
-  // We emit delta events (simulating streaming via splitForStreaming) then task_done.
-  // All card patching is handled by the subscribed card renderer via PatchScheduler.
+  // createAggregator: one aggregator per PM session.
+  // Its send function emits agent_done+task_done to the card renderer — one call per turn,
+  // regardless of how many message.to=user fragments the PM emitted.
+  const createAggregator = (pmIdLocal: string): FeishuReplyAggregator =>
+    new FeishuReplyAggregator(async (text: string) => {
+      const taskId = pmCurrentTask.get(pmIdLocal);
+      if (!taskId) return;
+      feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM', finalText: text });
+      feishuBridge.emit({ type: 'task_done', taskId, summary: text });
+    });
+
+  // replyHook: routes each PM reply fragment into the aggregator.
+  // The aggregator coalesces all fragments in the turn and sends once at turnEnd.
   const makeReplyHook = (pmIdLocal: string) => (replyText: string): void => {
-    const taskId = pmCurrentTask.get(pmIdLocal);
-    if (!taskId) return;
-    const segments = splitForStreaming(replyText);
-    const delayMs = segments.length > 12 ? 50 : 80;
-    let i = 0;
-    const emitNext = () => {
-      if (i < segments.length) {
-        feishuBridge.emit({ type: 'agent_delta', taskId, agentPath: 'PM', text: segments[i++]! });
-        if (i < segments.length) setTimeout(emitNext, delayMs);
-        else setTimeout(() => {
-          feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM' });
-          feishuBridge.emit({ type: 'task_done', taskId, summary: replyText });
-        }, delayMs);
-      }
-    };
-    emitNext();
+    feishuAggregators.get(pmIdLocal)?.onChunk(replyText);
   };
 
   startFeishuWebSocket({
@@ -318,6 +322,11 @@ function connectFeishu(appId: string, appSecret: string): void {
         text: `[飞书WS] ${msg}` } as TuiEvent);
     },
     onMessage: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => {
+      // ── Diagnostic: confirm onMessage was actually invoked (Step 1 probe) ──
+      process.stderr.write(
+        `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length}\n`,
+      );
+
       // Dedup: message-ID guard (Feishu can deliver same event twice)
       if (feishuSeenMsgIds.has(messageId)) {
         process.stderr.write(`[FeishuBridge] dup msgId=${messageId}, skipped\n`);
@@ -338,23 +347,51 @@ function connectFeishu(appId: string, appSecret: string): void {
       const rt = { replyId, replyType };
 
       if (!feishuSessions.has(openId)) {
-        // New session
+        // ── New session ──────────────────────────────────────────────────────
+        // Guard: if a PM with this deterministic ID already exists in agents
+        // (possible when feishuSessions was cleaned up but the agent survived),
+        // reconnect to it instead of trying to spawn a duplicate.
+        if (agents.has(pmId)) {
+          process.stderr.write(`[FeishuBridge] reconnect: PM ${pmId} alive but session mapping lost — re-wiring\n`);
+          feishuSessions.set(openId, pmId);
+          if (!feishuBusy.has(pmId)) {
+            feishuBusy.add(pmId);
+            feishuReplyTarget.set(pmId, rt);
+            startTask(pmId, rt, messageId);
+            userMessage(pmId, text);
+            killedAgents.delete(pmId);
+            agents.get(pmId)!.sendCommand({ type: "user.message", text });
+          } else {
+            const q = feishuMsgQueue.get(pmId) ?? [];
+            q.push({ text, messageId });
+            feishuMsgQueue.set(pmId, q);
+            process.stderr.write(`[FeishuBridge] reconnect-busy: queued msg for ${pmId}, queue len=${q.length}\n`);
+          }
+          return;
+        }
+        process.stderr.write(`[FeishuBridge] new session pmId=${pmId}\n`);
         feishuSessions.set(openId, pmId);
         feishuBusy.add(pmId);
         feishuReplyTarget.set(pmId, rt);
         startTask(pmId, rt, messageId);
         ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
           sub: "飞书会话", model: cfg.agents.leader.model });
+        feishuAggregators.set(pmId, createAggregator(pmId));
         userMessage(pmId, text);
         startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
-          conversationMode: true, replyHook: makeReplyHook(pmId) });
+          conversationMode: true, replyHook: makeReplyHook(pmId),
+          turnEndHook: () => feishuAggregators.get(pmId)?.onTurnEnd() });
       } else {
+        // ── Existing session ─────────────────────────────────────────────────
         const existingPmId = feishuSessions.get(openId)!;
         const a = agents.get(existingPmId);
+        process.stderr.write(
+          `[FeishuBridge] existing session pmId=${existingPmId} agentAlive=${a instanceof HttpConvAgent} busy=${feishuBusy.has(existingPmId)}\n`,
+        );
         if (a instanceof HttpConvAgent) {
           if (feishuBusy.has(existingPmId)) {
             const q = feishuMsgQueue.get(existingPmId) ?? [];
-            q.push(text);
+            q.push({ text, messageId });
             feishuMsgQueue.set(existingPmId, q);
             process.stderr.write(`[FeishuBridge] queued msg for ${existingPmId} (busy), queue len=${q.length}\n`);
           } else {
@@ -368,6 +405,8 @@ function connectFeishu(appId: string, appSecret: string): void {
           }
         } else {
           process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone, starting fresh session\n`);
+          feishuAggregators.get(existingPmId)?.reset();
+          feishuAggregators.delete(existingPmId);
           feishuSessions.delete(openId);
           setImmediate(() => {
             const newPmId = `feishu-${crypto.createHash("sha256").update(openId + Date.now()).digest("hex").slice(0, 8)}`;
@@ -376,9 +415,11 @@ function connectFeishu(appId: string, appSecret: string): void {
             startTask(newPmId, rt, messageId);
             ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
               sub: "飞书会话", model: cfg.agents.leader.model });
+            feishuAggregators.set(newPmId, createAggregator(newPmId));
             userMessage(newPmId, text);
             startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
-              conversationMode: true, replyHook: makeReplyHook(newPmId) });
+              conversationMode: true, replyHook: makeReplyHook(newPmId),
+              turnEndHook: () => feishuAggregators.get(newPmId)?.onTurnEnd() });
           });
         }
       }
@@ -393,7 +434,10 @@ function connectFeishu(appId: string, appSecret: string): void {
 
 function startLeaderAgent(opts: LeaderOpts): void {
   if (DEMO && !opts.parentId) { return runDemo(opts.firstMessage ?? "demo"); }
-  if (agents.has(opts.id)) return;
+  if (agents.has(opts.id)) {
+    process.stderr.write(`[startLeaderAgent] EARLY RETURN: agents already has "${opts.id}" — skipping spawn\n`);
+    return;
+  }
 
   const cfg = loadConfig();
   const model = opts.model ?? cfg.agents.leader.model ?? MODEL;
@@ -433,6 +477,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
     resumeFrom: opts.resumedMemoryId,
   });
   agents.set(opts.id, a);
+  globalBus.registerAgent(opts.id, a);
 
   // Secretary — always auto-created alongside this Leader, lifecycle-bound
   const existingMem = opts.resumedMemoryId ? loadMemory(opts.id) : null;
@@ -600,9 +645,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
       if (e.to === "user") {
         sentToUserThisTurn = true;
         if (opts.replyHook) {
-          // In conversationMode, only send to Feishu when there are no active children.
-          // Messages like "已派 tl-xx 去..." are intermediate status and should not reach the user.
-          // The final answer comes after all children finish.
+          // In conversationMode, suppress intermediate status messages while children are running
+          // ("已派 tl-xx 去…" etc.). Only route fragments to the aggregator when no active children.
           const activeChildrenNow = opts.conversationMode
             ? Array.from(getState().agents.values())
                 .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
@@ -618,10 +662,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
         reportedToParent = true;
       }
       if (e.to !== "user") {
-        const target = agents.get(e.to);
-        if (target instanceof HttpConvAgent) {
-          target.sendCommand({ type: "user.message", text: `[${opts.id}] ${e.text}` });
-        } else {
+        const routed = globalBus.routeMessage(opts.id, e.to, e.text);
+        if (!routed) {
           a.sendCommand({
             type: "user.message",
             text: `[系统] 消息无法送达：agent "${e.to}" 不存在或已结束。请重新 spawn，或 message→user 说明情况。`,
@@ -688,6 +730,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           });
         }
       }
+      globalBus.unregisterAgent(opts.id);
       deleteAgentMemory(opts.id);
     }
 
@@ -756,18 +799,25 @@ function startLeaderAgent(opts: LeaderOpts): void {
         } else if (sentToUserThisTurn && opts.conversationMode && !hasTodo && !hasActiveChildren) {
           // Conversation mode: replied to user, no pending todos, no in-flight children → done
           process.stderr.write(`[${opts.id}] idle → conversationMode replied+no-todos+no-children, done\n`);
+          opts.turnEndHook?.();
           feishuBusy.delete(opts.id);
-          const nextMsg = feishuMsgQueue.get(opts.id)?.shift();
-          if (nextMsg) {
+          const nextItem = feishuMsgQueue.get(opts.id)?.shift();
+          if (nextItem) {
+            const { text: nextMsg, messageId: nextMsgId } = nextItem;
             process.stderr.write(`[${opts.id}] delivering queued msg: "${nextMsg.slice(0, 60)}"\n`);
             feishuBusy.add(opts.id);
-            // Create a new task for this queued message turn
             const rt = feishuReplyTarget.get(opts.id);
             if (rt && feishuTokenManager) {
-              const task = createTask({ pmId: opts.id, ...rt, rootMessageId: '' }, feishuTokenManager);
+              // Use real nextMsgId so replyToMessageWithCard can anchor under the correct message
+              const task = createTask({ pmId: opts.id, ...rt, rootMessageId: nextMsgId }, feishuTokenManager);
               taskRegistry.set(task.taskId, task);
               pmCurrentTask.set(opts.id, task.taskId);
               feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🦞 PM' });
+              if (nextMsgId) {
+                addProcessingReaction(nextMsgId, feishuTokenManager)
+                  .then((rid) => { task.reactionId = rid; })
+                  .catch(() => {});
+              }
             }
             setImmediate(() => {
               userMessage(opts.id, nextMsg);
@@ -827,6 +877,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           // This happens when PM spawned a TL that died before completing, or exhausted nudges
           // without ever sending a user reply. Release the serial queue to prevent deadlock.
           process.stderr.write(`[${opts.id}] idle → actedThisTurn+conversationMode+no-branch-matched, releasing feishuBusy\n`);
+          opts.turnEndHook?.();
           feishuBusy.delete(opts.id);
         }
       } else if (!actedThisTurn && !gaveUp) {
@@ -986,6 +1037,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   const systemPrompt = buildSystemPrompt(e.role, e.child, e.goal);
   const a = new HttpConvAgent({ id: e.child, role: e.role, providerCfg: workerProviderCfg, systemPrompt });
   agents.set(e.child, a);
+  globalBus.registerAgent(e.child, a);
 
   // S2: Secretary for this Worker
   const dispatch = e.dispatch ?? {
@@ -1073,14 +1125,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       if (isWorkerToUser || isWorkerToWorker) {
         workerActedThisTurn = true; // prevent auto-continuation nudge loop
         // Auto-forward to parent so the report is never lost, then correct.
-        const parentAgent = agents.get(e.parent);
-        if (parentAgent instanceof HttpConvAgent) {
+        if (globalBus.hasAgent(e.parent)) {
           const redirected = { ...ev, to: e.parent } as typeof ev;
           applyEvent(redirected);      // store as worker→parent (visible in both panes)
-          parentAgent.sendCommand({
-            type: "user.message",
-            text: `[${e.child}→${e.parent}] ${ev.text}`,
-          });
+          globalBus.routeMessage(e.child, e.parent, ev.text, { prefix: `[${e.child}→${e.parent}]` });
         }
         if (!workerCorrectedThisTurn) {
           workerCorrectedThisTurn = true;
@@ -1122,13 +1170,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     // ── Forward worker→parent communication to the parent LLM ────────────────
     // Without this, leader spawns a worker but never hears back — hangs forever.
     if (ev.type === "message" && ev.to === e.parent) {
-      const parentAgent = agents.get(e.parent);
-      if (parentAgent instanceof HttpConvAgent) {
-        parentAgent.sendCommand({
-          type: "user.message",
-          text: `[${e.child}→${e.parent}] ${ev.text}`,
-        });
-      }
+      globalBus.routeMessage(e.child, e.parent, ev.text, { prefix: `[${e.child}→${e.parent}]` });
     }
     if (ev.type === "token.usage") {
       if (ev.ttft_ms !== undefined) wLastTtftMs = ev.ttft_ms;
@@ -1185,6 +1227,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           });
         }
       }
+      globalBus.unregisterAgent(e.child);
       deleteAgentMemory(e.child);
     }
     if (ev.type === "unit.handup") {

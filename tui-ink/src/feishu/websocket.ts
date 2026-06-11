@@ -29,7 +29,7 @@ export interface FeishuWsOptions {
   appId: string;
   appSecret: string;
   /** Called for each incoming im.message.receive_v1 event */
-  onMessage?: (openId: string, text: string, chatId: string, chatType: string) => void;
+  onMessage?: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => void;
   /** Called with status updates so the TUI can display them */
   onStatus?: (msg: string) => void;
 }
@@ -201,8 +201,9 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const chatId = msgEvent.message?.chat_id || openId;
         const chatType = msgEvent.message?.chat_type || 'p2p';
 
-        log(`msg from=...${openId.slice(-6)} chat_type=${chatType}: ${text.slice(0, 60)}`);
-        onMessage?.(openId, text, chatId, chatType);
+        const messageId = msgEvent.message?.message_id ?? '';
+        log(`msg from=...${openId.slice(-6)} chat_type=${chatType} len=${text.length} msgId=${messageId.slice(-8)}`);
+        onMessage?.(openId, text, chatId, chatType, messageId);
       } catch (err) {
         log(`message error: ${err instanceof Error ? err.message : String(err)}`);
       }

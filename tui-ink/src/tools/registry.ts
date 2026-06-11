@@ -4,6 +4,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as https from "node:https";
+import * as http from "node:http";
 import { execSync } from "node:child_process";
 
 // ── 类型 ──────────────────────────────────────────────────────────────────────
@@ -96,6 +98,8 @@ const Edit: ToolDef = {
 
 const BANNED_COMMANDS = new Set([
   "nc", "ncat", "netcat", "telnet", "ssh", "scp", "ftp", "rsync",
+  "curl", "wget", "http", "https",
+  "head",  // not available on Windows; output is already truncated by the tool
 ]);
 function isBanned(cmd: string): string | null {
   const first = cmd.trim().split(/[\s|;&<>]/)[0]?.split(/[/\\]/).pop() ?? "";
@@ -113,7 +117,12 @@ const Bash: ToolDef = {
     const timeout = typeof a.timeout === "number" ? a.timeout : 60_000;
     if (!rawCmd) return err("missing command");
     const banned = isBanned(rawCmd);
-    if (banned) return err(`Banned command: "${banned}". Use a Worker tool for network access instead.`);
+    if (banned) {
+      const hint = banned === "head"
+        ? `"head" is not available on Windows and output is already truncated. Remove the | head pipe.`
+        : `"${banned}" is banned. Use Read/Grep/Glob/LS tools instead of network commands.`;
+      return err(`Banned command: "${banned}". ${hint}`);
+    }
     // On Windows CMD defaults to the system OEM code page (GBK on Chinese Windows).
     // Prepend chcp 65001 so stdout/stderr are UTF-8 and we can decode correctly.
     const cmd = process.platform === "win32" ? `chcp 65001 >nul 2>nul & ${rawCmd}` : rawCmd;
@@ -205,6 +214,141 @@ const Think: ToolDef = {
   },
 };
 
+// ── HTTP helper ───────────────────────────────────────────────────────────────
+
+function fetchUrl(url: string, timeoutMs = 15_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith("https") ? https : http;
+    const req = mod.get(url, { headers: { "User-Agent": "spawn-agent/1.0" } }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        fetchUrl(res.headers.location, timeoutMs).then(resolve, reject);
+        return;
+      }
+      if (res.statusCode && res.statusCode >= 400) {
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      res.on("error", reject);
+    });
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
+    req.on("error", reject);
+  });
+}
+
+function stripHtml(raw: string): string {
+  return raw
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// ── WebFetch ──────────────────────────────────────────────────────────────────
+
+const WebFetch: ToolDef = {
+  name: "WebFetch",
+  description: "获取 URL 页面纯文本内容（自动去 HTML 标签，跟随跳转）",
+  argsSchema: "url(str), max_chars?(int default:6000)",
+  needsApproval: false,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const url = String(a.url ?? "");
+    if (!url) return err("missing url");
+    if (!/^https?:\/\//i.test(url)) return err("url must start with http:// or https://");
+    const maxChars = typeof a.max_chars === "number" ? Math.min(a.max_chars, 20_000) : 6_000;
+    try {
+      const raw = await fetchUrl(url);
+      const text = stripHtml(raw);
+      return ok(text.slice(0, maxChars) + (text.length > maxChars ? `\n\n[truncated ${text.length - maxChars} chars]` : ""));
+    } catch (e: any) {
+      return err(`WebFetch failed: ${e.message}`);
+    }
+  },
+};
+
+// ── WebSearch ─────────────────────────────────────────────────────────────────
+
+const WebSearch: ToolDef = {
+  name: "WebSearch",
+  description: "互联网搜索，返回标题+URL+摘要列表（需设置 BRAVE_SEARCH_API_KEY 或 SERPER_API_KEY）",
+  argsSchema: "query(str), count?(int default:5)",
+  needsApproval: false,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const query = String(a.query ?? "");
+    if (!query) return err("missing query");
+    const count = Math.min(typeof a.count === "number" ? a.count : 5, 10);
+
+    const braveKey = process.env.BRAVE_SEARCH_API_KEY;
+    const serperKey = process.env.SERPER_API_KEY;
+
+    if (braveKey) {
+      try {
+        const json = await new Promise<string>((resolve, reject) => {
+          const req = https.get(
+            `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`,
+            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey } },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on("data", (c: Buffer) => chunks.push(c));
+              res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+              res.on("error", reject);
+            },
+          );
+          req.setTimeout(10_000, () => { req.destroy(); reject(new Error("timeout")); });
+          req.on("error", reject);
+        });
+        const data = JSON.parse(json);
+        const results = (data.web?.results ?? []).slice(0, count);
+        if (!results.length) return ok("(no results)");
+        return ok(results.map((r: { title: string; url: string; description: string }, i: number) =>
+          `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description ?? ""}`,
+        ).join("\n\n"));
+      } catch (e: any) {
+        return err(`Brave Search failed: ${e.message}`);
+      }
+    }
+
+    if (serperKey) {
+      try {
+        const json = await new Promise<string>((resolve, reject) => {
+          const body = JSON.stringify({ q: query, num: count });
+          const req = https.request(
+            { hostname: "google.serper.dev", path: "/search", method: "POST",
+              headers: { "X-API-KEY": serperKey, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on("data", (c: Buffer) => chunks.push(c));
+              res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+              res.on("error", reject);
+            },
+          );
+          req.setTimeout(10_000, () => { req.destroy(); reject(new Error("timeout")); });
+          req.on("error", reject);
+          req.write(body);
+          req.end();
+        });
+        const data = JSON.parse(json);
+        const results = (data.organic ?? []).slice(0, count);
+        if (!results.length) return ok("(no results)");
+        return ok(results.map((r: { title: string; link: string; snippet: string }, i: number) =>
+          `${i + 1}. **${r.title}**\n   ${r.link}\n   ${r.snippet ?? ""}`,
+        ).join("\n\n"));
+      } catch (e: any) {
+        return err(`Serper Search failed: ${e.message}`);
+      }
+    }
+
+    return err("WebSearch requires BRAVE_SEARCH_API_KEY or SERPER_API_KEY in environment. Set one in .env file.");
+  },
+};
+
 // ── rg 缺失检测（导出供测试用）────────────────────────────────────────────────
 
 /** Returns ok:false "rg not found" result when e.code===ENOENT, null otherwise. */
@@ -218,7 +362,7 @@ export function rgNotFoundResult(e: unknown, tool: "Glob" | "Grep"): ToolResult 
 
 // ── 注册表（Map 保证 O(1) 查找）─────────────────────────────────────────────
 
-const ALL_TOOLS: ToolDef[] = [Read, Write, Edit, Bash, Grep, Glob, LS, Think];
+const ALL_TOOLS: ToolDef[] = [Read, Write, Edit, Bash, Grep, Glob, LS, Think, WebFetch, WebSearch];
 
 export const TOOL_REGISTRY = new Map<string, ToolDef>(
   ALL_TOOLS.map((t) => [t.name, t]),
@@ -287,7 +431,9 @@ export function buildToolSchemaBlock(role: AgentRole): string {
     Grep:  `{"pattern":"preCheckSpawn","path":"src","glob":"*.ts","context":3}`,
     Glob:  `{"pattern":"src/**/*.ts"}`,
     LS:    `{"path":"src"}`,
-    Think: `{"thought":"I should read the config first before deciding which files to edit"}`,
+    Think:     `{"thought":"I should read the config first before deciding which files to edit"}`,
+    WebFetch:  `{"url":"https://example.com/docs","max_chars":4000}`,
+    WebSearch: `{"query":"feishu bot nodejs SDK","count":5}`,
   };
   const examples = tools
     .filter((t) => EXAMPLES[t.name])
