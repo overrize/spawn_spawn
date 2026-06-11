@@ -153,8 +153,8 @@ const feishuReplyTarget = new Map<string, { replyId: string; replyType: 'open_id
 // Shared tokenManager + event bridge (set once in connectFeishu)
 let feishuTokenManager: TokenManager | null = null;
 const feishuBridge = new PMBridgeBase();
-// Dedup: skip already-processed message IDs and same-content bursts within 5s
-const feishuSeenMsgIds = new Set<string>();
+// Dedup: 5s same-content guard per user (catches rapid re-sends / UI double-taps)
+// Event-ID dedup is already handled at the WS layer (websocket.ts seenEventIds, 500-entry LRU)
 const feishuRecentTexts = new Map<string, { text: string; time: number }>(); // openId → last msg
 // Per-PM reply aggregator: coalesces N fallback fragments into one Feishu send per turn
 const feishuAggregators = new Map<string, FeishuReplyAggregator>(); // pmId → aggregator
@@ -327,12 +327,6 @@ function connectFeishu(appId: string, appSecret: string): void {
         `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length}\n`,
       );
 
-      // Dedup: message-ID guard (Feishu can deliver same event twice)
-      if (feishuSeenMsgIds.has(messageId)) {
-        process.stderr.write(`[FeishuBridge] dup msgId=${messageId}, skipped\n`);
-        return;
-      }
-      feishuSeenMsgIds.add(messageId);
       // Short-time same-content guard (5s window per user — catches rapid re-sends)
       const recentMsg = feishuRecentTexts.get(openId);
       if (recentMsg && recentMsg.text === text && Date.now() - recentMsg.time < 5000) {
