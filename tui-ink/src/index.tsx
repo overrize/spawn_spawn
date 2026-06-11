@@ -55,6 +55,7 @@ import { PMBridgeBase } from "./feishu/pm-bridge.js";
 import { createTask, createCardRenderer } from "./feishu/card-renderer.js";
 import { startFeishuWebSocket } from "./feishu/websocket.js";
 import { FeishuReplyAggregator } from "./feishu/replyAggregator.js";
+import { FeishuInputWindowManager } from "./feishu/input-window.js";
 import { globalBus } from "./bus/Bus.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
@@ -158,6 +159,8 @@ const feishuBridge = new PMBridgeBase();
 const feishuRecentTexts = new Map<string, { text: string; time: number }>(); // openId → last msg
 // Per-PM reply aggregator: coalesces N fallback fragments into one Feishu send per turn
 const feishuAggregators = new Map<string, FeishuReplyAggregator>(); // pmId → aggregator
+// Input merge window: silence gap (ms) before flushing buffered consecutive messages
+const FEISHU_INPUT_WINDOW_MS = 1500;
 
 // Agents that were explicitly killed by the user (ESC) or by a parent agent.kill event.
 // Used to suppress child→parent notifications after a kill so the parent isn't restarted.
@@ -314,6 +317,106 @@ function connectFeishu(appId: string, appSecret: string): void {
     feishuAggregators.get(pmIdLocal)?.onChunk(replyText);
   };
 
+  // dispatchMessage: inner function called by the input-window manager after the
+  // silence gap expires. anchorMsgId is the FIRST fragment's message ID and is
+  // used as the Feishu reaction / reply-card anchor for the whole merged turn.
+  let inputMgr!: FeishuInputWindowManager; // assigned below; safe in closures
+
+  const dispatchMessage = (
+    openId: string,
+    text: string,
+    anchorMsgId: string,
+    chatId: string,
+    chatType: string,
+  ): void => {
+    const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
+    const replyId   = chatType === 'group' ? chatId : openId;
+    const replyType: 'open_id' | 'chat_id' = chatType === 'group' ? 'chat_id' : 'open_id';
+    const rt = { replyId, replyType };
+
+    if (!feishuSessions.has(openId)) {
+      // ── New session ────────────────────────────────────────────────────────
+      // Guard: if the PM with this deterministic ID already exists (e.g. session
+      // map was cleared but agent survived), reconnect instead of re-spawning.
+      if (agents.has(pmId)) {
+        process.stderr.write(`[FeishuBridge] reconnect: PM ${pmId} alive but session lost — re-wiring\n`);
+        feishuSessions.set(openId, pmId);
+        if (!feishuBusy.has(pmId)) {
+          feishuBusy.add(pmId);
+          feishuReplyTarget.set(pmId, rt);
+          startTask(pmId, rt, anchorMsgId);
+          userMessage(pmId, text);
+          killedAgents.delete(pmId);
+          agents.get(pmId)!.sendCommand({ type: "user.message", text });
+        } else {
+          const q = feishuMsgQueue.get(pmId) ?? [];
+          q.push({ text, messageId: anchorMsgId });
+          feishuMsgQueue.set(pmId, q);
+          process.stderr.write(`[FeishuBridge] reconnect-busy: queued for ${pmId}, len=${q.length}\n`);
+        }
+        return;
+      }
+      process.stderr.write(`[FeishuBridge] new session pmId=${pmId}\n`);
+      feishuSessions.set(openId, pmId);
+      feishuBusy.add(pmId);
+      feishuReplyTarget.set(pmId, rt);
+      startTask(pmId, rt, anchorMsgId);
+      ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
+        sub: "飞书会话", model: cfg.agents.leader.model });
+      feishuAggregators.set(pmId, createAggregator(pmId));
+      userMessage(pmId, text);
+      startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
+        conversationMode: true, replyHook: makeReplyHook(pmId),
+        turnEndHook: () => feishuAggregators.get(pmId)?.onTurnEnd() });
+    } else {
+      // ── Existing session ───────────────────────────────────────────────────
+      const existingPmId = feishuSessions.get(openId)!;
+      const a = agents.get(existingPmId);
+      process.stderr.write(
+        `[FeishuBridge] existing pmId=${existingPmId} alive=${a instanceof HttpConvAgent} busy=${feishuBusy.has(existingPmId)}\n`,
+      );
+      if (a instanceof HttpConvAgent) {
+        if (feishuBusy.has(existingPmId)) {
+          const q = feishuMsgQueue.get(existingPmId) ?? [];
+          q.push({ text, messageId: anchorMsgId });
+          feishuMsgQueue.set(existingPmId, q);
+          process.stderr.write(`[FeishuBridge] queued for ${existingPmId} (busy), len=${q.length}\n`);
+        } else {
+          feishuBusy.add(existingPmId);
+          feishuReplyTarget.set(existingPmId, rt);
+          startTask(existingPmId, rt, anchorMsgId);
+          userMessage(existingPmId, text);
+          killedAgents.delete(existingPmId);
+          markPendingInput(existingPmId);
+          a.sendCommand({ type: "user.message", text });
+        }
+      } else {
+        process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone, starting fresh\n`);
+        feishuAggregators.get(existingPmId)?.reset();
+        feishuAggregators.delete(existingPmId);
+        feishuSessions.delete(openId);
+        inputMgr.clear(openId); // discard any stale pending window for this user
+        setImmediate(() => {
+          const newPmId = `feishu-${crypto.createHash("sha256").update(openId + Date.now()).digest("hex").slice(0, 8)}`;
+          feishuSessions.set(openId, newPmId);
+          feishuReplyTarget.set(newPmId, rt);
+          startTask(newPmId, rt, anchorMsgId);
+          ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
+            sub: "飞书会话", model: cfg.agents.leader.model });
+          feishuAggregators.set(newPmId, createAggregator(newPmId));
+          userMessage(newPmId, text);
+          startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
+            conversationMode: true, replyHook: makeReplyHook(newPmId),
+            turnEndHook: () => feishuAggregators.get(newPmId)?.onTurnEnd() });
+        });
+      }
+    }
+  };
+
+  // Input-merge window: buffers rapid consecutive messages from the same user
+  // and flushes them as one combined turn after FEISHU_INPUT_WINDOW_MS of silence.
+  inputMgr = new FeishuInputWindowManager(FEISHU_INPUT_WINDOW_MS, dispatchMessage);
+
   startFeishuWebSocket({
     appId,
     appSecret,
@@ -322,12 +425,12 @@ function connectFeishu(appId: string, appSecret: string): void {
         text: `[飞书WS] ${msg}` } as TuiEvent);
     },
     onMessage: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => {
-      // ── Diagnostic: confirm onMessage was actually invoked (Step 1 probe) ──
       process.stderr.write(
         `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length}\n`,
       );
 
-      // Short-time same-content guard (5s window per user — catches rapid re-sends)
+      // Short-time same-content guard: reject exact duplicate text within 5s per user.
+      // (Event-ID dedup is already handled upstream in websocket.ts seenEventIds.)
       const recentMsg = feishuRecentTexts.get(openId);
       if (recentMsg && recentMsg.text === text && Date.now() - recentMsg.time < 5000) {
         process.stderr.write(`[FeishuBridge] dup content from ${openId} within 5s, skipped\n`);
@@ -335,88 +438,8 @@ function connectFeishu(appId: string, appSecret: string): void {
       }
       feishuRecentTexts.set(openId, { text, time: Date.now() });
 
-      const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
-      const replyId   = chatType === 'group' ? chatId : openId;
-      const replyType: 'open_id' | 'chat_id' = chatType === 'group' ? 'chat_id' : 'open_id';
-      const rt = { replyId, replyType };
-
-      if (!feishuSessions.has(openId)) {
-        // ── New session ──────────────────────────────────────────────────────
-        // Guard: if a PM with this deterministic ID already exists in agents
-        // (possible when feishuSessions was cleaned up but the agent survived),
-        // reconnect to it instead of trying to spawn a duplicate.
-        if (agents.has(pmId)) {
-          process.stderr.write(`[FeishuBridge] reconnect: PM ${pmId} alive but session mapping lost — re-wiring\n`);
-          feishuSessions.set(openId, pmId);
-          if (!feishuBusy.has(pmId)) {
-            feishuBusy.add(pmId);
-            feishuReplyTarget.set(pmId, rt);
-            startTask(pmId, rt, messageId);
-            userMessage(pmId, text);
-            killedAgents.delete(pmId);
-            agents.get(pmId)!.sendCommand({ type: "user.message", text });
-          } else {
-            const q = feishuMsgQueue.get(pmId) ?? [];
-            q.push({ text, messageId });
-            feishuMsgQueue.set(pmId, q);
-            process.stderr.write(`[FeishuBridge] reconnect-busy: queued msg for ${pmId}, queue len=${q.length}\n`);
-          }
-          return;
-        }
-        process.stderr.write(`[FeishuBridge] new session pmId=${pmId}\n`);
-        feishuSessions.set(openId, pmId);
-        feishuBusy.add(pmId);
-        feishuReplyTarget.set(pmId, rt);
-        startTask(pmId, rt, messageId);
-        ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
-          sub: "飞书会话", model: cfg.agents.leader.model });
-        feishuAggregators.set(pmId, createAggregator(pmId));
-        userMessage(pmId, text);
-        startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
-          conversationMode: true, replyHook: makeReplyHook(pmId),
-          turnEndHook: () => feishuAggregators.get(pmId)?.onTurnEnd() });
-      } else {
-        // ── Existing session ─────────────────────────────────────────────────
-        const existingPmId = feishuSessions.get(openId)!;
-        const a = agents.get(existingPmId);
-        process.stderr.write(
-          `[FeishuBridge] existing session pmId=${existingPmId} agentAlive=${a instanceof HttpConvAgent} busy=${feishuBusy.has(existingPmId)}\n`,
-        );
-        if (a instanceof HttpConvAgent) {
-          if (feishuBusy.has(existingPmId)) {
-            const q = feishuMsgQueue.get(existingPmId) ?? [];
-            q.push({ text, messageId });
-            feishuMsgQueue.set(existingPmId, q);
-            process.stderr.write(`[FeishuBridge] queued msg for ${existingPmId} (busy), queue len=${q.length}\n`);
-          } else {
-            feishuBusy.add(existingPmId);
-            feishuReplyTarget.set(existingPmId, rt);
-            startTask(existingPmId, rt, messageId);
-            userMessage(existingPmId, text);
-            killedAgents.delete(existingPmId);
-            markPendingInput(existingPmId);
-            a.sendCommand({ type: "user.message", text });
-          }
-        } else {
-          process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone, starting fresh session\n`);
-          feishuAggregators.get(existingPmId)?.reset();
-          feishuAggregators.delete(existingPmId);
-          feishuSessions.delete(openId);
-          setImmediate(() => {
-            const newPmId = `feishu-${crypto.createHash("sha256").update(openId + Date.now()).digest("hex").slice(0, 8)}`;
-            feishuSessions.set(openId, newPmId);
-            feishuReplyTarget.set(newPmId, rt);
-            startTask(newPmId, rt, messageId);
-            ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
-              sub: "飞书会话", model: cfg.agents.leader.model });
-            feishuAggregators.set(newPmId, createAggregator(newPmId));
-            userMessage(newPmId, text);
-            startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
-              conversationMode: true, replyHook: makeReplyHook(newPmId),
-              turnEndHook: () => feishuAggregators.get(newPmId)?.onTurnEnd() });
-          });
-        }
-      }
+      // Feed into merge window — timer fires dispatchMessage after silence gap.
+      inputMgr.feed(openId, text, messageId, chatId, chatType);
     },
   }).catch((err: unknown) => {
     feishuConnected = false; // allow retry after failure
