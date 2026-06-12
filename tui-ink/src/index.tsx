@@ -166,6 +166,10 @@ const FEISHU_INPUT_WINDOW_MS = 1500;
 const feishuForks = new Map<string, Set<string>>();
 // feishuPendingQueue: messages that arrived when all concurrent slots were full
 const feishuPendingQueue = new Map<string, Array<{ text: string; anchorMsgId: string; chatId: string; chatType: string }>>();
+// feishuCheckpoints: pmId → last confirmed-clean message history (captured after each base-PM turn).
+// Fork tasks use this snapshot instead of live messages to prevent cross-contamination with
+// in-flight sibling turns (Bug 1 fix).
+const feishuCheckpoints = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
 // max total concurrent tasks per openId (base PM + forks)
 const FEISHU_MAX_CONCURRENT = 3;
 
@@ -370,11 +374,13 @@ function connectFeishu(appId: string, appSecret: string): void {
     const forkId = `feishu-fork-${task.taskId.slice(-8)}`;
     pmCurrentTask.set(forkId, task.taskId);
 
-    // Snapshot: compact to 40K chars so N forks don't balloon context × N.
+    // Snapshot: use the last confirmed-clean checkpoint (captured after the previous base-PM
+    // turn completed) rather than live getMessages(). The live array is dirty — it already
+    // contains the in-flight Q that base PM is currently processing, which would make the
+    // fork repeat the sibling answer before answering its own question (Bug 1 fix).
     const sessionPm = agents.get(sessionPmId);
-    const snapshot = sessionPm instanceof HttpConvAgent
-      ? HttpConvAgent.compactHistory(sessionPm.getMessages(), 40_000)
-      : [];
+    const rawCheckpoint = feishuCheckpoints.get(sessionPmId) ?? [];
+    const snapshot = HttpConvAgent.compactHistory(rawCheckpoint, 40_000);
     const sharedSysPrompt = sessionPm instanceof HttpConvAgent
       ? sessionPm.getSystemPrompt()
       : undefined;
@@ -477,6 +483,14 @@ function connectFeishu(appId: string, appSecret: string): void {
       startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
         conversationMode: true, replyHook: makeReplyHook(pmId),
         turnEndHook: () => {
+          // Capture clean checkpoint BEFORE releasing busy flag so forks never see
+          // in-flight turns (Bug 1 fix). Pre-delete also fixes drain routing: without
+          // this, drainPendingQueue fires while basePmId is still in feishuBusy
+          // (turnEndHook fires before feishuBusy.delete at line 955), causing pending
+          // items to be forked instead of routed directly to the now-idle base PM.
+          feishuBusy.delete(pmId);
+          const bpm = agents.get(pmId);
+          if (bpm instanceof HttpConvAgent) feishuCheckpoints.set(pmId, bpm.getMessages());
           feishuAggregators.get(pmId)?.onTurnEnd();
           drainPendingQueue(openId);
         } });
@@ -530,6 +544,9 @@ function connectFeishu(appId: string, appSecret: string): void {
           startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
             conversationMode: true, replyHook: makeReplyHook(newPmId),
             turnEndHook: () => {
+              feishuBusy.delete(newPmId);
+              const bpm2 = agents.get(newPmId);
+              if (bpm2 instanceof HttpConvAgent) feishuCheckpoints.set(newPmId, bpm2.getMessages());
               feishuAggregators.get(newPmId)?.onTurnEnd();
               drainPendingQueue(openId);
             } });
