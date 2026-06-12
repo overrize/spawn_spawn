@@ -161,6 +161,13 @@ const feishuRecentTexts = new Map<string, { text: string; time: number }>(); // 
 const feishuAggregators = new Map<string, FeishuReplyAggregator>(); // pmId → aggregator
 // Input merge window: silence gap (ms) before flushing buffered consecutive messages
 const FEISHU_INPUT_WINDOW_MS = 1500;
+// Phase B: concurrent task tracking
+// feishuForks: openId → Set of forked PM' ids currently running (excludes the base session PM)
+const feishuForks = new Map<string, Set<string>>();
+// feishuPendingQueue: messages that arrived when all concurrent slots were full
+const feishuPendingQueue = new Map<string, Array<{ text: string; anchorMsgId: string; chatId: string; chatType: string }>>();
+// max total concurrent tasks per openId (base PM + forks)
+const FEISHU_MAX_CONCURRENT = 3;
 
 // Agents that were explicitly killed by the user (ESC) or by a parent agent.kill event.
 // Used to suppress child→parent notifications after a kill so the parent isn't restarted.
@@ -252,6 +259,10 @@ interface LeaderOpts {
   replyHook?: (text: string) => void; // called when message.to=user (Feishu bridge)
   turnEndHook?: () => void;            // called when Feishu PM turn ends — flushes aggregator
   conversationMode?: boolean;          // if true: stop after each user reply, no auto-nudge
+  // Phase B: forked task options
+  sharedSystemPrompt?: string;         // exact system prompt from base PM (enables cache reuse)
+  initialMessages?: Array<{ role: "user" | "assistant"; content: string }>; // history snapshot
+  isForkedTask?: boolean;              // skip secretary/memory; lightweight single-task mode
 }
 
 function killAgent(id: string, _reason = "interrupted"): void {
@@ -261,6 +272,10 @@ function killAgent(id: string, _reason = "interrupted"): void {
   globalBus.unregisterAgent(id);
   // Release feishu serial lock so the next message for this PM isn't queued forever.
   feishuBusy.delete(id);
+  // Phase B: remove from fork tracking so capacity count stays correct.
+  for (const pmIds of feishuForks.values()) {
+    if (pmIds.has(id)) { pmIds.delete(id); break; }
+  }
   // Do NOT set state:err — httpAgent emits state:idle after AbortError,
   // which returns the agent to ready state so the user can resend immediately.
 }
@@ -317,6 +332,100 @@ function connectFeishu(appId: string, appSecret: string): void {
     feishuAggregators.get(pmIdLocal)?.onChunk(replyText);
   };
 
+  // drainPendingQueue: when a task slot frees up, try to start the oldest pending message.
+  const drainPendingQueue = (openId: string): void => {
+    const pending = feishuPendingQueue.get(openId);
+    if (!pending || pending.length === 0) return;
+    const forkCount = feishuForks.get(openId)?.size ?? 0;
+    const baseBusy = feishuBusy.has(
+      `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`
+    );
+    const totalRunning = (baseBusy ? 1 : 0) + forkCount;
+    if (totalRunning >= FEISHU_MAX_CONCURRENT) return;
+    const next = pending.shift();
+    if (!next) return;
+    process.stderr.write(`[FeishuConcurrent] draining pending for openId=...${openId.slice(-6)}, remaining=${pending.length}\n`);
+    dispatchMessage(openId, next.text, next.anchorMsgId, next.chatId, next.chatType);
+  };
+
+  // startConcurrentTask: fork a new lightweight PM' for a concurrent task.
+  // The fork shares the base PM's exact systemPrompt (Anthropic cache hit) and
+  // gets a compacted snapshot of the base PM's current message history.
+  const startConcurrentTask = (
+    openId: string,
+    sessionPmId: string,
+    text: string,
+    anchorMsgId: string,
+    chatId: string,
+    chatType: string,
+  ): void => {
+    const replyId   = chatType === 'group' ? chatId : openId;
+    const replyType: 'open_id' | 'chat_id' = chatType === 'group' ? 'chat_id' : 'open_id';
+    const rt = { replyId, replyType };
+
+    // Create a Feishu task for this fork (anchored at anchorMsgId, NOT sessionPmId's current task).
+    const task = createTask({ pmId: sessionPmId, ...rt, rootMessageId: anchorMsgId }, tokenManager);
+    taskRegistry.set(task.taskId, task);
+
+    const forkId = `feishu-fork-${task.taskId.slice(-8)}`;
+    pmCurrentTask.set(forkId, task.taskId);
+
+    // Snapshot: compact to 40K chars so N forks don't balloon context × N.
+    const sessionPm = agents.get(sessionPmId);
+    const snapshot = sessionPm instanceof HttpConvAgent
+      ? HttpConvAgent.compactHistory(sessionPm.getMessages(), 40_000)
+      : [];
+    const sharedSysPrompt = sessionPm instanceof HttpConvAgent
+      ? sessionPm.getSystemPrompt()
+      : undefined;
+
+    // Register fork in tracking set.
+    const forks = feishuForks.get(openId) ?? new Set<string>();
+    forks.add(forkId);
+    feishuForks.set(openId, forks);
+
+    feishuBusy.add(forkId);
+    feishuAggregators.set(forkId, createAggregator(forkId));
+    ensureAgent({
+      id: forkId,
+      name: `飞书:${openId.slice(-4)}↳${task.taskId.slice(-4)}`,
+      role: "Leader",
+      state: "idle",
+      sub: "并发任务",
+      model: cfg.agents.leader.model,
+    });
+
+    feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🔀 PM fork' });
+    if (anchorMsgId) {
+      addProcessingReaction(anchorMsgId, tokenManager)
+        .then((rid) => { task.reactionId = rid; })
+        .catch(() => {});
+    }
+
+    userMessage(forkId, text);
+    startLeaderAgent({
+      id: forkId,
+      promptFile: "pm",
+      conversationMode: true,
+      isForkedTask: true,
+      sharedSystemPrompt: sharedSysPrompt,
+      initialMessages: snapshot,
+      firstMessage: text,
+      replyHook: makeReplyHook(forkId),
+      turnEndHook: () => {
+        feishuAggregators.get(forkId)?.onTurnEnd();
+        feishuBusy.delete(forkId);
+        feishuForks.get(openId)?.delete(forkId);
+        if (feishuForks.get(openId)?.size === 0) feishuForks.delete(openId);
+        drainPendingQueue(openId);
+      },
+    });
+    process.stderr.write(
+      `[FeishuConcurrent] forked ${forkId} for openId=...${openId.slice(-6)}` +
+      ` forks=${feishuForks.get(openId)?.size ?? 0}/${FEISHU_MAX_CONCURRENT - 1}\n`,
+    );
+  };
+
   // dispatchMessage: inner function called by the input-window manager after the
   // silence gap expires. anchorMsgId is the FIRST fragment's message ID and is
   // used as the Feishu reaction / reply-card anchor for the whole merged turn.
@@ -367,7 +476,10 @@ function connectFeishu(appId: string, appSecret: string): void {
       userMessage(pmId, text);
       startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
         conversationMode: true, replyHook: makeReplyHook(pmId),
-        turnEndHook: () => feishuAggregators.get(pmId)?.onTurnEnd() });
+        turnEndHook: () => {
+          feishuAggregators.get(pmId)?.onTurnEnd();
+          drainPendingQueue(openId);
+        } });
     } else {
       // ── Existing session ───────────────────────────────────────────────────
       const existingPmId = feishuSessions.get(openId)!;
@@ -377,10 +489,20 @@ function connectFeishu(appId: string, appSecret: string): void {
       );
       if (a instanceof HttpConvAgent) {
         if (feishuBusy.has(existingPmId)) {
-          const q = feishuMsgQueue.get(existingPmId) ?? [];
-          q.push({ text, messageId: anchorMsgId });
-          feishuMsgQueue.set(existingPmId, q);
-          process.stderr.write(`[FeishuBridge] queued for ${existingPmId} (busy), len=${q.length}\n`);
+          // Phase B: base PM is busy → try to fork a concurrent task instead of queuing.
+          const forkCount = feishuForks.get(openId)?.size ?? 0;
+          if (forkCount < FEISHU_MAX_CONCURRENT - 1) {
+            startConcurrentTask(openId, existingPmId, text, anchorMsgId, chatId, chatType);
+          } else {
+            // All slots full → overflow queue + ⏳ reaction so user sees acknowledgement.
+            const pending = feishuPendingQueue.get(openId) ?? [];
+            pending.push({ text, anchorMsgId, chatId, chatType });
+            feishuPendingQueue.set(openId, pending);
+            process.stderr.write(`[FeishuConcurrent] at capacity (${forkCount + 1}/${FEISHU_MAX_CONCURRENT}), queued for openId=...${openId.slice(-6)}\n`);
+            if (anchorMsgId && feishuTokenManager) {
+              addProcessingReaction(anchorMsgId, feishuTokenManager).catch(() => {});
+            }
+          }
         } else {
           feishuBusy.add(existingPmId);
           feishuReplyTarget.set(existingPmId, rt);
@@ -407,7 +529,10 @@ function connectFeishu(appId: string, appSecret: string): void {
           userMessage(newPmId, text);
           startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
             conversationMode: true, replyHook: makeReplyHook(newPmId),
-            turnEndHook: () => feishuAggregators.get(newPmId)?.onTurnEnd() });
+            turnEndHook: () => {
+              feishuAggregators.get(newPmId)?.onTurnEnd();
+              drainPendingQueue(openId);
+            } });
         });
       }
     }
@@ -485,35 +610,41 @@ function startLeaderAgent(opts: LeaderOpts): void {
     return chain;
   })();
 
-  const systemPrompt = buildSystemPrompt("Leader", opts.id, opts.goal, opts.resumedMemoryId, promptFile);
+  // Phase B: forked tasks share the exact system prompt from the base PM for Anthropic cache reuse.
+  const systemPrompt = opts.sharedSystemPrompt
+    ?? buildSystemPrompt("Leader", opts.id, opts.goal, opts.resumedMemoryId, promptFile);
   const a = new HttpConvAgent({
     id: opts.id,
     role: "Leader",
     providerCfg: { ...cfg.agents.leader, model },
     systemPrompt,
-    resumeFrom: opts.resumedMemoryId,
+    resumeFrom: opts.isForkedTask ? undefined : opts.resumedMemoryId,
+    initialMessages: opts.initialMessages,
   });
   agents.set(opts.id, a);
   globalBus.registerAgent(opts.id, a);
 
-  // Secretary — always auto-created alongside this Leader, lifecycle-bound
-  const existingMem = opts.resumedMemoryId ? loadMemory(opts.id) : null;
-  const mem = existingMem ?? createMemory({
-    agentId: opts.id,
-    agentType: isRoot ? "PM" : "LEADER",
-    parentChain,
-    depth,
-    model,
-    roleName: isRoot ? "PM" : "Leader",
-    dispatch: opts.dispatch ?? {
-      background: opts.goal ?? (isRoot ? "Root PM orchestrator" : "Leader orchestrator"),
-      constraints: [],
-      acceptance_criteria: [],
-      stop_conditions: ["user.quit"],
-    },
-  });
-  const secretary = new SecretaryProxy(mem);
-  secretaries.set(opts.id, secretary);
+  // Secretary — skipped for forked tasks (single-use, no memory persistence needed).
+  const secretary: SecretaryProxy | null = opts.isForkedTask ? null : (() => {
+    const existingMem = opts.resumedMemoryId ? loadMemory(opts.id) : null;
+    const mem = existingMem ?? createMemory({
+      agentId: opts.id,
+      agentType: isRoot ? "PM" : "LEADER",
+      parentChain,
+      depth,
+      model,
+      roleName: isRoot ? "PM" : "Leader",
+      dispatch: opts.dispatch ?? {
+        background: opts.goal ?? (isRoot ? "Root PM orchestrator" : "Leader orchestrator"),
+        constraints: [],
+        acceptance_criteria: [],
+        stop_conditions: ["user.quit"],
+      },
+    });
+    const sec = new SecretaryProxy(mem);
+    secretaries.set(opts.id, sec);
+    return sec;
+  })();
 
   // Per-turn state
   const toolQueue: Array<Extract<TuiEvent, { type: "tool.call" }>> = [];
@@ -558,14 +689,14 @@ function startLeaderAgent(opts: LeaderOpts): void {
       actedThisTurn = true;
       applyEvent(normalized);
       pm.observe(normalized);
-      secretary.observe(normalized);
+      secretary?.observe(normalized);
       process.stderr.write(`[${opts.id}] spawn child=${normalized.child} role=${normalized.role ?? "?"} goal="${(normalized.goal ?? "").slice(0, 80)}"\n`);
       startWorker(normalized); // foreground tracking registered inside startWorker for both Leader+Worker
       return;
     }
 
     if (e.type === "agent.error") {
-      applyEvent(e); pm.observe(e); secretary.observe(e);
+      applyEvent(e); pm.observe(e); secretary?.observe(e);
       return;
     }
 
@@ -603,7 +734,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     applyEvent(e);
     pm.observe(e);
-    secretary.observe(e);
+    secretary?.observe(e);
 
     // ── per-event debug logging ──────────────────────────────────────────────
     if (e.type === "agent.state") {
@@ -696,35 +827,39 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "agent.done") {
       actedThisTurn = true;
-      const tok = getState().tokensByAgent.get(opts.id);
-      const rejects = (getState().messagesByAgent.get(opts.id) ?? [])
-        .filter((m) => m.kind === "tool_result" && m.text.startsWith("Tool rejected")).length;
-      const score = Math.max(0, Math.min(100,
-        100
-        - qualNudges * 8
-        - (gaveUp ? 25 : 0)
-        - (qualHandup ? 15 : 0)
-        - (e.success ? 0 : 20)
-        - rejects * 10
-        + (e.evidence?.length ? 10 : 0)
-        + (qualNudges === 0 ? 10 : 0)
-      ));
-      const sessionHash = mem.session_hash ?? "?";
-      process.stderr.write(
-        `[quality] ${opts.id} session=${sessionHash} score=${score}` +
-        ` success=${e.success} turns=${qualTurns} nudges=${qualNudges}` +
-        ` handup=${qualHandup} gaveUp=${gaveUp} rejects=${rejects}` +
-        ` tokens_in=${tok?.prompt ?? 0} tokens_out=${tok?.completion ?? 0}` +
-        ` evidence=${e.evidence?.length ?? 0}` +
-        ` latency=${opts.id}:${lastTtftMs}/${lastTotalMs}\n`,
-      );
-      // Only ask for human rating on root PM sessions (not every sub-leader)
-      if (!opts.parentId) setPendingRating(opts.id, sessionHash);
+      if (!opts.isForkedTask) {
+        const tok = getState().tokensByAgent.get(opts.id);
+        const rejects = (getState().messagesByAgent.get(opts.id) ?? [])
+          .filter((m) => m.kind === "tool_result" && m.text.startsWith("Tool rejected")).length;
+        const score = Math.max(0, Math.min(100,
+          100
+          - qualNudges * 8
+          - (gaveUp ? 25 : 0)
+          - (qualHandup ? 15 : 0)
+          - (e.success ? 0 : 20)
+          - rejects * 10
+          + (e.evidence?.length ? 10 : 0)
+          + (qualNudges === 0 ? 10 : 0)
+        ));
+        const sessionHash = secretary?.getMemory()?.session_hash ?? "?";
+        process.stderr.write(
+          `[quality] ${opts.id} session=${sessionHash} score=${score}` +
+          ` success=${e.success} turns=${qualTurns} nudges=${qualNudges}` +
+          ` handup=${qualHandup} gaveUp=${gaveUp} rejects=${rejects}` +
+          ` tokens_in=${tok?.prompt ?? 0} tokens_out=${tok?.completion ?? 0}` +
+          ` evidence=${e.evidence?.length ?? 0}` +
+          ` latency=${opts.id}:${lastTtftMs}/${lastTotalMs}\n`,
+        );
+        if (!opts.parentId) setPendingRating(opts.id, sessionHash);
+      } else {
+        // Forked task done — clean up bus registration (no memory to delete).
+        globalBus.unregisterAgent(opts.id);
+      }
     }
     // Tech Lead completion — notify parent PM + ingest memory upward
     if (e.type === "agent.done" && opts.parentId) {
       const pmSec = secretaries.get("pm");
-      if (pmSec) pmSec.ingestChildMemory(secretary.getMemory() as any);
+      if (pmSec && secretary) pmSec.ingestChildMemory(secretary.getMemory() as any);
       // Resolve foreground tracking so parent's pm.getForegroundChildren() reflects completion
       pm.completeForeground(opts.id, { success: e.success, reason: e.reason, evidence: e.evidence });
       const parentAgent = agents.get(opts.parentId);
@@ -748,7 +883,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
         }
       }
       globalBus.unregisterAgent(opts.id);
-      deleteAgentMemory(opts.id);
+      if (!opts.isForkedTask) deleteAgentMemory(opts.id);
     }
 
     if (e.type === "unit.handup") qualHandup = true;
@@ -949,10 +1084,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
     }
   });
 
-  secretary.on("event", (e: TuiEvent) => applyEvent(e));
+  secretary?.on("event", (e: TuiEvent) => applyEvent(e));
 
   a.on("_raw_message", (m: { role: "user" | "assistant"; content: string }) => {
-    secretary.observeMessage(m.role, m.content);
+    secretary?.observeMessage(m.role, m.content);
   });
 
   // Set depth in store for non-root leaders

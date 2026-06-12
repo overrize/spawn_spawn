@@ -226,6 +226,8 @@ export class HttpConvAgent extends EventEmitter {
     systemPrompt?: string;
     resumeFrom?: string; // S3: agentId to resume messages from
     dispatch?: DispatchSpec; // S1: for Fork cache prefix reuse
+    /** Pre-built history snapshot for forked PM' instances (takes priority over resumeFrom). */
+    initialMessages?: Array<{ role: "user" | "assistant"; content: string }>;
   }) {
     super();
     // 如果 dispatch 携带 cachePrefix，初始化 _cachePrefix
@@ -234,8 +236,10 @@ export class HttpConvAgent extends EventEmitter {
       this._cachePrefixSerialized = serializeCachePrefix(cfg.dispatch.cachePrefix);
       this._cacheDispatch = cfg.dispatch;
     }
-    // S3: load conversation history for resume, with token-budget guard
-    if (cfg.resumeFrom) {
+    // Fork snapshot: directly inject history, skip file-based resume.
+    if (cfg.initialMessages?.length) {
+      this.messages = cfg.initialMessages.slice();
+    } else if (cfg.resumeFrom) {
       const RESUME_CHAR_BUDGET = 60_000; // ≈ 15K tokens — leaves room for system prompt + new response
       const raw = loadMessages(cfg.resumeFrom);
       const all = raw.map((m) => ({ role: m.role, content: m.content }));
@@ -294,6 +298,38 @@ export class HttpConvAgent extends EventEmitter {
    */
   getCachePrefixSerialized(): string {
     return this._cachePrefixSerialized;
+  }
+
+  // ─── Fork / compaction helpers ─────────────────────────────────────────────
+
+  /** Returns the system prompt string (used by forked PM' to share exact cache key). */
+  getSystemPrompt(): string | undefined {
+    return this.cfg.systemPrompt;
+  }
+
+  /** Returns a defensive copy of the in-memory message history. */
+  getMessages(): Array<{ role: "user" | "assistant"; content: string }> {
+    return this.messages.slice();
+  }
+
+  /**
+   * Trim a message array to fit within maxChars total content length.
+   * Keeps the first message (initial task context) and always the last 4.
+   * Exported static so index.tsx can call it without an agent instance.
+   */
+  static compactHistory(
+    messages: Array<{ role: "user" | "assistant"; content: string }>,
+    maxChars: number,
+  ): Array<{ role: "user" | "assistant"; content: string }> {
+    let total = messages.reduce((s, m) => s + m.content.length, 0);
+    if (total <= maxChars) return messages.slice();
+    const result = [...messages];
+    let i = 1; // keep index 0 (initial context)
+    while (total > maxChars && i < result.length - 4) {
+      total -= result[i]!.content.length;
+      result.splice(i, 1);
+    }
+    return result;
   }
 
   sendCommand(cmd: AgentCommand): void {
