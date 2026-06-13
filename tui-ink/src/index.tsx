@@ -361,6 +361,25 @@ function connectFeishu(appId: string, appSecret: string): void {
     dispatchMessage(openId, next.text, next.anchorMsgId, next.chatId, next.chatType);
   };
 
+  // flushForkBufferToBase: call ONLY when base PM is idle (about to receive a new message).
+  // Injects all completed fork Q/As from the buffer into base PM's live messages[] and
+  // updates the checkpoint so the new message's context contains full fork history.
+  const flushForkBufferToBase = (openId: string, pmId: string): void => {
+    const buf = feishuForkBuffer.get(openId);
+    if (!buf || buf.length === 0) return;
+    const bpm = agents.get(pmId);
+    if (!(bpm instanceof HttpConvAgent)) return;
+    buf.sort((a, b) => a.seq - b.seq);
+    const forkEntries = buf.flatMap(c => ([
+      { role: "user"      as const, content: c.question },
+      { role: "assistant" as const, content: c.answer   },
+    ]));
+    bpm.appendHistory(forkEntries);
+    feishuCheckpoints.set(pmId, bpm.getMessages());
+    feishuForkBuffer.delete(openId);
+    process.stderr.write(`[FeishuConcurrent] pre-dispatch flush: ${buf.length} fork Q/As → ${pmId}\n`);
+  };
+
   // startConcurrentTask: fork a new lightweight PM' for a concurrent task.
   // The fork shares the base PM's exact systemPrompt (Anthropic cache hit) and
   // gets a compacted snapshot of the base PM's current message history.
@@ -400,7 +419,18 @@ function connectFeishu(appId: string, appSecret: string): void {
     // fork repeat the sibling answer before answering its own question (Bug 1 fix).
     const sessionPm = agents.get(sessionPmId);
     const rawCheckpoint = feishuCheckpoints.get(sessionPmId) ?? [];
-    const snapshot = HttpConvAgent.compactHistory(rawCheckpoint, 40_000);
+    // Phase E: peek at any fork Q/As buffered but not yet merged into checkpoint.
+    // Buffer is NOT consumed — base-idle flush or turnEnd will do that.
+    // This ensures a new fork sees all completed concurrent work as context.
+    const bufPeek = feishuForkBuffer.get(openId);
+    const pendingForkMsgs: Array<{ role: "user" | "assistant"; content: string }> =
+      bufPeek && bufPeek.length > 0
+        ? [...bufPeek].sort((a, b) => a.seq - b.seq).flatMap(c => ([
+            { role: "user"      as const, content: c.question },
+            { role: "assistant" as const, content: c.answer   },
+          ]))
+        : [];
+    const snapshot = HttpConvAgent.compactHistory([...rawCheckpoint, ...pendingForkMsgs], 40_000);
     const sharedSysPrompt = sessionPm instanceof HttpConvAgent
       ? sessionPm.getSystemPrompt()
       : undefined;
@@ -558,6 +588,9 @@ function connectFeishu(appId: string, appSecret: string): void {
             }
           }
         } else {
+          // Phase E: flush any completed fork Q/As into base PM before new message,
+          // so the new message's context already contains all concurrent work done so far.
+          flushForkBufferToBase(openId, existingPmId);
           feishuBusy.add(existingPmId);
           feishuReplyTarget.set(existingPmId, rt);
           startTask(existingPmId, rt, anchorMsgId);

@@ -1,5 +1,5 @@
 /**
- * Phase B/C/D concurrent dispatch + fork-merge-back scenarios.
+ * Phase B/C/D/E concurrent dispatch + fork-merge-back scenarios.
  *
  * Uses a self-contained simulation harness that mirrors the actual state maps:
  *   feishuBusy, feishuForks, feishuPendingQueue, feishuCheckpoints,
@@ -53,10 +53,18 @@ function makeSimulator(maxConcurrent = 3) {
     if (feishuBusy.has(basePmId)) {
       const forkCount = feishuForks.get(openId)?.size ?? 0;
       if (forkCount < maxConcurrent - 1) {
-        const forkId   = `fork-${++forkSeq}`;
-        const seq      = ++forkArrivalSeq;
-        const rawCp    = checkpoints.get(basePmId) ?? [];
-        const initMsgs = compact(rawCp, 40_000);
+        const forkId = `fork-${++forkSeq}`;
+        const seq    = ++forkArrivalSeq;
+        const rawCp  = checkpoints.get(basePmId) ?? [];
+        // Phase E: peek at buffer without consuming — new fork gets completed-fork context
+        const bufPeek = forkBuffer.get(openId);
+        const pendingForkMsgs: Msg[] = bufPeek && bufPeek.length > 0
+          ? [...bufPeek].sort((a, b) => a.seq - b.seq).flatMap(c => ([
+              { role: "user"      as const, content: c.question },
+              { role: "assistant" as const, content: c.answer   },
+            ]))
+          : [];
+        const initMsgs = compact([...rawCp, ...pendingForkMsgs], 40_000);
         const forks = feishuForks.get(openId) ?? new Set<string>();
         forks.add(forkId);
         feishuForks.set(openId, forks);
@@ -68,6 +76,20 @@ function makeSimulator(maxConcurrent = 3) {
       q.push({ text, anchorMsgId });
       pendingQueue.set(openId, q);
       return { type: "queued", queueLen: q.length };
+    }
+    // Phase E: base PM idle → flush any completed fork Q/As before delivering new message.
+    // Simulates flushForkBufferToBase: updates checkpoint + records in appendedEntries.
+    const buf = forkBuffer.get(openId);
+    if (buf && buf.length > 0) {
+      buf.sort((a, b) => a.seq - b.seq);
+      const forkEntries = buf.flatMap(c => ([
+        { role: "user"      as const, content: c.question },
+        { role: "assistant" as const, content: c.answer   },
+      ]));
+      appendedEntries.push({ pmId: basePmId, entries: forkEntries });
+      const currentCp = checkpoints.get(basePmId) ?? [];
+      checkpoints.set(basePmId, currentCp.concat(forkEntries));
+      forkBuffer.delete(openId);
     }
     feishuBusy.add(basePmId);
     return { type: "direct" };
@@ -381,6 +403,121 @@ describe("Phase D — fork Q/A merge-back into base PM history", () => {
     assert.ok(forkRecord2.initialMessages.some(m => m.content === "A2"),
       "turn-2 fork should see A2 from merged history");
     void r1; void r2; // suppress unused
+  });
+});
+
+// ── Phase E: pre-dispatch flush + fork buffer peek ───────────────────────────
+
+describe("Phase E — pre-dispatch flush (base-idle) + fork buffer peek (base-busy)", () => {
+
+  // Scenario: Q1 finishes → Q2(fork) finishes later → Q3 arrives (base idle)
+  // Without Phase E, Q3 would be processed without seeing Q2/A2.
+  // With Phase E, flushForkBufferToBase fires before Q3 is delivered.
+  it("base idle 直投: fork 完成写 buffer → Q3 到达时 pre-dispatch flush 注入 Q2/A2", () => {
+    const sim = makeSimulator(3);
+    const oid = "e1", base = "b_e1";
+
+    // Turn 1: Q1 on base, Q2 on fork
+    sim.dispatch(oid, base, "Q1");
+    sim.dispatch(oid, base, "Q2"); // fork
+
+    // Q1 finishes FIRST (buffer still empty)
+    sim.completeBase(oid, base, [
+      { role: "user", content: "Q1" }, { role: "assistant", content: "A1" },
+    ]);
+    assert.equal(sim.forkBuffer.get(oid)?.length ?? 0, 0, "buffer empty after Q1 done");
+
+    // Fork Q2 finishes AFTER Q1 (scenario B: base idle, buffer non-empty)
+    const fork1 = sim.forkLog[0]!;
+    sim.completeFork(oid, fork1.forkId, base, "A2");
+    assert.equal(sim.forkBuffer.get(oid)?.length, 1, "buffer has Q2/A2 after fork done");
+
+    // Q3 arrives — base PM is idle → pre-dispatch flush fires
+    const appendsBefore = sim.appendedEntries.length;
+    sim.dispatch(oid, base, "Q3");
+
+    // Buffer must be cleared
+    assert.equal(sim.forkBuffer.get(oid)?.length ?? 0, 0, "buffer cleared by pre-dispatch flush");
+    // appendedEntries should have a new entry for base PM
+    assert.ok(sim.appendedEntries.length > appendsBefore, "appendHistory called during flush");
+    const flushEntry = sim.appendedEntries.find(
+      (e, i) => i >= appendsBefore && e.pmId === base,
+    )!;
+    assert.ok(flushEntry.entries.some(e => e.content === "Q2"), "Q2 flushed into base PM");
+    assert.ok(flushEntry.entries.some(e => e.content === "A2"), "A2 flushed into base PM");
+    // Checkpoint must reflect Q2/A2 BEFORE Q3 is processed
+    const cp = sim.checkpoints.get(base)!;
+    assert.ok(cp.some(m => m.content === "Q2"), "Q2 in checkpoint before Q3 turn");
+    assert.ok(cp.some(m => m.content === "A2"), "A2 in checkpoint before Q3 turn");
+  });
+
+  it("pre-dispatch flush 空 buffer 时是 no-op (不写 appendedEntries)", () => {
+    const sim = makeSimulator(3);
+    const oid = "e2", base = "b_e2";
+    sim.dispatch(oid, base, "Q1");
+    sim.completeBase(oid, base, [
+      { role: "user", content: "Q1" }, { role: "assistant", content: "A1" },
+    ]);
+    // Buffer is empty — next dispatch should not touch appendedEntries
+    const appendsBefore = sim.appendedEntries.length;
+    sim.dispatch(oid, base, "Q2");
+    assert.equal(sim.appendedEntries.length, appendsBefore, "no flush when buffer empty");
+  });
+
+  // Scenario: base busy with Q1, fork-A completes, fork-B created while base still busy.
+  // Fork-B should see Q-A/A-A in its snapshot via bufPeek (buffer NOT consumed).
+  it("fork 创建 bufPeek: base busy 时 fork-A 完成 → 新 fork-B 快照含 Q-A/A-A, buffer 未消费", () => {
+    const sim = makeSimulator(3);
+    const oid = "e3", base = "b_e3";
+
+    sim.dispatch(oid, base, "Q1");         // base busy
+    sim.dispatch(oid, base, "Q-A");        // fork-A
+    const forkA = sim.forkLog[0]!;
+
+    // Fork-A completes while base PM is still processing Q1
+    sim.completeFork(oid, forkA.forkId, base, "A-A");
+    assert.equal(sim.forkBuffer.get(oid)?.length, 1, "fork-A in buffer");
+
+    // Q-B arrives while base still busy → fork-B created
+    sim.dispatch(oid, base, "Q-B");
+    const forkB = sim.forkLog[1]!;
+
+    // Fork-B's snapshot should include Q-A/A-A via bufPeek
+    assert.ok(forkB.initialMessages.some(m => m.content === "Q-A"),
+      "fork-B snapshot includes Q-A from bufPeek");
+    assert.ok(forkB.initialMessages.some(m => m.content === "A-A"),
+      "fork-B snapshot includes A-A from bufPeek");
+
+    // Buffer was NOT consumed — it stays for the eventual base PM flush
+    assert.equal(sim.forkBuffer.get(oid)?.length, 1, "buffer intact after bufPeek");
+  });
+
+  // End-to-end: Q1 base + Q2 fork + Q1-done + Q2-done + Q3 arrives.
+  // Q3's checkpoint must order Q1/A1 before Q2/A2.
+  it("E2E 顺序: Q1 base, Q2 fork; Q1先完成再 Q2 完成; Q3 到达时 checkpoint 含 Q1/A1 + Q2/A2 且顺序正确", () => {
+    const sim = makeSimulator(3);
+    const oid = "e4", base = "b_e4";
+
+    sim.dispatch(oid, base, "Q1");
+    sim.dispatch(oid, base, "Q2");
+    const fork1 = sim.forkLog[0]!;
+
+    // Q1 finishes, Q2 not done yet
+    sim.completeBase(oid, base, [
+      { role: "user", content: "Q1" }, { role: "assistant", content: "A1" },
+    ]);
+    // Now Q2 finishes (after Q1 turn end, no base PM turnEnd between Q2 done and Q3 arriving)
+    sim.completeFork(oid, fork1.forkId, base, "A2");
+
+    // Q3 → pre-dispatch flush fires
+    sim.dispatch(oid, base, "Q3");
+
+    const cp = sim.checkpoints.get(base)!;
+    const q1idx = cp.findIndex(m => m.content === "Q1");
+    const q2idx = cp.findIndex(m => m.content === "Q2");
+    assert.ok(q1idx !== -1 && q2idx !== -1, "both Q1 and Q2 in checkpoint");
+    assert.ok(q1idx < q2idx, `Q1(idx=${q1idx}) should precede Q2(idx=${q2idx})`);
+    assert.equal(sim.forkBuffer.get(oid)?.length ?? 0, 0, "buffer cleared");
   });
 });
 
