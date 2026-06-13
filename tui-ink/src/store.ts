@@ -231,7 +231,13 @@ export function applyEvent(e: TuiEvent) {
     case "agent.state": {
       const a = state.agents.get(e.agent);
       if (a) {
-        a.state = e.state;
+        // Never regress from a terminal state: agent.state:idle is emitted by HttpConvAgent
+        // as the stream closes, AFTER agent.done has already set state to "done"/"err".
+        // Allowing the overwrite would make children appear active and trigger false
+        // "waiting for children" loops and message suppression in the parent.
+        if (a.state !== "done" && a.state !== "err") {
+          a.state = e.state;
+        }
         if (e.sub !== undefined) a.sub = e.sub;
         else if (e.state === "idle" || e.state === "done" || e.state === "err") a.sub = "";
       }

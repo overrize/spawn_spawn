@@ -192,6 +192,49 @@ describe("ProcessManager — preCheckSpawn", () => {
   });
 });
 
+// ── ProcessManager.getForegroundChildren ──────────────────────────────────────
+
+describe("ProcessManager.getForegroundChildren — excludes done/background handles", () => {
+  it("newly registered child appears in getForegroundChildren", () => {
+    const pm = new ProcessManager();
+    pm.registerSpawn("tl-01", "pm");
+    assert.deepEqual(pm.getForegroundChildren("pm"), ["tl-01"]);
+    pm.destroy();
+  });
+
+  it("all workers done → getForegroundChildren returns [] (TL must not wait forever)", () => {
+    // After completeForeground, mode='done' — must not appear in getForegroundChildren
+    // or hasActiveChildren stays true and TL loops "waiting for children" indefinitely.
+    const pm = new ProcessManager();
+    pm.registerSpawn("w-head",  "tl-01");
+    pm.registerSpawn("w-upper", "tl-01");
+    assert.equal(pm.getForegroundChildren("tl-01").length, 2);
+    pm.completeForeground("w-head",  { success: true });
+    pm.completeForeground("w-upper", { success: true });
+    assert.deepEqual(pm.getForegroundChildren("tl-01"), [],
+      "completed children must be excluded — otherwise TL waits forever");
+    pm.destroy();
+  });
+
+  it("one done + one still foreground → only the active one returned", () => {
+    const pm = new ProcessManager();
+    pm.registerSpawn("w1", "tl-01");
+    pm.registerSpawn("w2", "tl-01");
+    pm.completeForeground("w1", { success: true });
+    assert.deepEqual(pm.getForegroundChildren("tl-01"), ["w2"]);
+    pm.destroy();
+  });
+
+  it("background (timed-out) handle is NOT treated as active child", () => {
+    const pm = new ProcessManager();
+    const handle = pm.registerSpawn("w-bg", "tl-01");
+    handle.setBackground(); // simulate 2-min auto-background timeout
+    assert.deepEqual(pm.getForegroundChildren("tl-01"), [],
+      "background children must not block parent from finalising");
+    pm.destroy();
+  });
+});
+
 // ── SecretaryProxy 单元测试 ─────────────────────────────────────────────────
 
 describe("SecretaryProxy — memory 写入", () => {

@@ -128,10 +128,12 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
-  /** Get all currently tracked foreground child IDs for a parent. */
+  /** Get child IDs that are still actively blocking the parent (mode === 'foreground' only).
+   *  Excludes 'done' (completed) and 'background' (timed-out) handles so that
+   *  hasActiveChildren checks don't keep the parent waiting after children finish. */
   getForegroundChildren(parentId: string): string[] {
     return Array.from(this.foregroundSpawns.values())
-      .filter((h) => h.parentId === parentId)
+      .filter((h) => h.parentId === parentId && h.mode === 'foreground')
       .map((h) => h.childId);
   }
 

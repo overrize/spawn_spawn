@@ -76,6 +76,25 @@ describe("applyEvent — state updates", () => {
     assert.equal(getState().agents.get("a")!.hidden, undefined, "visible until next PM message");
   });
 
+  it("agent.state:idle after agent.done does NOT reset terminal state (stream-close race)", () => {
+    // HttpConvAgent emits agent.state:idle as the SSE stream closes, AFTER agent.done has
+    // already set state to "done". Without the guard, this overwrites "done" → "idle",
+    // making children appear active and causing parent to suppress final reply.
+    ensureAgent({ id: "w-done", name: "w-done", role: "Worker", state: "run", parent: "pm" });
+    applyEvent({ v: 1, type: "agent.done",  agent: "w-done", success: true });
+    assert.equal(getState().agents.get("w-done")!.state, "done", "state is done after agent.done");
+    applyEvent({ v: 1, type: "agent.state", agent: "w-done", state: "idle" }); // stream closes
+    assert.equal(getState().agents.get("w-done")!.state, "done", "idle must NOT overwrite done");
+  });
+
+  it("agent.state:idle after agent.done(failure) does NOT reset err state", () => {
+    ensureAgent({ id: "w-err", name: "w-err", role: "Worker", state: "run", parent: "pm" });
+    applyEvent({ v: 1, type: "agent.done",  agent: "w-err", success: false });
+    assert.equal(getState().agents.get("w-err")!.state, "err");
+    applyEvent({ v: 1, type: "agent.state", agent: "w-err", state: "idle" });
+    assert.equal(getState().agents.get("w-err")!.state, "err", "idle must NOT overwrite err");
+  });
+
   it("clearDoneAgents hides done non-permanent agents", () => {
     ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
     ensureAgent({ id: "tl", name: "tl", role: "Leader", state: "run", parent: "pm" });
