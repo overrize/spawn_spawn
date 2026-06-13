@@ -32,6 +32,28 @@
 
 ---
 
+## ⚠️ 输出格式硬规则（违反会破坏 TUI 渲染）
+
+**一次完整回复只能发一条 `message` 事件。** 用 `\n` 在 `text` 字段内分段，不要把每段包成独立 `message`。
+
+```json
+// ✅ 正确 — 含 Markdown 列表/加粗时，整体仍是单个 message 事件，Markdown 在 text 字符串内部
+{"v":1,"type":"message","agent":"pm","to":"user","text":"**rebase vs merge**\n\n- rebase：历史更线性，适合功能分支\n- merge：保留完整历史，适合团队协作"}
+
+// ❌ 禁止裸吐 — 把每行分成独立输出（每行都是协议违规）
+**rebase vs merge**
+- rebase：历史更线性
+- merge：保留完整历史
+
+// ❌ 错误 — 每段一条 message 事件，TUI 会为每条单独显示「◆ pm」头
+{"v":1,"type":"message","to":"user","text":"**rebase vs merge**"}
+{"v":1,"type":"message","to":"user","text":"- rebase：历史更线性"}
+```
+
+**禁止输出 `type:think` JSON。** 需要推理请用 Think 工具，不要自己造 JSON 事件。
+
+---
+
 ## 每条用户消息的决策流程（Stage 0 → 4）
 
 ```
@@ -48,7 +70,11 @@ Stage 4 spawn 后强制动作
 
 ### Stage 0 — 快速回答闸（最高优先级）
 
-**同时满足以下全部 4 个条件 → 直接 `message.to=user`，绝不 spawn，不走后续 Stage：**
+**同时满足以下全部 4 个条件 → 立即输出 JSON `message` 事件，绝不 spawn，不走后续 Stage（禁止散文/markdown，任何非 JSON 行都是违规）：**
+
+```json
+{"v":1,"type":"message","agent":"pm","to":"user","text":"回答内容（\\n 换行）"}
+```
 
 | 条件 | 判断方法 |
 |------|----------|
@@ -173,20 +199,6 @@ ProcessManager 会在以下情况向 PM 发告警，PM **必须**响应，不能
 ## ⚠️ Todo 状态规则
 
 每轮最后一个 JSON 必须是更新后的 `todo.set`。向用户发出最终汇报后，本轮所有 run/todo 项必须改为 done（或 err）。
-
----
-
-## ⚠️ 输出格式硬规则（违反会破坏 TUI 渲染）
-
-**一次完整回复只能发一条 `message` 事件。** 用 `\n` 在 `text` 字段内分段，不要把每段包成独立 `message`。
-
-```json
-// ✅ 正确
-{"v":1,"type":"message","agent":"pm","to":"user","text":"第一段\n\n第二段"}
-// ❌ 错误 — 每段一条，TUI 会为每条单独显示「◆ pm」头
-```
-
-**禁止输出 `type:think` JSON。** 需要推理请用 Think 工具，不要自己造 JSON 事件。
 
 ---
 

@@ -6,6 +6,7 @@ import { PatchScheduler } from './patch-scheduler.js';
 import { PMEvent } from './pm-bridge.js';
 import { patchCardMessage, replyToMessageWithCard, sendTextMessage, deleteProcessingReaction } from './message.js';
 import { TokenManager } from './auth.js';
+import { feishuLog } from './debug.js';
 import { FeishuInteractiveContent, FeishuCardElement } from './types.js';
 
 // ── Card rendering ────────────────────────────────────────────────────────────
@@ -75,7 +76,7 @@ export function createTask(
         if (msgId) {
           t.replyMessageId = msgId;
           cardIndex.set(msgId, t.taskId);
-          process.stderr.write(`[CardRenderer] created reply card ${msgId} for task ${t.taskId}\n`);
+          feishuLog(`[CardRenderer] created reply card ${msgId} for task ${t.taskId}`);
         }
       } else {
         await patchCardMessage(t.replyMessageId, card, tokenManager);
@@ -120,7 +121,8 @@ export function createCardRenderer(tokenManager: TokenManager): (e: PMEvent) => 
           state: 'pending',
           order: task.blocks.size,
         });
-        task.scheduler.schedule();
+        // Card is created on first actual content (agent_delta or agent_done), not here.
+        // This prevents a premature "pending" card from appearing for format=text (bubble) turns.
         break;
       }
 
@@ -158,7 +160,7 @@ export function createCardRenderer(tokenManager: TokenManager): (e: PMEvent) => 
         }
         // flush = cancel timer + immediate patch with footer
         task.scheduler.flush();
-        process.stderr.write(`[CardRenderer] task ${e.taskId} done, card patched with footer\n`);
+        feishuLog(`[CardRenderer] task ${e.taskId} done, card patched with footer`);
         break;
       }
 
@@ -170,7 +172,7 @@ export function createCardRenderer(tokenManager: TokenManager): (e: PMEvent) => 
           deleteProcessingReaction(task.rootMessageId, task.reactionId, tokenManager);
         }
         task.scheduler.flush();
-        process.stderr.write(`[CardRenderer] task ${e.taskId} failed: ${e.error}\n`);
+        feishuLog(`[CardRenderer] task ${e.taskId} failed: ${e.error}`);
         break;
       }
     }

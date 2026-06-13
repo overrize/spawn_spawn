@@ -48,8 +48,9 @@ import { E2ESuite } from "./tests/e2e/runner/E2ESuite.js";
 import { TokenManager } from "./feishu/auth.js";
 import {
   sendTextMessage, addProcessingReaction, deleteProcessingReaction,
-  patchCardMessage,
+  patchCardMessage, replyToMessageWithText,
 } from "./feishu/message.js";
+import { feishuLog } from "./feishu/debug.js";
 import { taskRegistry, cardIndex, pmCurrentTask } from "./feishu/session.js";
 import { PMBridgeBase } from "./feishu/pm-bridge.js";
 import { createTask, createCardRenderer } from "./feishu/card-renderer.js";
@@ -269,7 +270,7 @@ interface LeaderOpts {
   resumedMemoryId?: string;
   promptFile?: string;      // "pm" for root, "leader" for tech leads
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
-  replyHook?: (text: string) => void; // called when message.to=user (Feishu bridge)
+  replyHook?: (text: string, format?: "text" | "document") => void; // called when message.to=user (Feishu bridge)
   turnEndHook?: () => void;            // called when Feishu PM turn ends — flushes aggregator
   conversationMode?: boolean;          // if true: stop after each user reply, no auto-nudge
   // Phase B: forked task options
@@ -329,20 +330,41 @@ function connectFeishu(appId: string, appSecret: string): void {
   };
 
   // createAggregator: one aggregator per PM session.
-  // Its send function emits agent_done+task_done to the card renderer — one call per turn,
-  // regardless of how many message.to=user fragments the PM emitted.
+  // sendBubble → format=text: reply as text bubble anchored under the user's message.
+  // sendCard   → format=document: route to card renderer for a structured card.
   const createAggregator = (pmIdLocal: string): FeishuReplyAggregator =>
-    new FeishuReplyAggregator(async (text: string) => {
-      const taskId = pmCurrentTask.get(pmIdLocal);
-      if (!taskId) return;
-      feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM', finalText: text });
-      feishuBridge.emit({ type: 'task_done', taskId, summary: text });
-    });
+    new FeishuReplyAggregator(
+      // sendBubble
+      async (text: string) => {
+        const taskId = pmCurrentTask.get(pmIdLocal);
+        if (!taskId) return;
+        const task = taskRegistry.get(taskId);
+        if (!task) return;
+        const elapsedSec = ((Date.now() - task.startedAt) / 1000).toFixed(1);
+        const withTiming = `${text}\n\n⏱ ${elapsedSec}s`;
+        if (task.rootMessageId) {
+          await replyToMessageWithText(task.rootMessageId, withTiming, tokenManager);
+        } else {
+          await sendTextMessage(task.replyId, task.replyType, withTiming, tokenManager);
+        }
+        if (task.reactionId && task.rootMessageId) {
+          deleteProcessingReaction(task.rootMessageId, task.reactionId, tokenManager);
+        }
+        task.status = 'done';
+      },
+      // sendCard
+      async (text: string) => {
+        const taskId = pmCurrentTask.get(pmIdLocal);
+        if (!taskId) return;
+        feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM', finalText: text });
+        feishuBridge.emit({ type: 'task_done', taskId, summary: text });
+      },
+    );
 
   // replyHook: routes each PM reply fragment into the aggregator.
   // The aggregator coalesces all fragments in the turn and sends once at turnEnd.
-  const makeReplyHook = (pmIdLocal: string) => (replyText: string): void => {
-    feishuAggregators.get(pmIdLocal)?.onChunk(replyText);
+  const makeReplyHook = (pmIdLocal: string) => (replyText: string, format?: "text" | "document"): void => {
+    feishuAggregators.get(pmIdLocal)?.onChunk(replyText, format);
   };
 
   // drainPendingQueue: when a task slot frees up, try to start the oldest pending message.
@@ -357,7 +379,7 @@ function connectFeishu(appId: string, appSecret: string): void {
     if (totalRunning >= FEISHU_MAX_CONCURRENT) return;
     const next = pending.shift();
     if (!next) return;
-    process.stderr.write(`[FeishuConcurrent] draining pending for openId=...${openId.slice(-6)}, remaining=${pending.length}\n`);
+    feishuLog(`[FeishuConcurrent] draining pending for openId=...${openId.slice(-6)}, remaining=${pending.length}`);
     dispatchMessage(openId, next.text, next.anchorMsgId, next.chatId, next.chatType);
   };
 
@@ -377,7 +399,7 @@ function connectFeishu(appId: string, appSecret: string): void {
     bpm.appendHistory(forkEntries);
     feishuCheckpoints.set(pmId, bpm.getMessages());
     feishuForkBuffer.delete(openId);
-    process.stderr.write(`[FeishuConcurrent] pre-dispatch flush: ${buf.length} fork Q/As → ${pmId}\n`);
+    feishuLog(`[FeishuConcurrent] pre-dispatch flush: ${buf.length} fork Q/As → ${pmId}`);
   };
 
   // startConcurrentTask: fork a new lightweight PM' for a concurrent task.
@@ -408,9 +430,9 @@ function connectFeishu(appId: string, appSecret: string): void {
 
     // Capture the fork's reply text so we can merge Q/A back into base PM history.
     let forkAnswer = "";
-    const forkReplyHook = (replyText: string): void => {
+    const forkReplyHook = (replyText: string, format?: "text" | "document"): void => {
       forkAnswer += (forkAnswer ? "\n" : "") + replyText;
-      makeReplyHook(forkId)(replyText); // still routes to aggregator for Feishu card
+      makeReplyHook(forkId)(replyText, format);
     };
 
     // Snapshot: use the last confirmed-clean checkpoint (captured after the previous base-PM
@@ -477,16 +499,16 @@ function connectFeishu(appId: string, appSecret: string): void {
           const buf = feishuForkBuffer.get(openId) ?? [];
           buf.push({ seq: forkArrivalSeq, anchorMsgId, question: text, answer: forkAnswer });
           feishuForkBuffer.set(openId, buf);
-          process.stderr.write(`[FeishuConcurrent] fork ${forkId} buffered Q/A (seq=${forkArrivalSeq})\n`);
+          feishuLog(`[FeishuConcurrent] fork ${forkId} buffered Q/A (seq=${forkArrivalSeq})`);
         }
         feishuForks.get(openId)?.delete(forkId);
         if (feishuForks.get(openId)?.size === 0) feishuForks.delete(openId);
         drainPendingQueue(openId);
       },
     });
-    process.stderr.write(
+    feishuLog(
       `[FeishuConcurrent] forked ${forkId} for openId=...${openId.slice(-6)}` +
-      ` forks=${feishuForks.get(openId)?.size ?? 0}/${FEISHU_MAX_CONCURRENT - 1}\n`,
+      ` forks=${feishuForks.get(openId)?.size ?? 0}/${FEISHU_MAX_CONCURRENT - 1}`,
     );
   };
 
@@ -512,7 +534,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       // Guard: if the PM with this deterministic ID already exists (e.g. session
       // map was cleared but agent survived), reconnect instead of re-spawning.
       if (agents.has(pmId)) {
-        process.stderr.write(`[FeishuBridge] reconnect: PM ${pmId} alive but session lost — re-wiring\n`);
+        feishuLog(`[FeishuBridge] reconnect: PM ${pmId} alive but session lost — re-wiring`);
         feishuSessions.set(openId, pmId);
         if (!feishuBusy.has(pmId)) {
           feishuBusy.add(pmId);
@@ -525,11 +547,11 @@ function connectFeishu(appId: string, appSecret: string): void {
           const q = feishuMsgQueue.get(pmId) ?? [];
           q.push({ text, messageId: anchorMsgId });
           feishuMsgQueue.set(pmId, q);
-          process.stderr.write(`[FeishuBridge] reconnect-busy: queued for ${pmId}, len=${q.length}\n`);
+          feishuLog(`[FeishuBridge] reconnect-busy: queued for ${pmId}, len=${q.length}`);
         }
         return;
       }
-      process.stderr.write(`[FeishuBridge] new session pmId=${pmId}\n`);
+      feishuLog(`[FeishuBridge] new session pmId=${pmId}`);
       feishuSessions.set(openId, pmId);
       feishuBusy.add(pmId);
       feishuReplyTarget.set(pmId, rt);
@@ -557,7 +579,7 @@ function connectFeishu(appId: string, appSecret: string): void {
               cleanHistory = cleanHistory.concat(forkEntries);
               bpm.appendHistory(forkEntries); // inject into base PM's live messages
               feishuForkBuffer.delete(openId);
-              process.stderr.write(`[FeishuConcurrent] merged ${buf.length} fork Q/As into ${pmId} history\n`);
+              feishuLog(`[FeishuConcurrent] merged ${buf.length} fork Q/As into ${pmId} history`);
             }
             feishuCheckpoints.set(pmId, cleanHistory);
           }
@@ -568,8 +590,8 @@ function connectFeishu(appId: string, appSecret: string): void {
       // ── Existing session ───────────────────────────────────────────────────
       const existingPmId = feishuSessions.get(openId)!;
       const a = agents.get(existingPmId);
-      process.stderr.write(
-        `[FeishuBridge] existing pmId=${existingPmId} alive=${a instanceof HttpConvAgent} busy=${feishuBusy.has(existingPmId)}\n`,
+      feishuLog(
+        `[FeishuBridge] existing pmId=${existingPmId} alive=${a instanceof HttpConvAgent} busy=${feishuBusy.has(existingPmId)}`,
       );
       if (a instanceof HttpConvAgent) {
         if (feishuBusy.has(existingPmId)) {
@@ -582,7 +604,7 @@ function connectFeishu(appId: string, appSecret: string): void {
             const pending = feishuPendingQueue.get(openId) ?? [];
             pending.push({ text, anchorMsgId, chatId, chatType });
             feishuPendingQueue.set(openId, pending);
-            process.stderr.write(`[FeishuConcurrent] at capacity (${forkCount + 1}/${FEISHU_MAX_CONCURRENT}), queued for openId=...${openId.slice(-6)}\n`);
+            feishuLog(`[FeishuConcurrent] at capacity (${forkCount + 1}/${FEISHU_MAX_CONCURRENT}), queued for openId=...${openId.slice(-6)}`);
             if (anchorMsgId && feishuTokenManager) {
               addProcessingReaction(anchorMsgId, feishuTokenManager).catch(() => {});
             }
@@ -600,7 +622,7 @@ function connectFeishu(appId: string, appSecret: string): void {
           a.sendCommand({ type: "user.message", text });
         }
       } else {
-        process.stderr.write(`[FeishuBridge] PM ${existingPmId} gone, starting fresh\n`);
+        feishuLog(`[FeishuBridge] PM ${existingPmId} gone, starting fresh`);
         feishuAggregators.get(existingPmId)?.reset();
         feishuAggregators.delete(existingPmId);
         feishuSessions.delete(openId);
@@ -631,7 +653,7 @@ function connectFeishu(appId: string, appSecret: string): void {
                   cleanHistory2 = cleanHistory2.concat(forkEntries2);
                   bpm2.appendHistory(forkEntries2);
                   feishuForkBuffer.delete(openId);
-                  process.stderr.write(`[FeishuConcurrent] merged ${buf2.length} fork Q/As into ${newPmId} history\n`);
+                  feishuLog(`[FeishuConcurrent] merged ${buf2.length} fork Q/As into ${newPmId} history`);
                 }
                 feishuCheckpoints.set(newPmId, cleanHistory2);
               }
@@ -655,15 +677,15 @@ function connectFeishu(appId: string, appSecret: string): void {
         text: `[飞书WS] ${msg}` } as TuiEvent);
     },
     onMessage: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => {
-      process.stderr.write(
-        `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length}\n`,
+      feishuLog(
+        `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length}`,
       );
 
       // Short-time same-content guard: reject exact duplicate text within 5s per user.
       // (Event-ID dedup is already handled upstream in websocket.ts seenEventIds.)
       const recentMsg = feishuRecentTexts.get(openId);
       if (recentMsg && recentMsg.text === text && Date.now() - recentMsg.time < 5000) {
-        process.stderr.write(`[FeishuBridge] dup content from ${openId} within 5s, skipped\n`);
+        feishuLog(`[FeishuBridge] dup content from ${openId} within 5s, skipped`);
         return;
       }
       feishuRecentTexts.set(openId, { text, time: Date.now() });
@@ -675,7 +697,7 @@ function connectFeishu(appId: string, appSecret: string): void {
     feishuConnected = false; // allow retry after failure
     applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
       text: `❌ 飞书 WebSocket 连接失败: ${err instanceof Error ? err.message : String(err)}` } as TuiEvent);
-    process.stderr.write(`[FeishuWS] startup failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    feishuLog(`[FeishuWS] startup failed: ${err instanceof Error ? err.message : String(err)}`);
   });
 }
 
@@ -905,7 +927,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
                 .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
             : [];
           if (!opts.conversationMode || activeChildrenNow.length === 0) {
-            opts.replyHook(e.text);
+            opts.replyHook(e.text, e.format);
           } else {
             process.stderr.write(`[${opts.id}] suppressed intermediate msg to Feishu (${activeChildrenNow.length} active children): "${e.text.slice(0, 60)}"\n`);
           }

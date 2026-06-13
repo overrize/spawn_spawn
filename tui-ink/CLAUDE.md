@@ -64,6 +64,8 @@ PM (depth=0, role=Leader)
 | Bash | Shell 命令，有 banned list（curl/wget/ssh 等） | 按命令判断 |
 | Grep / Glob | 基于 rg，需要 ripgrep 已安装 | false |
 | LS / Think | 目录列表 / 推理记录 | false |
+| WebFetch | 获取 URL 纯文本，自动去 HTML，跟随跳转 | false |
+| WebSearch | 互联网搜索（需 BRAVE_SEARCH_API_KEY 或 SERPER_API_KEY） | false |
 
 破坏性 Bash（rm/git commit/npm install 等）→ 路由到父 Leader 审批，不直接问用户。
 

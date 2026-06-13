@@ -1,3 +1,5 @@
+import { feishuLog } from './debug.js';
+
 // PM → Feishu event bus.
 // PMBridgeBase is the emitter; card-renderer subscribes to it.
 // index.tsx emits events as the PM progresses (task_spawned, agent_delta, task_done, …).
@@ -24,7 +26,7 @@ export class PMBridgeBase {
   emit(e: PMEvent): void {
     for (const h of this.handlers) {
       try { h(e); } catch (err) {
-        process.stderr.write(`[PMBridge] handler error: ${err instanceof Error ? err.message : String(err)}\n`);
+        feishuLog(`[PMBridge] handler error: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }

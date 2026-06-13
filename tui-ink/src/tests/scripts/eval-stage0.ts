@@ -9,8 +9,11 @@
  *
  * Supported keys (in priority order):
  *   ANTHROPIC_API_KEY  → anthropic provider, claude-haiku-4-5-20251001
+ *   DEEPSEEK_API_KEY   → openai provider,    deepseek-chat  (DeepSeek V3)
  *   OPENAI_API_KEY     → openai provider,    gpt-4o-mini
  *   DASHSCOPE_API_KEY  → openai provider,    qwen-plus (dashscope compat endpoint)
+ *
+ * Override model: EVAL_MODEL=deepseek-v3-fast npx tsx ...
  */
 
 import { HttpConvAgent } from "../../adapters/httpAgent.js";
@@ -35,21 +38,30 @@ function loadPmSystemPrompt(): string {
 
 // ── Provider selection ────────────────────────────────────────────────────────
 function resolveProvider(): { provider: "anthropic" | "openai"; model: string; apiKey: string; baseUrl?: string } {
+  const modelOverride = process.env.EVAL_MODEL;
   if (process.env.ANTHROPIC_API_KEY) {
-    return { provider: "anthropic", model: "claude-haiku-4-5-20251001", apiKey: process.env.ANTHROPIC_API_KEY };
+    return { provider: "anthropic", model: modelOverride ?? "claude-haiku-4-5-20251001", apiKey: process.env.ANTHROPIC_API_KEY };
+  }
+  if (process.env.DEEPSEEK_API_KEY) {
+    return {
+      provider: "openai",
+      model: modelOverride ?? "deepseek-chat",
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      baseUrl: "https://api.deepseek.com",
+    };
   }
   if (process.env.OPENAI_API_KEY) {
-    return { provider: "openai", model: "gpt-4o-mini", apiKey: process.env.OPENAI_API_KEY };
+    return { provider: "openai", model: modelOverride ?? "gpt-4o-mini", apiKey: process.env.OPENAI_API_KEY };
   }
   if (process.env.DASHSCOPE_API_KEY) {
     return {
       provider: "openai",
-      model: "qwen-plus",
+      model: modelOverride ?? "qwen-plus",
       apiKey: process.env.DASHSCOPE_API_KEY,
       baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     };
   }
-  console.error("No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or DASHSCOPE_API_KEY");
+  console.error("No API key found. Set ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY, or DASHSCOPE_API_KEY");
   process.exit(1);
 }
 
@@ -82,6 +94,7 @@ interface Result {
   pass: boolean;
   hasSpawn: boolean;
   hasUserMessage: boolean;
+  hasFallback: boolean;
   ttftMs: number;
   totalMs: number;
 }
@@ -101,6 +114,7 @@ async function runCase(c: Case): Promise<Result> {
 
   let hasSpawn = false;
   let hasUserMessage = false;
+  let hasFallback = false;
   let ttftMs = 0;
   let totalMs = 0;
 
@@ -108,7 +122,10 @@ async function runCase(c: Case): Promise<Result> {
     const t = setTimeout(() => reject(new Error(`timeout after 45s`)), 45_000);
     agent.on("event", (ev: TuiEvent) => {
       if (ev.type === "spawn")   hasSpawn = true;
-      if (ev.type === "message" && (ev as { to?: string }).to === "user") hasUserMessage = true;
+      if (ev.type === "message" && (ev as { to?: string }).to === "user") {
+        hasUserMessage = true;
+        if ((ev as any)._fallback === true) hasFallback = true;
+      }
       if (ev.type === "token.usage") {
         if (ev.ttft_ms  !== undefined) ttftMs  = ev.ttft_ms;
         if (ev.total_ms !== undefined) totalMs = ev.total_ms;
@@ -126,7 +143,7 @@ async function runCase(c: Case): Promise<Result> {
   });
 
   const pass = c.expectSpawn ? hasSpawn : (!hasSpawn && hasUserMessage);
-  return { pass, hasSpawn, hasUserMessage, ttftMs, totalMs };
+  return { pass, hasSpawn, hasUserMessage, hasFallback, ttftMs, totalMs };
 }
 
 async function main(): Promise<void> {
@@ -134,32 +151,38 @@ async function main(): Promise<void> {
   let failed = 0;
 
   const WIDTH = 24;
-  console.log(`  ${"case".padEnd(WIDTH)}  result   spawn  msg    ttft    total`);
-  console.log(`  ${"─".repeat(WIDTH)}  ───────  ─────  ───    ────    ─────`);
+  console.log(`  ${"case".padEnd(WIDTH)}  result   spawn  msg    proto     ttft    total`);
+  console.log(`  ${"─".repeat(WIDTH)}  ───────  ─────  ───    ─────     ────    ─────`);
 
+  let violations = 0;
   for (const c of CASES) {
     process.stdout.write(`  ${c.label.padEnd(WIDTH)}  `);
     try {
       const r = await runCase(c);
-      const label = r.pass ? "PASS   " : `FAIL   `;
+      const label    = r.pass ? "PASS   " : "FAIL   ";
       const spawnMark = r.hasSpawn ? "yes  " : "no   ";
       const msgMark   = r.hasUserMessage ? "yes" : "no ";
-      const ttft  = r.ttftMs  ? `${r.ttftMs}ms`.padStart(6)  : "   n/a";
-      const total = r.totalMs ? `${r.totalMs}ms`.padStart(7) : "    n/a";
-      console.log(`${label}  ${spawnMark}  ${msgMark}    ${ttft}  ${total}`);
+      const proto     = r.hasFallback ? "VIOLATN  " : "OK       ";
+      const ttft      = r.ttftMs  ? `${r.ttftMs}ms`.padStart(6)  : "   n/a";
+      const total     = r.totalMs ? `${r.totalMs}ms`.padStart(7) : "    n/a";
+      console.log(`${label}  ${spawnMark}  ${msgMark}    ${proto}  ${ttft}  ${total}`);
       if (r.pass) passed++; else failed++;
+      if (r.hasFallback) violations++;
     } catch (err) {
       console.log(`ERROR    ${(err as Error).message.slice(0, 50)}`);
       failed++;
     }
   }
 
-  console.log(`\n${"─".repeat(60)}`);
-  console.log(`${passed}/${CASES.length} passed`);
-  if (failed > 0) {
-    console.log(`\n⚠️  Stage 0 命中率: ${Math.round(passed / CASES.length * 100)}%`);
+  const sep = "─".repeat(68);
+  console.log(`\n${sep}`);
+  console.log(`Result:   ${passed}/${CASES.length} passed`);
+  console.log(`Protocol: ${CASES.length - violations}/${CASES.length} OK  (${violations} violation${violations !== 1 ? "s" : ""})`);
+  if (failed === 0 && violations === 0) {
+    console.log(`✅  Stage 0 命中率 100%，无协议违规`);
   } else {
-    console.log(`✅  Stage 0 命中率: 100%`);
+    if (failed > 0)    console.log(`⚠️  Stage 0 命中率: ${Math.round(passed / CASES.length * 100)}%`);
+    if (violations > 0) console.log(`⚠️  协议违规 ${violations} 次 — 检查 prompt 输出格式规则`);
   }
   process.exit(failed > 0 ? 1 : 0);
 }

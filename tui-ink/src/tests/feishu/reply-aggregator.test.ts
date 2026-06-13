@@ -32,6 +32,7 @@ describe("FeishuReplyAggregator — 飞书层回归哨兵", () => {
 
       const agg = new FeishuReplyAggregator(
         async (text) => { callCount++; receivedText = text; },
+        async (_text) => { /* sendCard — not under test */ },
         { idleFlushMs: 30 },
       );
 
@@ -61,6 +62,7 @@ describe("FeishuReplyAggregator — 飞书层回归哨兵", () => {
           if (callCount === 1) throw new Error("simulated Feishu API failure");
           // 第二次调用正常返回
         },
+        async (_text) => { /* sendCard — not under test */ },
         { idleFlushMs: 30 },
       );
 

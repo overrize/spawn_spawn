@@ -79,7 +79,7 @@ export type TuiEvent =
       name: string; args: unknown; needs_approval?: boolean;
     }
   | { v: 1; type: "tool.result"; agent: string; id: string; ok: boolean; output: string }
-  | { v: 1; type: "message"; agent: string; to: string; text: string }
+  | { v: 1; type: "message"; agent: string; to: string; text: string; format?: "text" | "document" }
   | {
       v: 1; type: "spawn"; parent: string; child: string;
       role: "Secretary" | "Worker" | "Leader"; goal: string; model?: string;

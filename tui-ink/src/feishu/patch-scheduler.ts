@@ -1,3 +1,5 @@
+import { feishuLog } from './debug.js';
+
 // Per-card coalescing patch scheduler.
 // Multiple concurrent agent deltas → at most one Feishu API call per RTT interval.
 // Adaptive: measures real round-trip and never fires faster than the last observed RTT.
@@ -36,7 +38,7 @@ export class PatchScheduler {
       await this.flushFn();
       this.lastRtt = Date.now() - t0;
     } catch (err) {
-      process.stderr.write(`[PatchScheduler] patch failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      feishuLog(`[PatchScheduler] patch failed: ${err instanceof Error ? err.message : String(err)}`);
       try { await this.fallbackFn?.(); } catch { /* best-effort text fallback */ }
       this.pending = false;
       return;

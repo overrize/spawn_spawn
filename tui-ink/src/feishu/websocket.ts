@@ -4,6 +4,7 @@
 
 import WebSocket from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { feishuLog } from './debug.js';
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BOOTSTRAP_URL = 'https://open.feishu.cn/callback/ws/endpoint';
@@ -110,7 +111,7 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
   const { appId, appSecret, onMessage, onStatus } = opts;
 
   const log = (msg: string) => {
-    process.stderr.write(`[FeishuWS] ${msg}\n`);
+    feishuLog(`[FeishuWS] ${msg}`);
     onStatus?.(msg);
   };
 

@@ -1,3 +1,5 @@
+import { feishuLog } from './debug.js';
+
 // Per-user input-merge window.
 // Buffers rapid consecutive messages from the same user and flushes them as
 // one combined input after a configurable silence gap (default 1500 ms).
@@ -44,8 +46,8 @@ export class FeishuInputWindowManager {
       win.fragments.push({ text, messageId });
       clearTimeout(win.timer);
       win.timer = setTimeout(() => this._flush(openId), this.windowMs);
-      process.stderr.write(
-        `[InputWindow] extend openId=...${openId.slice(-6)} fragments=${win.fragments.length}\n`,
+      feishuLog(
+        `[InputWindow] extend openId=...${openId.slice(-6)} fragments=${win.fragments.length}`,
       );
     } else {
       const timer = setTimeout(() => this._flush(openId), this.windowMs);
@@ -56,7 +58,7 @@ export class FeishuInputWindowManager {
         chatId,
         chatType,
       });
-      process.stderr.write(`[InputWindow] open openId=...${openId.slice(-6)}\n`);
+      feishuLog(`[InputWindow] open openId=...${openId.slice(-6)}`);
     }
   }
 
@@ -71,7 +73,7 @@ export class FeishuInputWindowManager {
     if (win) {
       clearTimeout(win.timer);
       this.windows.delete(openId);
-      process.stderr.write(`[InputWindow] cleared openId=...${openId.slice(-6)}\n`);
+      feishuLog(`[InputWindow] cleared openId=...${openId.slice(-6)}`);
     }
   }
 
@@ -87,9 +89,9 @@ export class FeishuInputWindowManager {
     clearTimeout(win.timer);
 
     const mergedText = win.fragments.map(f => f.text).join('\n');
-    process.stderr.write(
+    feishuLog(
       `[InputWindow] flush openId=...${openId.slice(-6)} fragments=${win.fragments.length}` +
-      ` anchor=${win.anchorMessageId.slice(-8)} text="${mergedText.slice(0, 80)}"\n`,
+      ` anchor=${win.anchorMessageId.slice(-8)} text="${mergedText.slice(0, 80)}"`,
     );
     this.onFlush(openId, mergedText, win.anchorMessageId, win.chatId, win.chatType);
   }

@@ -2,6 +2,7 @@
 // 参考 SOP: E:\spawn-work\feishu-bot-sop.md
 // 支持文本(text)、富文本(post)、卡片消息(interactive)
 
+import { feishuLog } from './debug.js';
 import {
   FeishuMessageRequest,
   FeishuMessageResponse,
@@ -311,6 +312,44 @@ export function buildAnswerCard(
 }
 
 /**
+ * 以文本消息回复一条指定消息（挂在原消息下）。
+ * 用于 format=text 的气泡回复路径。
+ * 返回新建回复的 message_id，失败返回 null。
+ */
+export async function replyToMessageWithText(
+  messageId: string,
+  text: string,
+  tokenManager: TokenManager,
+): Promise<string | null> {
+  try {
+    const token = await tokenManager.getToken();
+    const resp = await fetch(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({
+          msg_type: 'text',
+          content: JSON.stringify({ text }),
+        }),
+      },
+    );
+    const json = await resp.json() as { code: number; data?: { message_id: string } };
+    if (json.code !== 0) {
+      feishuLog(`[replyToMessageWithText] code=${json.code}`);
+      return null;
+    }
+    return json.data?.message_id ?? null;
+  } catch (err) {
+    feishuLog(`[replyToMessageWithText] error: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
  * 发送占位卡片（思考中），返回 message_id 供后续 patch。失败返回 null。
  */
 export async function sendPlaceholderCard(
@@ -390,12 +429,12 @@ export async function replyToMessageWithCard(
     );
     const json = await resp.json() as { code: number; data?: { message_id: string } };
     if (json.code !== 0) {
-      process.stderr.write(`[replyToMessageWithCard] code=${json.code}\n`);
+      feishuLog(`[replyToMessageWithCard] code=${json.code}`);
       return null;
     }
     return json.data?.message_id ?? null;
   } catch (err) {
-    process.stderr.write(`[replyToMessageWithCard] error: ${err instanceof Error ? err.message : String(err)}\n`);
+    feishuLog(`[replyToMessageWithCard] error: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
