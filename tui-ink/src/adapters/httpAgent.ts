@@ -313,6 +313,15 @@ export class HttpConvAgent extends EventEmitter {
   }
 
   /**
+   * Append entries to the in-memory message history.
+   * Used to merge completed fork Q/As back into the base PM so subsequent
+   * base PM turns can reference them.
+   */
+  appendHistory(entries: Array<{ role: "user" | "assistant"; content: string }>): void {
+    this.messages.push(...entries);
+  }
+
+  /**
    * Trim a message array to fit within maxChars total content length.
    * Keeps the first message (initial task context) and always the last 4.
    * Exported static so index.tsx can call it without an agent instance.

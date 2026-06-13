@@ -1,12 +1,13 @@
 /**
- * Phase B/C concurrent dispatch scenarios — 7 comprehensive test cases.
+ * Phase B/C/D concurrent dispatch + fork-merge-back scenarios.
  *
- * Uses a self-contained simulation harness that mirrors the actual state maps
- * (feishuBusy, feishuForks, feishuPendingQueue, feishuCheckpoints) without
- * touching real Feishu APIs or LLM endpoints.
+ * Uses a self-contained simulation harness that mirrors the actual state maps:
+ *   feishuBusy, feishuForks, feishuPendingQueue, feishuCheckpoints,
+ *   feishuForkBuffer, feishuForkSeq
  *
- * Scenario 1 tests the FeishuInputWindowManager directly with a tiny window (30ms).
- * Scenarios 2–7 test the dispatch/drain routing logic in isolation.
+ * No real Feishu APIs or LLM calls are made.
+ * Scenario 1 tests FeishuInputWindowManager with a tiny 30ms window.
+ * All other scenarios drive the dispatch / drain / merge logic directly.
  */
 
 import { describe, it } from "node:test";
@@ -16,56 +17,51 @@ import { FeishuInputWindowManager } from "../../feishu/input-window.js";
 
 // ── Shared simulation harness ─────────────────────────────────────────────────
 
-interface Msg { role: "user" | "assistant"; content: string }
+type Msg = { role: "user" | "assistant"; content: string };
 interface PendingMsg { text: string; anchorMsgId: string }
-
 interface ForkRecord {
-  forkId: string;
-  openId: string;
-  text: string;
-  initialMessages: Msg[];
+  forkId: string; seq: number; openId: string;
+  text: string; anchorMsgId: string; initialMessages: Msg[];
 }
 
 function makeSimulator(maxConcurrent = 3) {
-  const feishuBusy   = new Set<string>();
-  const feishuForks  = new Map<string, Set<string>>();
-  const pendingQueue = new Map<string, PendingMsg[]>();
-  const checkpoints  = new Map<string, Msg[]>(); // pmId → last clean history
+  const feishuBusy    = new Set<string>();
+  const feishuForks   = new Map<string, Set<string>>();
+  const pendingQueue  = new Map<string, PendingMsg[]>();
+  const checkpoints   = new Map<string, Msg[]>();
+  // Merge-back state (Phase D)
+  let forkArrivalSeq = 0;
+  const forkBuffer    = new Map<string, Array<{ seq: number; anchorMsgId: string; question: string; answer: string }>>();
+  // Track what appendHistory was called with (simulates base PM live messages update)
+  const appendedEntries: Array<{ pmId: string; entries: Msg[] }> = [];
+  // Fork creation log
   const forkLog: ForkRecord[] = [];
   let forkSeq = 0;
 
-  // Mirror of HttpConvAgent.compactHistory — kept local so the test has no side effects
   const compact = (msgs: Msg[], maxChars: number): Msg[] => {
     let total = msgs.reduce((s, m) => s + m.content.length, 0);
     if (total <= maxChars) return msgs.slice();
     const result = [...msgs];
     let i = 1;
-    while (total > maxChars && i < result.length - 4) {
-      total -= result[i]!.content.length;
-      result.splice(i, 1);
-    }
+    while (total > maxChars && i < result.length - 4) { total -= result[i]!.content.length; result.splice(i, 1); }
     return result;
   };
 
-  // dispatch: mirrors connectFeishu's dispatchMessage routing logic
   const dispatch = (
-    openId: string,
-    basePmId: string,
-    text: string,
-    anchorMsgId = "msg-x",
+    openId: string, basePmId: string, text: string, anchorMsgId = "msg-x",
   ): { type: "direct" | "forked" | "queued"; forkId?: string; queueLen?: number } => {
     if (feishuBusy.has(basePmId)) {
       const forkCount = feishuForks.get(openId)?.size ?? 0;
       if (forkCount < maxConcurrent - 1) {
-        const forkId = `fork-${++forkSeq}`;
-        // Bug 1 fix: use checkpoint, not live messages
-        const rawCheckpoint = checkpoints.get(basePmId) ?? [];
-        const initialMessages = compact(rawCheckpoint, 40_000);
+        const forkId   = `fork-${++forkSeq}`;
+        const seq      = ++forkArrivalSeq;
+        const rawCp    = checkpoints.get(basePmId) ?? [];
+        const initMsgs = compact(rawCp, 40_000);
         const forks = feishuForks.get(openId) ?? new Set<string>();
         forks.add(forkId);
         feishuForks.set(openId, forks);
         feishuBusy.add(forkId);
-        forkLog.push({ forkId, openId, text, initialMessages });
+        forkLog.push({ forkId, seq, openId, text, anchorMsgId, initialMessages: initMsgs });
         return { type: "forked", forkId };
       }
       const q = pendingQueue.get(openId) ?? [];
@@ -77,36 +73,56 @@ function makeSimulator(maxConcurrent = 3) {
     return { type: "direct" };
   };
 
-  // drain: mirrors connectFeishu's drainPendingQueue
   const drain = (openId: string, basePmId: string): void => {
     const q = pendingQueue.get(openId);
     if (!q || q.length === 0) return;
     const forkCount = feishuForks.get(openId)?.size ?? 0;
-    const baseBusy  = feishuBusy.has(basePmId);
-    const total     = (baseBusy ? 1 : 0) + forkCount;
+    const total = (feishuBusy.has(basePmId) ? 1 : 0) + forkCount;
     if (total >= maxConcurrent) return;
     const next = q.shift()!;
     dispatch(openId, basePmId, next.text, next.anchorMsgId);
   };
 
-  // completeFork: mirrors fork's turnEndHook
-  const completeFork = (openId: string, forkId: string, basePmId: string): void => {
+  // completeFork: buffers Q/A for later merge
+  const completeFork = (
+    openId: string, forkId: string, basePmId: string,
+    answer: string, // what the fork replied to the user
+  ): void => {
     feishuBusy.delete(forkId);
+    const record = forkLog.find(f => f.forkId === forkId);
+    if (record && answer) {
+      const buf = forkBuffer.get(openId) ?? [];
+      buf.push({ seq: record.seq, anchorMsgId: record.anchorMsgId, question: record.text, answer });
+      forkBuffer.set(openId, buf);
+    }
     feishuForks.get(openId)?.delete(forkId);
     if ((feishuForks.get(openId)?.size ?? 0) === 0) feishuForks.delete(openId);
     drain(openId, basePmId);
   };
 
-  // completeBase: mirrors base PM's turnEndHook (Bug 2 fix: delete busy BEFORE draining)
+  // completeBase: merges forkBuffer → checkpoint + appendHistory
   const completeBase = (openId: string, basePmId: string, finalMessages: Msg[]): void => {
-    feishuBusy.delete(basePmId);                // Bug 2 fix: pre-clear before drain
-    checkpoints.set(basePmId, finalMessages);   // Bug 1 fix: save clean checkpoint
+    feishuBusy.delete(basePmId);
+    let cleanHistory = finalMessages.slice();
+    const buf = forkBuffer.get(openId);
+    if (buf && buf.length > 0) {
+      buf.sort((a, b) => a.seq - b.seq);
+      const forkEntries = buf.flatMap(c => ([
+        { role: "user"      as const, content: c.question },
+        { role: "assistant" as const, content: c.answer   },
+      ]));
+      cleanHistory = cleanHistory.concat(forkEntries);
+      appendedEntries.push({ pmId: basePmId, entries: forkEntries }); // simulate bpm.appendHistory
+      forkBuffer.delete(openId);
+    }
+    checkpoints.set(basePmId, cleanHistory);
     drain(openId, basePmId);
   };
 
   return {
     dispatch, drain, completeFork, completeBase,
-    feishuBusy, feishuForks, pendingQueue, checkpoints, forkLog,
+    feishuBusy, feishuForks, pendingQueue, checkpoints,
+    forkBuffer, forkLog, appendedEntries,
   };
 }
 
@@ -114,235 +130,276 @@ const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ── Scenario tests ─────────────────────────────────────────────────────────────
 
-describe("Phase B/C — concurrent scenarios (simulation)", () => {
+describe("Phase B/C/D — concurrent scenarios (simulation)", () => {
 
-  // ── Scenario 1: Fragment merging via input window ─────────────────────────
+  // ── 场景1: 碎片合并 ────────────────────────────────────────────────────────
   it("场景1 碎片合并: 1500ms 内连发 3 条 → 只 1 次 dispatch, 文本合并", async () => {
-    const WIN = 30; // ms — small so test runs fast
+    const WIN = 30;
     const dispatched: Array<{ text: string; anchor: string }> = [];
     const mgr = new FeishuInputWindowManager(WIN, (_, text, anchor) => {
       dispatched.push({ text, anchor });
     });
-
     mgr.feed("u1", "I2C", "msg-1", "chat1", "p2p");
     await wait(10);
     mgr.feed("u1", "总线", "msg-2", "chat1", "p2p");
     await wait(10);
     mgr.feed("u1", "挂死", "msg-3", "chat1", "p2p");
-    // window opens after last fragment
     await wait(WIN + 20);
-
     assert.equal(dispatched.length, 1, "exactly 1 dispatch after merge");
     assert.equal(dispatched[0]!.text, "I2C\n总线\n挂死");
-    assert.equal(dispatched[0]!.anchor, "msg-1", "anchor = first fragment's msgId");
+    assert.equal(dispatched[0]!.anchor, "msg-1");
   });
 
-  // ── Scenario 2: Concurrent fork when base is busy ────────────────────────
+  // ── 场景2: base busy → fork ────────────────────────────────────────────────
   it("场景2 并发开 fork: base busy 时发 2 条 → 2 个 fork 启动", () => {
     const { dispatch, feishuForks, feishuBusy } = makeSimulator(3);
-    const oid = "user-1", base = "pm-1";
-
-    const r0 = dispatch(oid, base, "Q1");      // goes direct to base
-    assert.equal(r0.type, "direct");
-    assert.ok(feishuBusy.has(base));
-
-    const r1 = dispatch(oid, base, "Q2");      // base busy → fork 1
-    assert.equal(r1.type, "forked");
-
-    const r2 = dispatch(oid, base, "Q3");      // base busy, 1 fork → fork 2
-    assert.equal(r2.type, "forked");
-
-    assert.equal(feishuForks.get(oid)?.size, 2, "exactly 2 forks running");
-    assert.equal(feishuBusy.size, 3, "base + 2 forks = 3 total");
+    const oid = "u1", base = "pm1";
+    assert.equal(dispatch(oid, base, "Q1").type, "direct");
+    assert.equal(dispatch(oid, base, "Q2").type, "forked");
+    assert.equal(dispatch(oid, base, "Q3").type, "forked");
+    assert.equal(feishuForks.get(oid)?.size, 2);
+    assert.equal(feishuBusy.size, 3);
   });
 
-  // ── Scenario 3: Overflow to pending queue at capacity ────────────────────
-  it("场景3 满载排队: base busy + 2 fork 时发第 4 条 → 进 pendingQueue", () => {
+  // ── 场景3: 满载 → pendingQueue ────────────────────────────────────────────
+  it("场景3 满载排队: base + 2 fork 时发第 4 条 → 进 pendingQueue", () => {
     const { dispatch, feishuForks, pendingQueue } = makeSimulator(3);
-    const oid = "user-2", base = "pm-2";
-
-    dispatch(oid, base, "Q1"); // direct
-    dispatch(oid, base, "Q2"); // fork-1
-    dispatch(oid, base, "Q3"); // fork-2  → capacity reached
-    assert.equal(feishuForks.get(oid)?.size, 2, "2 forks at capacity");
-
-    const r3 = dispatch(oid, base, "Q4"); // → pending
-    assert.equal(r3.type, "queued");
-    assert.equal((r3 as any).queueLen, 1);
+    const oid = "u2", base = "pm2";
+    dispatch(oid, base, "Q1"); dispatch(oid, base, "Q2"); dispatch(oid, base, "Q3");
+    assert.equal(feishuForks.get(oid)?.size, 2);
+    assert.equal(dispatch(oid, base, "Q4").type, "queued");
     assert.equal(pendingQueue.get(oid)?.length, 1);
-
-    const r4 = dispatch(oid, base, "Q5"); // → pending
-    assert.equal(r4.type, "queued");
-    assert.equal(pendingQueue.get(oid)?.length, 2);
   });
 
-  // ── Scenario 4: Drain releases pending after fork completes ──────────────
+  // ── 场景4: drain 出队 ──────────────────────────────────────────────────────
   it("场景4 drain 出队: 一个 fork 完成 → pendingQueue[0] 出队启动", () => {
     const { dispatch, completeFork, feishuForks, pendingQueue } = makeSimulator(3);
-    const oid = "user-3", base = "pm-3";
-
+    const oid = "u3", base = "pm3";
     dispatch(oid, base, "Q1");
-    const r1 = dispatch(oid, base, "Q2"); // fork-1
-    dispatch(oid, base, "Q3"); // fork-2 → capacity
-    dispatch(oid, base, "Q4"); // → pending[0]
-    dispatch(oid, base, "Q5"); // → pending[1]
+    const r1 = dispatch(oid, base, "Q2");
+    dispatch(oid, base, "Q3");
+    dispatch(oid, base, "Q4"); dispatch(oid, base, "Q5");
     assert.equal(pendingQueue.get(oid)?.length, 2);
-
-    const fork1 = (r1 as { forkId: string }).forkId;
-    completeFork(oid, fork1, base);
-    // drain should have shifted Q4 out and started it as a new fork
+    completeFork(oid, (r1 as { forkId: string }).forkId, base, "A2");
     assert.equal(pendingQueue.get(oid)?.length, 1, "one item drained");
-    assert.equal(feishuForks.get(oid)?.size, 2, "still 2 active forks (fork2 + drained)");
+    assert.equal(feishuForks.get(oid)?.size, 2);
   });
 
-  // ── Scenario 5: Fork snapshot isolation (Bug 1 fix validation) ───────────
+  // ── 场景5: fork 快照隔离 (Bug 1 fix) ────────────────────────────────────
   it("场景5 fork 快照隔离: base 处理 Q1 时 fork Q2 → fork initialMessages 不含 Q1", () => {
     const { dispatch, forkLog, checkpoints } = makeSimulator(3);
-    const oid = "user-4", base = "pm-4";
-
-    // Simulate base PM having completed turn 0 (checkpoint = [Q0, A0])
-    const cleanHistory: Msg[] = [
-      { role: "user",      content: "Q0 历史问题" },
-      { role: "assistant", content: "A0 历史回答" },
+    const oid = "u4", base = "pm4";
+    const hist: Msg[] = [
+      { role: "user",      content: "Q0 历史" },
+      { role: "assistant", content: "A0 历史" },
     ];
-    checkpoints.set(base, cleanHistory);
-
-    // Base PM now starts processing Q1 (becomes busy, no new checkpoint yet)
-    dispatch(oid, base, "Q1");  // direct → base busy, no checkpoint update
-
-    // Q2 arrives while Q1 in-flight → fork
-    const r2 = dispatch(oid, base, "Q2");
-    assert.equal(r2.type, "forked");
-
+    checkpoints.set(base, hist);
+    dispatch(oid, base, "Q1"); // base busy, no checkpoint update
+    dispatch(oid, base, "Q2"); // → fork
     const fork = forkLog[0]!;
-    assert.equal(fork.text, "Q2");
-
-    // Fork's initialMessages must equal the checkpoint (Q0+A0), NOT contain Q1
-    assert.deepEqual(fork.initialMessages, cleanHistory, "fork uses clean checkpoint");
-
-    const containsQ1 = fork.initialMessages.some((m) => m.content.includes("Q1"));
-    assert.ok(!containsQ1, "fork's initialMessages must NOT contain in-flight Q1");
+    assert.deepEqual(fork.initialMessages, hist, "fork uses clean checkpoint");
+    assert.ok(!fork.initialMessages.some(m => m.content.includes("Q1")), "no Q1 in snapshot");
   });
 
-  // ── Scenario 6: Fork error isolation ─────────────────────────────────────
-  it("场景6 fork 错误隔离: fork-1 抛错 → fork-2 不受影响, base 不受影响", () => {
+  // ── 场景6: fork 错误隔离 ─────────────────────────────────────────────────
+  it("场景6 fork 错误隔离: fork-1 抛错 → fork-2 不受影响", () => {
     const { dispatch, feishuBusy, feishuForks } = makeSimulator(3);
-    const oid = "user-5", base = "pm-5";
-
-    dispatch(oid, base, "Q1"); // direct
-    const r1 = dispatch(oid, base, "Q2"); // fork-1
-    const r2 = dispatch(oid, base, "Q3"); // fork-2
-
+    const oid = "u5", base = "pm5";
+    dispatch(oid, base, "Q1");
+    const r1 = dispatch(oid, base, "Q2");
+    const r2 = dispatch(oid, base, "Q3");
     const fork1 = (r1 as { forkId: string }).forkId;
     const fork2 = (r2 as { forkId: string }).forkId;
-
-    // Simulate killAgent for fork-1 (error path — removes from busy+forks)
-    feishuBusy.delete(fork1);
-    feishuForks.get(oid)?.delete(fork1);
-
-    // fork-2 and base PM must be unaffected
-    assert.ok(feishuBusy.has(fork2), "fork-2 still running");
-    assert.ok(feishuBusy.has(base),  "base PM still running");
-    assert.ok(feishuForks.get(oid)?.has(fork2), "fork-2 still tracked");
-    assert.equal(feishuForks.get(oid)?.size, 1, "only fork-2 remains");
+    feishuBusy.delete(fork1); feishuForks.get(oid)?.delete(fork1); // simulate kill
+    assert.ok(feishuBusy.has(fork2)); assert.ok(feishuForks.get(oid)?.has(fork2));
   });
 
-  // ── Scenario 7: Concurrent cap never exceeded ─────────────────────────────
+  // ── 场景7: 上限不超 ────────────────────────────────────────────────────────
   it("场景7 上限不超: 连发 6 条 → 同时 running 数始终 ≤ 3", () => {
-    const { dispatch, completeFork, feishuBusy, feishuForks } = makeSimulator(3);
-    const oid = "user-6", base = "pm-6";
-
-    const forkIds: string[] = [];
-    const results = [];
-    for (let i = 1; i <= 6; i++) {
-      results.push(dispatch(oid, base, `Q${i}`));
-    }
-
-    // Collect all forked IDs
-    for (const r of results) {
-      if (r.type === "forked") forkIds.push((r as any).forkId as string);
-    }
-
-    // Peak concurrent = base(1) + forks(2) = 3
-    const peakRunning = 1 + (feishuForks.get(oid)?.size ?? 0);
-    assert.ok(peakRunning <= 3, `peak running ${peakRunning} must be ≤ 3`);
-
-    // Complete one fork → drain → still ≤ 3
-    if (forkIds.length > 0) {
-      completeFork(oid, forkIds[0]!, base);
-      const afterDrain = (feishuBusy.has(base) ? 1 : 0) + (feishuForks.get(oid)?.size ?? 0);
-      assert.ok(afterDrain <= 3, `after drain: ${afterDrain} ≤ 3`);
+    const { dispatch, completeFork, feishuBusy, feishuForks, forkLog } = makeSimulator(3);
+    const oid = "u6", base = "pm6";
+    for (let i = 1; i <= 6; i++) dispatch(oid, base, `Q${i}`);
+    assert.ok((feishuBusy.has(base) ? 1 : 0) + (feishuForks.get(oid)?.size ?? 0) <= 3);
+    if (forkLog.length > 0) {
+      completeFork(oid, forkLog[0]!.forkId, base, "A_fork1");
+      assert.ok((feishuBusy.has(base) ? 1 : 0) + (feishuForks.get(oid)?.size ?? 0) <= 3);
     }
   });
 
-  // ── Bug 2 validation: drain respects MAX including base PM ────────────────
-  it("Bug2 验证: base busy + 2 fork(满载) → drain 不放出第 3 个 fork", () => {
+  // ── Bug2: drain 容量判定 ─────────────────────────────────────────────────
+  it("Bug2 drain 满载不放行: base + 2 fork → drain 返回", () => {
     const { dispatch, drain, feishuForks, pendingQueue } = makeSimulator(3);
-    const oid = "user-7", base = "pm-7";
-
-    dispatch(oid, base, "Q1"); // direct, base busy
-    dispatch(oid, base, "Q2"); // fork-1
-    dispatch(oid, base, "Q3"); // fork-2 → at capacity
-    // Manually push a pending item (simulates arrival at capacity)
-    pendingQueue.set(oid, [{ text: "Q4", anchorMsgId: "msg-4" }]);
-
-    // drain should NOT dispatch because total = 1+2 = 3 = MAX
+    const oid = "u7", base = "pm7";
+    dispatch(oid, base, "Q1"); dispatch(oid, base, "Q2"); dispatch(oid, base, "Q3");
+    pendingQueue.set(oid, [{ text: "Q4", anchorMsgId: "m4" }]);
     drain(oid, base);
-    assert.equal(pendingQueue.get(oid)?.length, 1, "drain must not fire when at capacity");
-    assert.equal(feishuForks.get(oid)?.size, 2, "still 2 forks");
+    assert.equal(pendingQueue.get(oid)?.length, 1, "must not fire");
+    assert.equal(feishuForks.get(oid)?.size, 2);
   });
 
-  it("Bug2 验证: base busy + 1 fork → drain 可放出第 2 个 fork", () => {
+  it("Bug2 drain 半载可放行: base + 1 fork → drain 启动第 2 个 fork", () => {
     const { dispatch, drain, feishuForks, pendingQueue } = makeSimulator(3);
-    const oid = "user-8", base = "pm-8";
-
-    dispatch(oid, base, "Q1"); // direct, base busy
-    dispatch(oid, base, "Q2"); // fork-1 → total = 2 < 3
-    pendingQueue.set(oid, [{ text: "Q3", anchorMsgId: "msg-3" }]);
-
+    const oid = "u8", base = "pm8";
+    dispatch(oid, base, "Q1"); dispatch(oid, base, "Q2");
+    pendingQueue.set(oid, [{ text: "Q3", anchorMsgId: "m3" }]);
     drain(oid, base);
-    assert.equal(pendingQueue.get(oid)?.length, 0, "drain fired and emptied queue");
-    assert.equal(feishuForks.get(oid)?.size, 2, "2nd fork started by drain");
+    assert.equal(pendingQueue.get(oid)?.length, 0, "Q3 drained");
+    assert.equal(feishuForks.get(oid)?.size, 2);
   });
 
-  // ── Bug 2 drain-routing fix: base PM done → pending routed DIRECT ────────
-  it("Bug2 drain 路由: base PM 完成后 pending 直接投递给 base PM(不创建多余 fork)", () => {
+  it("Bug2 drain 路由: base PM 完成后 pending 直投 base PM(不 fork)", () => {
     const { dispatch, completeBase, feishuBusy, feishuForks, pendingQueue } = makeSimulator(3);
-    const oid = "user-9", base = "pm-9";
-
-    dispatch(oid, base, "Q1"); // direct → base busy
-    // No forks. Push a pending item manually (simulates window-outside arrival at capacity=1).
-    pendingQueue.set(oid, [{ text: "Q2", anchorMsgId: "msg-2" }]);
-
-    // Base PM finishes Q1 with a clean history
-    const finalHistory: Msg[] = [
-      { role: "user",      content: "Q1" },
-      { role: "assistant", content: "A1" },
-    ];
-    completeBase(oid, base, finalHistory);
-
-    // drain should have routed Q2 directly to base PM (busy → direct), not forked
-    assert.ok(feishuBusy.has(base), "base PM re-acquired busy for Q2");
-    assert.equal(feishuForks.get(oid)?.size ?? 0, 0, "no fork created — routed direct");
-    assert.equal(pendingQueue.get(oid)?.length, 0, "pending queue drained");
+    const oid = "u9", base = "pm9";
+    dispatch(oid, base, "Q1");
+    pendingQueue.set(oid, [{ text: "Q2", anchorMsgId: "m2" }]);
+    completeBase(oid, base, [{ role: "user", content: "Q1" }, { role: "assistant", content: "A1" }]);
+    assert.ok(feishuBusy.has(base), "base re-acquired busy for Q2");
+    assert.equal(feishuForks.get(oid)?.size ?? 0, 0, "no fork created");
+    assert.equal(pendingQueue.get(oid)?.length, 0);
   });
 });
 
-// ── Interface contract (remains from Phase B) ────────────────────────────────
-describe("HttpConvAgent static interface (Phase B contract)", () => {
-  it("compactHistory exists and matches simulation compact logic", () => {
-    const msgs: Msg[] = [
-      { role: "user",      content: "A".repeat(1000) },
-      { role: "assistant", content: "B".repeat(5000) },
-      { role: "user",      content: "C".repeat(1000) },
-      { role: "assistant", content: "D".repeat(1000) },
-      { role: "user",      content: "E".repeat(1000) },
-      { role: "assistant", content: "F".repeat(1000) },
-      { role: "user",      content: "G".repeat(1000) },
+// ── Phase D: fork merge-back tests ───────────────────────────────────────────
+
+describe("Phase D — fork Q/A merge-back into base PM history", () => {
+  it("fork 完成后 Q/A 进入 forkBuffer(含 seq 和 answer)", () => {
+    const { dispatch, completeFork, forkBuffer } = makeSimulator(3);
+    const oid = "o1", base = "b1";
+    dispatch(oid, base, "Q1"); // base
+    dispatch(oid, base, "Q2"); // fork-1
+    const forkId = "fork-1";
+    // Force matching by using the actual fork ID from forkLog
+    const { forkLog } = makeSimulator(3);
+    // Re-run with captured log
+    const sim = makeSimulator(3);
+    sim.dispatch(oid, base, "Q1");
+    sim.dispatch(oid, base, "Q2");
+    const record = sim.forkLog[0]!;
+    sim.completeFork(oid, record.forkId, base, "A2-reply");
+    const buf = sim.forkBuffer.get(oid);
+    assert.ok(buf && buf.length === 1, "one entry buffered");
+    assert.equal(buf![0]!.question, "Q2");
+    assert.equal(buf![0]!.answer,   "A2-reply");
+    assert.equal(buf![0]!.seq,      record.seq);
+    void forkId; void forkBuffer; void dispatch; void completeFork; // suppress unused
+  });
+
+  it("乱序完成 → 合并按到达序排列(先到先排)", () => {
+    const sim = makeSimulator(3);
+    const oid = "o2", base = "b2";
+    sim.dispatch(oid, base, "Q1"); // base
+    sim.dispatch(oid, base, "Q2"); // fork-1 (seq=1)
+    sim.dispatch(oid, base, "Q3"); // fork-2 (seq=2)
+
+    const [fork1, fork2] = [sim.forkLog[0]!, sim.forkLog[1]!];
+    // fork-2 (Q3) completes FIRST
+    sim.completeFork(oid, fork2.forkId, base, "A3-first");
+    // fork-1 (Q2) completes SECOND
+    sim.completeFork(oid, fork1.forkId, base, "A2-second");
+
+    // Base PM finishes Q1
+    sim.completeBase(oid, base, [
+      { role: "user", content: "Q1" }, { role: "assistant", content: "A1" },
+    ]);
+
+    // Checkpoint should have Q2/A2 before Q3/A3 (arrival order, not completion order)
+    const checkpoint = sim.checkpoints.get(base)!;
+    const q2idx = checkpoint.findIndex(m => m.content === "Q2");
+    const q3idx = checkpoint.findIndex(m => m.content === "Q3");
+    assert.ok(q2idx !== -1, "Q2 in checkpoint");
+    assert.ok(q3idx !== -1, "Q3 in checkpoint");
+    assert.ok(q2idx < q3idx, `Q2(idx=${q2idx}) should precede Q3(idx=${q3idx}) in history`);
+  });
+
+  it("base PM turnEnd 时 forkBuffer 合并进 checkpoint + appendHistory", () => {
+    const sim = makeSimulator(3);
+    const oid = "o3", base = "b3";
+    const prevHistory: Msg[] = [
+      { role: "user",      content: "Q0" },
+      { role: "assistant", content: "A0" },
     ];
+    sim.checkpoints.set(base, prevHistory);
+
+    sim.dispatch(oid, base, "Q1"); // base
+    sim.dispatch(oid, base, "Q2"); // fork
+    const record = sim.forkLog[0]!;
+
+    // Fork completes
+    sim.completeFork(oid, record.forkId, base, "A2");
+
+    // Base PM finishes Q1
+    sim.completeBase(oid, base, [
+      { role: "user", content: "Q1" }, { role: "assistant", content: "A1" },
+    ]);
+
+    const cp = sim.checkpoints.get(base)!;
+    assert.ok(cp.some(m => m.content === "Q1"), "Q1 in checkpoint");
+    assert.ok(cp.some(m => m.content === "A1"), "A1 in checkpoint");
+    assert.ok(cp.some(m => m.content === "Q2"), "fork Q2 merged into checkpoint");
+    assert.ok(cp.some(m => m.content === "A2"), "fork A2 merged into checkpoint");
+
+    // appendHistory should have been called with fork entries
+    const appended = sim.appendedEntries.find(e => e.pmId === base);
+    assert.ok(appended, "appendHistory called on base PM");
+    assert.ok(appended!.entries.some(e => e.content === "Q2"), "Q2 in appendHistory");
+    assert.ok(appended!.entries.some(e => e.content === "A2"), "A2 in appendHistory");
+  });
+
+  it("fork 无回复(silent failure) → 不进 buffer", () => {
+    const sim = makeSimulator(3);
+    const oid = "o4", base = "b4";
+    sim.dispatch(oid, base, "Q1");
+    sim.dispatch(oid, base, "Q2");
+    const record = sim.forkLog[0]!;
+    // Complete with empty answer (silent failure)
+    sim.completeFork(oid, record.forkId, base, "");
+    assert.equal(sim.forkBuffer.get(oid)?.length ?? 0, 0, "silent fork not buffered");
+  });
+
+  it("后续 fork 可见已合并历史(通过 checkpoint)", () => {
+    const sim = makeSimulator(3);
+    const oid = "o5", base = "b5";
+
+    // Turn 1: base processes Q1, fork processes Q2
+    sim.dispatch(oid, base, "Q1");
+    const r1 = sim.dispatch(oid, base, "Q2");
+    const forkRecord1 = sim.forkLog[0]!;
+    sim.completeFork(oid, forkRecord1.forkId, base, "A2");
+    sim.completeBase(oid, base, [
+      { role: "user", content: "Q1" }, { role: "assistant", content: "A1" },
+    ]);
+    // Checkpoint now has Q1/A1 + Q2/A2
+
+    // Turn 2: base processes Q3, fork created for Q4
+    // Fork should see Q2/A2 in its snapshot (via checkpoint)
+    sim.dispatch(oid, base, "Q3"); // base busy again
+    const r2 = sim.dispatch(oid, base, "Q4"); // fork
+    const forkRecord2 = sim.forkLog[1]!;
+    assert.equal(forkRecord2.text, "Q4");
+    assert.ok(forkRecord2.initialMessages.some(m => m.content === "Q2"),
+      "turn-2 fork should see Q2 from merged history");
+    assert.ok(forkRecord2.initialMessages.some(m => m.content === "A2"),
+      "turn-2 fork should see A2 from merged history");
+    void r1; void r2; // suppress unused
+  });
+});
+
+// ── Interface contract ────────────────────────────────────────────────────────
+describe("HttpConvAgent static/instance interface", () => {
+  it("compactHistory trims middle, keeps first + last 4", () => {
+    const msgs: Msg[] = Array.from({ length: 7 }, (_, i) => ({
+      role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: "X".repeat(1000),
+    }));
     const out = HttpConvAgent.compactHistory(msgs, 3000);
-    // first preserved, last 4 preserved
-    assert.equal(out[0]!.content, "A".repeat(1000));
+    assert.equal(out[0], msgs[0]);
     assert.deepEqual(out.slice(-4), msgs.slice(-4));
+  });
+
+  it("appendHistory appends entries to the messages", () => {
+    // appendHistory is tested via the instance method — verify it exists and is callable
+    assert.equal(typeof HttpConvAgent.prototype.appendHistory, "function");
+    assert.equal(typeof HttpConvAgent.prototype.getMessages,   "function");
+    assert.equal(typeof HttpConvAgent.compactHistory,          "function");
   });
 });

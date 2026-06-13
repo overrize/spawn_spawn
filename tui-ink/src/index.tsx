@@ -170,6 +170,15 @@ const feishuPendingQueue = new Map<string, Array<{ text: string; anchorMsgId: st
 // Fork tasks use this snapshot instead of live messages to prevent cross-contamination with
 // in-flight sibling turns (Bug 1 fix).
 const feishuCheckpoints = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
+// feishuForkBuffer: completed fork Q/As awaiting merge into base PM history on the next
+// base PM turnEnd. Keyed by openId; entries carry arrival seq for stable ordering.
+let feishuForkSeq = 0;
+const feishuForkBuffer = new Map<string, Array<{
+  seq: number;
+  anchorMsgId: string;
+  question: string;
+  answer: string;
+}>>();
 // max total concurrent tasks per openId (base PM + forks)
 const FEISHU_MAX_CONCURRENT = 3;
 
@@ -374,6 +383,17 @@ function connectFeishu(appId: string, appSecret: string): void {
     const forkId = `feishu-fork-${task.taskId.slice(-8)}`;
     pmCurrentTask.set(forkId, task.taskId);
 
+    // Record arrival order so the buffer can be merged in question-arrival order
+    // rather than completion order (multiple forks completing out of order).
+    const forkArrivalSeq = ++feishuForkSeq;
+
+    // Capture the fork's reply text so we can merge Q/A back into base PM history.
+    let forkAnswer = "";
+    const forkReplyHook = (replyText: string): void => {
+      forkAnswer += (forkAnswer ? "\n" : "") + replyText;
+      makeReplyHook(forkId)(replyText); // still routes to aggregator for Feishu card
+    };
+
     // Snapshot: use the last confirmed-clean checkpoint (captured after the previous base-PM
     // turn completed) rather than live getMessages(). The live array is dirty — it already
     // contains the in-flight Q that base PM is currently processing, which would make the
@@ -417,10 +437,18 @@ function connectFeishu(appId: string, appSecret: string): void {
       sharedSystemPrompt: sharedSysPrompt,
       initialMessages: snapshot,
       firstMessage: text,
-      replyHook: makeReplyHook(forkId),
+      replyHook: forkReplyHook,
       turnEndHook: () => {
         feishuAggregators.get(forkId)?.onTurnEnd();
         feishuBusy.delete(forkId);
+        // Buffer Q/A for merge back into base PM history on next base PM turnEnd.
+        // Only buffer when the fork actually produced a reply (skip silent failures).
+        if (forkAnswer) {
+          const buf = feishuForkBuffer.get(openId) ?? [];
+          buf.push({ seq: forkArrivalSeq, anchorMsgId, question: text, answer: forkAnswer });
+          feishuForkBuffer.set(openId, buf);
+          process.stderr.write(`[FeishuConcurrent] fork ${forkId} buffered Q/A (seq=${forkArrivalSeq})\n`);
+        }
         feishuForks.get(openId)?.delete(forkId);
         if (feishuForks.get(openId)?.size === 0) feishuForks.delete(openId);
         drainPendingQueue(openId);
@@ -483,14 +511,26 @@ function connectFeishu(appId: string, appSecret: string): void {
       startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
         conversationMode: true, replyHook: makeReplyHook(pmId),
         turnEndHook: () => {
-          // Capture clean checkpoint BEFORE releasing busy flag so forks never see
-          // in-flight turns (Bug 1 fix). Pre-delete also fixes drain routing: without
-          // this, drainPendingQueue fires while basePmId is still in feishuBusy
-          // (turnEndHook fires before feishuBusy.delete at line 955), causing pending
-          // items to be forked instead of routed directly to the now-idle base PM.
-          feishuBusy.delete(pmId);
+          feishuBusy.delete(pmId); // pre-clear: drain routing fix (Bug 2)
           const bpm = agents.get(pmId);
-          if (bpm instanceof HttpConvAgent) feishuCheckpoints.set(pmId, bpm.getMessages());
+          if (bpm instanceof HttpConvAgent) {
+            let cleanHistory = bpm.getMessages();
+            // Merge any completed fork Q/As in arrival order so subsequent turns
+            // (base PM and future forks) can see all concurrent work done so far.
+            const buf = feishuForkBuffer.get(openId);
+            if (buf && buf.length > 0) {
+              buf.sort((a, b) => a.seq - b.seq);
+              const forkEntries = buf.flatMap(c => ([
+                { role: "user"      as const, content: c.question },
+                { role: "assistant" as const, content: c.answer   },
+              ]));
+              cleanHistory = cleanHistory.concat(forkEntries);
+              bpm.appendHistory(forkEntries); // inject into base PM's live messages
+              feishuForkBuffer.delete(openId);
+              process.stderr.write(`[FeishuConcurrent] merged ${buf.length} fork Q/As into ${pmId} history\n`);
+            }
+            feishuCheckpoints.set(pmId, cleanHistory);
+          }
           feishuAggregators.get(pmId)?.onTurnEnd();
           drainPendingQueue(openId);
         } });
@@ -546,7 +586,22 @@ function connectFeishu(appId: string, appSecret: string): void {
             turnEndHook: () => {
               feishuBusy.delete(newPmId);
               const bpm2 = agents.get(newPmId);
-              if (bpm2 instanceof HttpConvAgent) feishuCheckpoints.set(newPmId, bpm2.getMessages());
+              if (bpm2 instanceof HttpConvAgent) {
+                let cleanHistory2 = bpm2.getMessages();
+                const buf2 = feishuForkBuffer.get(openId);
+                if (buf2 && buf2.length > 0) {
+                  buf2.sort((a, b) => a.seq - b.seq);
+                  const forkEntries2 = buf2.flatMap(c => ([
+                    { role: "user"      as const, content: c.question },
+                    { role: "assistant" as const, content: c.answer   },
+                  ]));
+                  cleanHistory2 = cleanHistory2.concat(forkEntries2);
+                  bpm2.appendHistory(forkEntries2);
+                  feishuForkBuffer.delete(openId);
+                  process.stderr.write(`[FeishuConcurrent] merged ${buf2.length} fork Q/As into ${newPmId} history\n`);
+                }
+                feishuCheckpoints.set(newPmId, cleanHistory2);
+              }
               feishuAggregators.get(newPmId)?.onTurnEnd();
               drainPendingQueue(openId);
             } });
