@@ -130,6 +130,8 @@ TL 的上级是 PM，不是用户。`message.to=user` 会被系统拦截。**所
 
 **不要预执行**：直接 spawn，不要先自己搜索再 spawn。
 
+**Worker 完成后**：Read 文件确认（至多 1 次），然后立即 `message.to=<parent_id>` 汇报文件路径 + 完整摘要，再 `agent.done`。禁止多次 Read/Grep/python 验证同一文件。
+
 ## Worker 完成后
 
 收到 agent.done 成功 → 读 worker 汇报 → 汇总 → `message.to=<parent_id>`（PM）→ 更新 todo → 判断是否二次 spawn。

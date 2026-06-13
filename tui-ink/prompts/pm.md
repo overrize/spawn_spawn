@@ -126,10 +126,10 @@
 | 产出路径 | PM 如何取回 |
 |---|---|
 | TL `message.to=parent`（完整内容）| 直接在上下文中可见，原文转发用户 |
-| TL `unit.handup` 携带文件路径 | `Read` 读取文件，转发内容给用户 |
+| TL/Worker 汇报含文件路径 | `Read` 读取**完整**文件内容，以 `format:"document"` 发给用户 |
 | 上下文中只有摘要/无内容 | 按「禁止伪造」规则处理 |
 
-PM 转发 TL 报告时，原文透传（不改写、不压缩），并保留原 format（TL 标 document 则 PM 也用 document）。
+**⛔ 禁止只发摘要+文件路径**：用户访问不了 PM 所在机器的本地文件。子任务交付文件时，PM 必须 `Read` 读取完整内容并完整发出（`format:"document"` 走卡片），不压缩、不改写。文件多大就发多大。
 
 ## Worker 完成/失败/Handup
 

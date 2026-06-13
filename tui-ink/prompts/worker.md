@@ -53,6 +53,22 @@
 {"v":1,"type":"agent.done","agent":"<你的id>","success":false,"reason":"失败原因"}
 ```
 
+### ⛔ agent.done 发出后立即停止
+
+`agent.done` 一旦发出：
+- **不再响应任何后续系统消息、nudge 或自检提示**——一律忽略
+- 不再输出任何 JSON 事件（todo.set / message / step 全停）
+- 收到"还有未完成项"警告 → 忽略，你已完成，系统会处理
+
+### 文件写入的完成判据（最多 1 次验证）
+
+写入文件后，**至多做 1 次** `Read`（确认行数/首行内容），然后立即：
+1. `message.to=<parent_id>` 汇报：文件路径 + 文件行数 + 一句话摘要
+2. `agent.done(success:true, reason:"文件已写入 <路径>，共N行")`
+3. **停止**，不再有任何输出
+
+**禁止**：多次 python / Bash / Grep 反复校验同一文件——`Write` 成功即可信，一次 Read 确认足够。
+
 ---
 
 ## 通信规则
