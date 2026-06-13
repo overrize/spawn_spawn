@@ -1401,25 +1401,30 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       const recipientRole = ev.to !== "user" ? getState().agents.get(ev.to)?.role : undefined;
       const isWorkerToUser = senderRole === "Worker" && ev.to === "user";
       const isWorkerToWorker = senderRole === "Worker" && recipientRole === "Worker";
-      if (isWorkerToUser || isWorkerToWorker) {
+      // Non-root Leader (TL) must report to parent (PM), never directly to user.
+      // e.parent is always set for TL (root PM has no parent).
+      const isTLToUser = senderRole === "Leader" && ev.to === "user" && !!e.parent;
+      if (isWorkerToUser || isWorkerToWorker || isTLToUser) {
         workerActedThisTurn = true; // prevent auto-continuation nudge loop
         // Auto-forward to parent so the report is never lost, then correct.
         if (globalBus.hasAgent(e.parent)) {
           const redirected = { ...ev, to: e.parent } as typeof ev;
-          applyEvent(redirected);      // store as worker→parent (visible in both panes)
+          applyEvent(redirected);      // store as child→parent (visible in both panes)
           globalBus.routeMessage(e.child, e.parent, ev.text, { prefix: `[${e.child}→${e.parent}]` });
         }
         if (!workerCorrectedThisTurn) {
           workerCorrectedThisTurn = true;
-          applyEvent({
-            v: 1, type: "agent.error", agent: ev.agent, code: "illegal_message",
-            detail: `Worker ${ev.agent} message.to=${ev.to} 违规 — 已自动转发至 ${e.parent} 并纠正。`,
-          });
+          const detail = isTLToUser
+            ? `TL ${ev.agent} message.to=user 越级 — 已自动转发至 ${e.parent}（PM）。TL 汇报对象为 PM，不得直接联系用户。`
+            : `Worker ${ev.agent} message.to=${ev.to} 违规 — 已自动转发至 ${e.parent} 并纠正。`;
+          applyEvent({ v: 1, type: "agent.error", agent: ev.agent, code: "illegal_message", detail });
           pm.observe(ev);
           setImmediate(() => {
             a.sendCommand({
               type: "user.message",
-              text: `[系统-纠正] message.to=${ev.to} 违规已被自动转发至 ${e.parent}。下次请直接使用 message.to=${e.parent}，然后 agent.done。`,
+              text: isTLToUser
+                ? `[系统-纠正] message.to=user 已拦截并转发给 PM（${e.parent}）。请使用 message.to=${e.parent}，由 PM 转发给用户。`
+                : `[系统-纠正] message.to=${ev.to} 违规已被自动转发至 ${e.parent}。下次请直接使用 message.to=${e.parent}，然后 agent.done。`,
             });
           });
         }

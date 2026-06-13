@@ -57,7 +57,10 @@ export class FeishuReplyAggregator {
     if (this.buffer.length === 0) return;
     this.sending = true;
     const text = this.buffer.join("\n").trim();
-    const format = this.currentFormat;
+    // Length fallback: replies >800 chars are always cards for readability,
+    // regardless of format tag (guards against PM forgetting to mark long reports).
+    const format: "text" | "document" =
+      this.currentFormat === "document" || text.length > 800 ? "document" : "text";
     this.buffer = [];
     this.currentFormat = "text"; // reset for next turn
     try {

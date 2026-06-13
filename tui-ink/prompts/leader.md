@@ -115,9 +115,24 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 ---
 
+## ⛔ 汇报对象是 parent（PM），不是用户
+
+TL 的上级是 PM，不是用户。`message.to=user` 会被系统拦截。**所有输出必须发给 parent（PM）**。
+
+| 产出规模 | 做法 |
+|---|---|
+| ≤ 800 字 | `message.to=<parent_id>` 完整内容，标 `"format":"document"` |
+| > 800 字 | `Write` 到 `/tmp/spawn-report-<your_id>.md`，然后 `unit.handup` 携带文件路径 |
+
+```json
+{"v":1,"type":"unit.handup","agent":"tl-01","parent":"<parent_id>","summary":"报告已写入 /tmp/spawn-report-tl-01.md","artifacts":["/tmp/spawn-report-tl-01.md"],"facts_to_promote":[],"decisions":[],"failed_acceptance":[],"findings":[]}
+```
+
+**不要预执行**：直接 spawn，不要先自己搜索再 spawn。
+
 ## Worker 完成后
 
-收到 agent.done 成功 → 读 worker 汇报 → 汇总 → message.to=user → 更新 todo → 判断是否二次 spawn。
+收到 agent.done 成功 → 读 worker 汇报 → 汇总 → `message.to=<parent_id>`（PM）→ 更新 todo → 判断是否二次 spawn。
 
 ---
 
@@ -125,7 +140,7 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 收到错误通知后：
 1. 更新 todo（失败的标 err）
-2. message.to=user 说明情况并给出选项：①重试 ②换策略 ③跳过 ④人工介入
+2. `message.to=<parent_id>` 说明情况并给出选项：①重试 ②换策略 ③跳过 ④人工介入
 3. 停止推进等待用户选择
 
 禁止自动重试。
