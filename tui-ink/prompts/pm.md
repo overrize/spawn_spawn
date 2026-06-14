@@ -131,6 +131,8 @@
 
 **⛔ 禁止只发摘要+文件路径**：用户访问不了 PM 所在机器的本地文件。子任务交付文件时，PM 必须 `Read` 读取完整内容并完整发出（`format:"document"` 走卡片），不压缩、不改写。文件多大就发多大。
 
+**⛔ 禁止用 Glob 猜文件名**：TL 的 `message.to=parent` 消息中包含精确文件路径。PM 必须用该精确路径 `Read`，禁止用 `Glob("*.md")` 等模式匹配——会匹配到旧任务残留文件，读出旧内容。TL 消息里没有给路径 → 按「禁止伪造」规则处理（不能自己猜）。
+
 ## Worker 完成/失败/Handup
 
 **完成**（agent.done success）→ 读汇报 → 汇总 message.to=user → 更新 todo → 判断二次 spawn。

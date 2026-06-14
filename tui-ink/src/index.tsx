@@ -333,6 +333,7 @@ function connectFeishu(appId: string, appSecret: string): void {
   // Feishu text messages don't render **bold**, # headers, or `code` spans.
   const stripMarkdownForBubble = (text: string): string =>
     text
+      .replace(/\\n/g, "\n").replace(/\\t/g, "\t")   // unescape literal \n \t before stripping
       .replace(/```[\s\S]*?```/g, '[代码]')
       .replace(/\*\*([^*\n]+)\*\*/g, '$1')
       .replace(/\*([^*\n]+)\*/g, '$1')
@@ -858,6 +859,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
         leaderApprovalQueue.delete(e.id);
         if (e.type === "tool.approved") {
           executeTool(pending.toolName, pending.toolArgs).then((r) => {
+            if (getState().agents.get(pending.workerChildId)?.state === "done" || killedAgents.has(pending.workerChildId)) {
+              process.stderr.write(`[${pending.workerChildId}] dropped Bash-approval tool.result — agent done during execution\n`);
+              return;
+            }
             applyEvent({ v: 1, type: "tool.result", agent: pending.workerChildId, id: e.id, ok: r.ok, output: r.output });
             pending.workerAgent.sendCommand({ type: "tool.result", id: e.id, ok: r.ok, output: r.output });
           });
@@ -930,7 +935,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
       actedThisTurn = true;
       if (e.to === "user") {
         sentToUserThisTurn = true;
-        if (opts.replyHook) {
+        if ((e as any)._fallback) {
+          // Internal protocol noise (LLM wrote prose instead of JSON) — log but never send to Feishu.
+          process.stderr.write(`[${opts.id}] suppressed _fallback noise from Feishu: "${e.text.slice(0, 80)}"\n`);
+        } else if (opts.replyHook) {
           // In conversationMode, suppress intermediate status messages while children are running
           // ("已派 tl-xx 去…" etc.). Only route fragments to the aggregator when no active children.
           const activeChildrenNow = opts.conversationMode
@@ -1119,6 +1127,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
               }
             }
             setImmediate(() => {
+              if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
               userMessage(opts.id, nextMsg);
               a.sendCommand({ type: "user.message", text: nextMsg });
             });
@@ -1223,6 +1232,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           continuations++;
           nudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
             a.sendCommand({
               type: "user.message",
               text: "【系统-回复缺失】你刚才处理了消息但没有输出任何内容（无 message、无 tool.call、无 spawn）。请立刻 message→user 回复用户，或说明你在等待什么。",
@@ -1430,6 +1440,12 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       const isTLToUser = senderRole === "Leader" && ev.to === "user" && !!e.parent;
       if (isWorkerToUser || isWorkerToWorker || isTLToUser) {
         workerActedThisTurn = true; // prevent auto-continuation nudge loop
+        // _fallback messages are internal protocol noise (LLM wrote prose instead of JSON).
+        // Drop silently — don't redirect to PM or it pollutes PM's context.
+        if ((ev as any)._fallback) {
+          process.stderr.write(`[${e.child}] discarded _fallback protocol noise (to=${ev.to}): "${ev.text.slice(0, 80)}"\n`);
+          return;
+        }
         // Auto-forward to parent so the report is never lost, then correct.
         if (globalBus.hasAgent(e.parent)) {
           const redirected = { ...ev, to: e.parent } as typeof ev;
@@ -1444,6 +1460,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           applyEvent({ v: 1, type: "agent.error", agent: ev.agent, code: "illegal_message", detail });
           pm.observe(ev);
           setImmediate(() => {
+            if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
             a.sendCommand({
               type: "user.message",
               text: isTLToUser

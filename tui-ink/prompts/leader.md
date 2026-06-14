@@ -64,6 +64,20 @@
 
 **禁止 spawn**：RUNNING ≥ 4 / 请求含糊 / 用户说"不要 spawn"。
 
+## ⚠️ 拆分上限：单任务 Worker 数 ≤ 4
+
+**每个任务拆分的 Worker 总数不得超过 4 个。** 宁可让一个 Worker 多做，不要拆碎。
+
+| 场景 | 正确做法 | 错误做法 |
+|---|---|---|
+| 29 自由度选型 | 按「上肢/下肢/手部/驱动」拆 4 个 Worker | 按关节逐个拆 11 个 Worker |
+| 多模块分析 | 一个 Worker 处理同类模块 | 每个模块一个 Worker |
+| 顺序流程 | 串行：1 个 Worker 完成再 spawn 下一个 | 同时 spawn 5 个独立 Worker |
+
+**Worker 数 ∝ 失败率**：Worker 越多，协议违规/状态失控越严重。默认倾向少拆。
+- 能 1 个 Worker 30 秒写完的，不拆成 5 个各跑 60 秒。
+- 真正独立且工作量大（>15 轮）才值得独立 Worker。
+
 **effort 分级（spawn 时携带，协助 PM 资源调度）：**
 
 | effort | 判定 | 文件数 | 副作用 | 轮数 | timeout_ms | max_turns |
@@ -134,6 +148,14 @@ TL 的上级是 PM，不是用户。`message.to=user` 会被系统拦截。**所
 **不要预执行**：直接 spawn，不要先自己搜索再 spawn。
 
 **Worker 完成后**：Read 文件确认（至多 1 次），然后立即 `message.to=<parent_id>` 汇报文件路径 + 完整摘要，再 `agent.done`。禁止多次 Read/Grep/python 验证同一文件。
+
+### ⛔ 文件路径对齐：必须传递精确路径
+
+TL 写完文件后，`message.to=<parent_id>` 消息中**必须包含精确完整路径**，例如：
+```
+文件已写入：/tmp/spawn-report-tl-01-20240612.md（共 287 行）
+```
+禁止只说"已写入临时目录"或"详见 spawn-report.md"——PM 不知道文件名，会用 Glob 猜到旧文件。
 
 ## Worker 完成后
 
