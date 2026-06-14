@@ -1039,11 +1039,15 @@ function startLeaderAgent(opts: LeaderOpts): void {
           const loopTool = lastToolCallKey.split(":")[0] ?? "";
           process.stderr.write(`[${opts.id}] loop-detect: ${loopTool} called same args ${sameToolCallCount}x\n`);
           const warnMsg = `【系统-循环检测】你已连续 ${sameToolCallCount} 次调用相同的 ${loopTool}，得到相同结果。换一个不同的工具或不同参数，否则任务将无法推进。`;
-          setImmediate(() => { a.sendCommand({ type: "user.message", text: warnMsg }); });
+          setImmediate(() => {
+            if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
+            a.sendCommand({ type: "user.message", text: warnMsg });
+          });
           sameToolCallCount = 0;
         }
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
+          if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
           for (let i = 0; i < batch.length; i++) {
             const { id } = batch[i]!;
@@ -1111,6 +1115,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
             nudgePending = true;
             const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
             setImmediate(() => {
+              if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
               a.sendCommand({ type: "user.message", text: `【系统】你回复了用户但还有未完成任务：${pendingTodos}。立刻执行。` });
             });
           }
@@ -1127,6 +1132,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           process.stderr.write(`[${opts.id}] idle → nudge cont=${continuations} pending="${pendingTodos.slice(0,80)}"\n`);
           nudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
             a.sendCommand({
               type: "user.message",
               text: `【系统】todo 未完成：${pendingTodos}。立刻执行下一步（tool.call 或 spawn 或直接回答）。`,
@@ -1146,6 +1152,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           continuations++;
           nudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
             a.sendCommand({
               type: "user.message",
               text: `【系统】你回复了但没有输出 todo.set。立刻输出 todo.set 列出当前计划，然后执行第一步。`,
@@ -1173,6 +1180,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
           process.stderr.write(`[${opts.id}] idle → nudge(no-action) cont=${continuations} pending="${pendingTodos.slice(0,80)}"\n`);
           nudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
             const pending2 = todos.filter((t: {state:string;text:string}) => t.state === "todo" || t.state === "run").map((t: {text:string}) => t.text).join("; ");
             a.sendCommand({ type: "user.message", text: `【系统-强制执行】你已经规划了 todo 但没有采取任何行动。现在必须立刻输出以下之一：\n1. spawn 指令（如果需要 TL 执行）\n2. tool.call 指令（如果 PM 自己能处理）\n3. message.to=user（如果可以直接回答）\n未完成项：${pending2}\n不允许再次只输出 todo.set 或 step。` });
           });
@@ -1582,11 +1590,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           const loopTool = wLastToolKey.split(":")[0] ?? "";
           process.stderr.write(`[${e.child}] loop-detect: ${loopTool} called same args ${wSameToolCount}x\n`);
           const warnMsg = `【系统-循环检测】你已连续 ${wSameToolCount} 次调用相同的 ${loopTool}，得到相同结果。换一个不同的工具或不同参数。`;
-          setImmediate(() => { a.sendCommand({ type: "user.message", text: warnMsg }); });
+          setImmediate(() => {
+            if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
+            a.sendCommand({ type: "user.message", text: warnMsg });
+          });
           wSameToolCount = 0;
         }
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
+          // Guard: agent may have reached terminal state while this callback was queued.
+          if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
           for (let i = 0; i < batch.length; i++) {
             const { id } = batch[i]!;
@@ -1610,6 +1623,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
           workerNudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
             a.sendCommand({
               type: "user.message",
               text: `【系统-自检】你执行了部分操作但 todo 列表仍有未完成项：${pendingTodos}。立刻继续执行下一步：输出 step + tool.call。`,
@@ -1624,6 +1638,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           workerContinuations++;
           workerNudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
             a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call，不要只规划。" });
           });
         } else if (hasPending) {
@@ -1645,6 +1660,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           workerContinuations++;
           workerNudgePending = true;
           setImmediate(() => {
+            if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
             a.sendCommand({
               type: "user.message",
               text: "【系统-回复缺失】你处理了消息但没有任何输出。请立刻 message→parent 报告当前状态，或继续执行任务。",
