@@ -329,6 +329,17 @@ function connectFeishu(appId: string, appSecret: string): void {
     }
   };
 
+  // Strip markdown syntax before sending as a plain-text Feishu bubble.
+  // Feishu text messages don't render **bold**, # headers, or `code` spans.
+  const stripMarkdownForBubble = (text: string): string =>
+    text
+      .replace(/```[\s\S]*?```/g, '[代码]')
+      .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/^#{1,6}\s+(.+)$/gm, '$1')
+      .replace(/`([^`\n]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+
   // createAggregator: one aggregator per PM session.
   // sendBubble → format=text: reply as text bubble anchored under the user's message.
   // sendCard   → format=document: route to card renderer for a structured card.
@@ -341,7 +352,7 @@ function connectFeishu(appId: string, appSecret: string): void {
         const task = taskRegistry.get(taskId);
         if (!task) return;
         const elapsedSec = ((Date.now() - task.startedAt) / 1000).toFixed(1);
-        const withTiming = `${text}\n\n⏱ ${elapsedSec}s`;
+        const withTiming = `${stripMarkdownForBubble(text)}\n\n⏱ ${elapsedSec}s`;
         if (task.rootMessageId) {
           await replyToMessageWithText(task.rootMessageId, withTiming, tokenManager);
         } else {
@@ -1601,6 +1612,11 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           // Guard: agent may have reached terminal state while this callback was queued.
           if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
+          // Second guard: agent may have completed DURING async tool execution.
+          if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) {
+            process.stderr.write(`[${e.child}] dropped tool.result for ${batch.length} tool(s) — agent done during execution\n`);
+            return;
+          }
           for (let i = 0; i < batch.length; i++) {
             const { id } = batch[i]!;
             const { ok, output } = results[i]!;
@@ -1693,6 +1709,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (dispatchCtx.acceptance_criteria?.length) parts.push(`验收标准：${dispatchCtx.acceptance_criteria.join("；")}`);
     initMsg = parts.join("\n");
   }
+  // Always inject parent ID so TL/Worker knows exactly which agent to report to.
+  initMsg += `\n汇报对象（你的 parent agent ID）：${e.parent}`;
   // Inject parent TL's confirmed facts (Codex fork-spawn pattern):
   // Worker gets cross-task context without needing to re-read parent history.
   const parentSec = secretaries.get(e.parent);

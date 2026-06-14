@@ -119,6 +119,9 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 TL 的上级是 PM，不是用户。`message.to=user` 会被系统拦截。**所有输出必须发给 parent（PM）**。
 
+**你的 parent agent ID 已注入在首条 dispatch 消息中**（字段「汇报对象（你的 parent agent ID）」）。
+⛔ 禁止向用户询问"parent 是谁"——直接使用消息中的 ID。
+
 | 产出规模 | 做法 |
 |---|---|
 | ≤ 800 字 | `message.to=<parent_id>` 完整内容，标 `"format":"document"` |
