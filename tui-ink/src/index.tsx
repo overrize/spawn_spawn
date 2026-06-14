@@ -1060,6 +1060,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
         setImmediate(async () => {
           if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
+          // Second guard: agent may have completed DURING async tool execution.
+          if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) {
+            process.stderr.write(`[${opts.id}] dropped tool.result for ${batch.length} tool(s) — agent done during execution\n`);
+            return;
+          }
           for (let i = 0; i < batch.length; i++) {
             const { id } = batch[i]!;
             const { ok, output } = results[i]!;
