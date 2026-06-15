@@ -187,6 +187,11 @@ const FEISHU_MAX_CONCURRENT = 3;
 // Used to suppress child→parent notifications after a kill so the parent isn't restarted.
 const killedAgents = new Set<string>();
 
+// Artifact files reported by TL children (message.to=parent or unit.handup) that PM
+// must inject as full document content before its next onTurnEnd flush.
+// Keyed by PM agent ID; values are absolute file paths to read.
+const pmPendingArtifacts = new Map<string, string[]>();
+
 // Destructive Bash commands from workers are routed to leader for approval instead
 // of asking the user directly. Keyed by tool.call id.
 const leaderApprovalQueue = new Map<string, {
@@ -195,6 +200,29 @@ const leaderApprovalQueue = new Map<string, {
   toolArgs: unknown;
   workerChildId: string;
 }>();
+
+// Read files queued in pmPendingArtifacts and inject them into the PM's aggregator
+// as document chunks BEFORE onTurnEnd flushes. This guarantees full file content
+// reaches Feishu even when PM only forwards a summary in its message text.
+function flushArtifactsToAggregator(pmId: string): void {
+  const paths = pmPendingArtifacts.get(pmId);
+  if (!paths?.length) return;
+  pmPendingArtifacts.delete(pmId);
+  const agg = feishuAggregators.get(pmId);
+  if (!agg) {
+    process.stderr.write(`[pmArtifacts] no aggregator for ${pmId}, discarding ${paths.length} path(s)\n`);
+    return;
+  }
+  for (const filePath of [...new Set(paths)]) { // deduplicate
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      process.stderr.write(`[pmArtifacts] injecting "${filePath}" (${content.length} chars) into ${pmId}\n`);
+      agg.onChunk(content, "document");
+    } catch (err) {
+      process.stderr.write(`[pmArtifacts] failed to read "${filePath}": ${(err as Error).message}\n`);
+    }
+  }
+}
 
 // PM 事件转发到 TUI
 pm.on("event", (ev: TuiEvent) => applyEvent(ev));
@@ -503,6 +531,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       firstMessage: text,
       replyHook: forkReplyHook,
       turnEndHook: () => {
+        flushArtifactsToAggregator(forkId);
         feishuAggregators.get(forkId)?.onTurnEnd();
         feishuBusy.delete(forkId);
         // Buffer Q/A for merge back into base PM history on next base PM turnEnd.
@@ -595,6 +624,7 @@ function connectFeishu(appId: string, appSecret: string): void {
             }
             feishuCheckpoints.set(pmId, cleanHistory);
           }
+          flushArtifactsToAggregator(pmId);
           feishuAggregators.get(pmId)?.onTurnEnd();
           drainPendingQueue(openId);
         } });
@@ -669,6 +699,7 @@ function connectFeishu(appId: string, appSecret: string): void {
                 }
                 feishuCheckpoints.set(newPmId, cleanHistory2);
               }
+              flushArtifactsToAggregator(newPmId);
               feishuAggregators.get(newPmId)?.onTurnEnd();
               drainPendingQueue(openId);
             } });
@@ -954,6 +985,16 @@ function startLeaderAgent(opts: LeaderOpts): void {
       }
       if (opts.parentId && e.to === opts.parentId) {
         reportedToParent = true;
+        // Extract any file paths TL reported to PM so they can be injected at PM's turnEnd.
+        const pathMatches = e.text.match(
+          /(?:[A-Za-z]:[\\/]|\/|\.\/)(?:[^\s,，。）\]"'\n\\]+)\.(?:md|txt|json|csv|yaml|yml)/gi,
+        );
+        if (pathMatches?.length) {
+          const pending = pmPendingArtifacts.get(opts.parentId) ?? [];
+          for (const p of pathMatches) pending.push(p);
+          pmPendingArtifacts.set(opts.parentId, pending);
+          process.stderr.write(`[${opts.id}] artifact paths captured for ${opts.parentId}: ${pathMatches.join(", ")}\n`);
+        }
       }
       if (e.to !== "user") {
         const routed = globalBus.routeMessage(opts.id, e.to, e.text);
@@ -1036,6 +1077,13 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     // unit.handup — forward to parent
     if (e.type === "unit.handup" && opts.parentId) {
+      // Capture artifact paths for PM's forced document injection at turnEnd.
+      if (e.artifacts?.length) {
+        const pending = pmPendingArtifacts.get(opts.parentId) ?? [];
+        for (const p of e.artifacts) pending.push(p);
+        pmPendingArtifacts.set(opts.parentId, pending);
+        process.stderr.write(`[${opts.id}] handup artifacts captured for ${opts.parentId}: ${e.artifacts.join(", ")}\n`);
+      }
       const parentAgent = agents.get(opts.parentId);
       if (parentAgent instanceof HttpConvAgent) {
         const findingLines = e.findings?.length
@@ -1068,21 +1116,25 @@ function startLeaderAgent(opts: LeaderOpts): void {
         setImmediate(async () => {
           if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
-          // Second guard: agent may have completed DURING async tool execution.
-          if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) {
-            process.stderr.write(`[${opts.id}] dropped tool.result for ${batch.length} tool(s) — agent done during execution\n`);
-            return;
-          }
-          for (let i = 0; i < batch.length; i++) {
-            const { id } = batch[i]!;
-            const { ok, output } = results[i]!;
-            applyEvent({ v: 1, type: "tool.result", agent: opts.id, id, ok, output });
-          }
-          // Feed combined results back to the LLM — without this the PM hangs indefinitely
-          const combined = batch.map((c, i) =>
-            `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
-          ).join("\n\n");
-          a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
+          // Defer delivery via setImmediate so the I/O phase can drain SSE events (including
+          // agent.done from the LLM stream) before we re-check and deliver. A microtask
+          // continuation here would fire BEFORE pending SSE I/O, missing a concurrent agent.done.
+          setImmediate(() => {
+            if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) {
+              process.stderr.write(`[${opts.id}] dropped tool.result for ${batch.length} tool(s) — agent done during execution\n`);
+              return;
+            }
+            for (let i = 0; i < batch.length; i++) {
+              const { id } = batch[i]!;
+              const { ok, output } = results[i]!;
+              applyEvent({ v: 1, type: "tool.result", agent: opts.id, id, ok, output });
+            }
+            // Feed combined results back to the LLM — without this the PM hangs indefinitely
+            const combined = batch.map((c, i) =>
+              `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
+            ).join("\n\n");
+            a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
+          });
         });
       } else if (actedThisTurn) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
@@ -1392,14 +1444,20 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   a.on("event", (ev: TuiEvent) => {
     // spawn: pre-check BEFORE applyEvent to prevent ghost agents in store
     if (ev.type === "spawn") {
-      // Reject before store write if child ID is already taken
-      if (agents.has(ev.child)) {
-        process.stderr.write(`[${e.child}] spawn REJECTED: child="${ev.child}" already exists\n`);
-        a.sendCommand({ type: "user.message", text: `[系统] spawn 失败：agent ID "${ev.child}" 已被占用。请使用唯一的新 ID。` });
-        return;
-      }
+      // Auto-rename on ID collision (concurrent forks often generate "tl-01" collisions).
+      // Register a bus alias so parent's future message.to=originalId still routes to the renamed child.
+      const resolvedSpawnEv = agents.has(ev.child)
+        ? (() => {
+            const newChildId = `${ev.child}-${Date.now().toString(36).slice(-4)}`;
+            process.stderr.write(`[${e.child}] spawn auto-rename: "${ev.child}"→"${newChildId}" (ID collision)\n`);
+            globalBus.addAlias(ev.child, newChildId);
+            return { ...ev, child: newChildId };
+          })()
+        : ev;
       // Normalize parent to actual spawner ID
-      const normalizedEv: typeof ev = ev.parent !== e.child ? ev : { ...ev, parent: e.child };
+      const normalizedEv = resolvedSpawnEv.parent !== e.child
+        ? resolvedSpawnEv
+        : { ...resolvedSpawnEv, parent: e.child };
       const parentRole = getState().agents.get(e.child)?.role;
       const check = pm.preCheckSpawn(normalizedEv, parentRole);
       if (!check.ok) {
@@ -1634,20 +1692,24 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
           // Guard: agent may have reached terminal state while this callback was queued.
           if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
           const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
-          // Second guard: agent may have completed DURING async tool execution.
-          if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) {
-            process.stderr.write(`[${e.child}] dropped tool.result for ${batch.length} tool(s) — agent done during execution\n`);
-            return;
-          }
-          for (let i = 0; i < batch.length; i++) {
-            const { id } = batch[i]!;
-            const { ok, output } = results[i]!;
-            applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
-          }
-          const combined = batch.map((c, i) =>
-            `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
-          ).join("\n\n");
-          a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
+          // Defer delivery via setImmediate so the I/O phase can drain SSE events (including
+          // agent.done from the LLM stream) before we re-check and deliver. A microtask
+          // continuation here would fire BEFORE pending SSE I/O, missing a concurrent agent.done.
+          setImmediate(() => {
+            if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) {
+              process.stderr.write(`[${e.child}] dropped tool.result for ${batch.length} tool(s) — agent done during execution\n`);
+              return;
+            }
+            for (let i = 0; i < batch.length; i++) {
+              const { id } = batch[i]!;
+              const { ok, output } = results[i]!;
+              applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
+            }
+            const combined = batch.map((c, i) =>
+              `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
+            ).join("\n\n");
+            a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
+          });
         });
         // Worker acted but may still have pending todos — auto-close or nudge
         const todos = getState().todosByAgent.get(e.child) ?? [];

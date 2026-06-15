@@ -44,6 +44,8 @@ const WILDCARD = "*" as const;
 export class SpawnBus {
   private readonly ee = new EventEmitter();
   private readonly agents = new Map<string, AgentRef>();
+  /** Maps logical (requested) agent ID → actual (renamed) agent ID for collision recovery. */
+  private readonly aliases = new Map<string, string>();
 
   constructor() {
     this.ee.setMaxListeners(200);
@@ -57,10 +59,19 @@ export class SpawnBus {
 
   unregisterAgent(id: string): void {
     this.agents.delete(id);
+    // Clean up any alias that pointed to this agent.
+    for (const [alias, target] of this.aliases) {
+      if (target === id) this.aliases.delete(alias);
+    }
   }
 
   hasAgent(id: string): boolean {
-    return this.agents.has(id);
+    return this.agents.has(id) || this.agents.has(this.aliases.get(id) ?? "");
+  }
+
+  /** Register a logical→physical ID alias so routeMessage("old-id") reaches "new-id". */
+  addAlias(logicalId: string, physicalId: string): void {
+    this.aliases.set(logicalId, physicalId);
   }
 
   // ─── Publish ───────────────────────────────────────────────────────────────
@@ -87,7 +98,8 @@ export class SpawnBus {
     text: string,
     opts?: { prefix?: string },
   ): boolean {
-    const target = this.agents.get(toId);
+    const resolvedId = this.aliases.get(toId) ?? toId;
+    const target = this.agents.get(resolvedId);
     if (!target) return false;
     const prefix = opts?.prefix ?? `[${fromId}]`;
     target.sendCommand({ type: "user.message", text: `${prefix} ${text}` });
