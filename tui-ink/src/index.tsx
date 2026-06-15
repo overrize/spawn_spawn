@@ -58,6 +58,7 @@ import { startFeishuWebSocket } from "./feishu/websocket.js";
 import { FeishuReplyAggregator } from "./feishu/replyAggregator.js";
 import { FeishuInputWindowManager } from "./feishu/input-window.js";
 import { globalBus } from "./bus/Bus.js";
+import { OutboundGateway } from "./feishu/outbound/OutboundGateway.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -201,29 +202,6 @@ const leaderApprovalQueue = new Map<string, {
   workerChildId: string;
 }>();
 
-// Read files queued in pmPendingArtifacts and inject them into the PM's aggregator
-// as document chunks BEFORE onTurnEnd flushes. This guarantees full file content
-// reaches Feishu even when PM only forwards a summary in its message text.
-function flushArtifactsToAggregator(pmId: string): void {
-  const paths = pmPendingArtifacts.get(pmId);
-  if (!paths?.length) return;
-  pmPendingArtifacts.delete(pmId);
-  const agg = feishuAggregators.get(pmId);
-  if (!agg) {
-    process.stderr.write(`[pmArtifacts] no aggregator for ${pmId}, discarding ${paths.length} path(s)\n`);
-    return;
-  }
-  for (const filePath of [...new Set(paths)]) { // deduplicate
-    try {
-      const content = fs.readFileSync(filePath, "utf8");
-      process.stderr.write(`[pmArtifacts] injecting "${filePath}" (${content.length} chars) into ${pmId}\n`);
-      agg.onChunk(content, "document");
-    } catch (err) {
-      process.stderr.write(`[pmArtifacts] failed to read "${filePath}": ${(err as Error).message}\n`);
-    }
-  }
-}
-
 // PM 事件转发到 TUI
 pm.on("event", (ev: TuiEvent) => applyEvent(ev));
 pm.on("kill", (agentId: string) => {
@@ -298,7 +276,7 @@ interface LeaderOpts {
   resumedMemoryId?: string;
   promptFile?: string;      // "pm" for root, "leader" for tech leads
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
-  replyHook?: (text: string, format?: "text" | "document") => void; // called when message.to=user (Feishu bridge)
+  replyHook?: (text: string, format?: "text" | "document", meta?: { _fallback?: boolean }) => void; // called when message.to=user (Feishu bridge)
   turnEndHook?: () => void;            // called when Feishu PM turn ends — flushes aggregator
   conversationMode?: boolean;          // if true: stop after each user reply, no auto-nudge
   // Phase B: forked task options
@@ -357,21 +335,11 @@ function connectFeishu(appId: string, appSecret: string): void {
     }
   };
 
-  // Strip markdown syntax before sending as a plain-text Feishu bubble.
-  // Feishu text messages don't render **bold**, # headers, or `code` spans.
-  const stripMarkdownForBubble = (text: string): string =>
-    text
-      .replace(/\\n/g, "\n").replace(/\\t/g, "\t")   // unescape literal \n \t before stripping
-      .replace(/```[\s\S]*?```/g, '[代码]')
-      .replace(/\*\*([^*\n]+)\*\*/g, '$1')
-      .replace(/\*([^*\n]+)\*/g, '$1')
-      .replace(/^#{1,6}\s+(.+)$/gm, '$1')
-      .replace(/`([^`\n]+)`/g, '$1')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-
   // createAggregator: one aggregator per PM session.
   // sendBubble → format=text: reply as text bubble anchored under the user's message.
   // sendCard   → format=document: route to card renderer for a structured card.
+  // Note: text arrives pre-sanitized from the OutboundGateway (markdown stripped for text,
+  // kept for document). The aggregator only needs to route, not re-sanitize.
   const createAggregator = (pmIdLocal: string): FeishuReplyAggregator =>
     new FeishuReplyAggregator(
       // sendBubble
@@ -381,7 +349,7 @@ function connectFeishu(appId: string, appSecret: string): void {
         const task = taskRegistry.get(taskId);
         if (!task) return;
         const elapsedSec = ((Date.now() - task.startedAt) / 1000).toFixed(1);
-        const withTiming = `${stripMarkdownForBubble(text)}\n\n⏱ ${elapsedSec}s`;
+        const withTiming = `${text}\n\n⏱ ${elapsedSec}s`;
         if (task.rootMessageId) {
           await replyToMessageWithText(task.rootMessageId, withTiming, tokenManager);
         } else {
@@ -401,11 +369,25 @@ function connectFeishu(appId: string, appSecret: string): void {
       },
     );
 
-  // replyHook: routes each PM reply fragment into the aggregator.
-  // The aggregator coalesces all fragments in the turn and sends once at turnEnd.
-  const makeReplyHook = (pmIdLocal: string) => (replyText: string, format?: "text" | "document"): void => {
-    feishuAggregators.get(pmIdLocal)?.onChunk(replyText, format);
-  };
+  // Unified outbound gateway — all message.to=user content flows through this.
+  const outboundGateway = new OutboundGateway(
+    (pmId) => feishuAggregators.get(pmId),
+    (pmId) => pmPendingArtifacts.get(pmId),
+    (pmId) => { pmPendingArtifacts.delete(pmId); },
+  );
+
+  // makeGatewayHook: factory for the replyHook option passed to startLeaderAgent.
+  // Computes dynamic context (active children) and routes into the OutboundGateway.
+  const makeGatewayHook = (pmIdLocal: string) =>
+    (replyText: string, format?: "text" | "document", meta?: { _fallback?: boolean }): void => {
+      const activeChildren = Array.from(getState().agents.values()).filter(
+        (ag) => ag.parent === pmIdLocal && (ag.state === "run" || ag.state === "idle"),
+      );
+      outboundGateway.accept(
+        { text: replyText, format, _fallback: meta?._fallback ?? false, agentId: pmIdLocal },
+        { pmId: pmIdLocal, conversationMode: true, hasActiveChildren: activeChildren.length > 0 },
+      );
+    };
 
   // drainPendingQueue: when a task slot frees up, try to start the oldest pending message.
   const drainPendingQueue = (openId: string): void => {
@@ -470,9 +452,12 @@ function connectFeishu(appId: string, appSecret: string): void {
 
     // Capture the fork's reply text so we can merge Q/A back into base PM history.
     let forkAnswer = "";
-    const forkReplyHook = (replyText: string, format?: "text" | "document"): void => {
-      forkAnswer += (forkAnswer ? "\n" : "") + replyText;
-      makeReplyHook(forkId)(replyText, format);
+    const forkReplyHook = (replyText: string, format?: "text" | "document", meta?: { _fallback?: boolean }): void => {
+      // Only accumulate non-fallback text into history
+      if (!meta?._fallback) {
+        forkAnswer += (forkAnswer ? "\n" : "") + replyText;
+      }
+      makeGatewayHook(forkId)(replyText, format, meta);
     };
 
     // Snapshot: use the last confirmed-clean checkpoint (captured after the previous base-PM
@@ -531,8 +516,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       firstMessage: text,
       replyHook: forkReplyHook,
       turnEndHook: () => {
-        flushArtifactsToAggregator(forkId);
-        feishuAggregators.get(forkId)?.onTurnEnd();
+        outboundGateway.flush(forkId);
         feishuBusy.delete(forkId);
         // Buffer Q/A for merge back into base PM history on next base PM turnEnd.
         // Only buffer when the fork actually produced a reply (skip silent failures).
@@ -602,7 +586,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       feishuAggregators.set(pmId, createAggregator(pmId));
       userMessage(pmId, text);
       startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
-        conversationMode: true, replyHook: makeReplyHook(pmId),
+        conversationMode: true, replyHook: makeGatewayHook(pmId),
         turnEndHook: () => {
           feishuBusy.delete(pmId); // pre-clear: drain routing fix (Bug 2)
           const bpm = agents.get(pmId);
@@ -624,8 +608,7 @@ function connectFeishu(appId: string, appSecret: string): void {
             }
             feishuCheckpoints.set(pmId, cleanHistory);
           }
-          flushArtifactsToAggregator(pmId);
-          feishuAggregators.get(pmId)?.onTurnEnd();
+          outboundGateway.flush(pmId);
           drainPendingQueue(openId);
         } });
     } else {
@@ -679,7 +662,7 @@ function connectFeishu(appId: string, appSecret: string): void {
           feishuAggregators.set(newPmId, createAggregator(newPmId));
           userMessage(newPmId, text);
           startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
-            conversationMode: true, replyHook: makeReplyHook(newPmId),
+            conversationMode: true, replyHook: makeGatewayHook(newPmId),
             turnEndHook: () => {
               feishuBusy.delete(newPmId);
               const bpm2 = agents.get(newPmId);
@@ -699,8 +682,7 @@ function connectFeishu(appId: string, appSecret: string): void {
                 }
                 feishuCheckpoints.set(newPmId, cleanHistory2);
               }
-              flushArtifactsToAggregator(newPmId);
-              feishuAggregators.get(newPmId)?.onTurnEnd();
+              outboundGateway.flush(newPmId);
               drainPendingQueue(openId);
             } });
         });
@@ -966,22 +948,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
       actedThisTurn = true;
       if (e.to === "user") {
         sentToUserThisTurn = true;
-        if ((e as any)._fallback) {
-          // Internal protocol noise (LLM wrote prose instead of JSON) — log but never send to Feishu.
-          process.stderr.write(`[${opts.id}] suppressed _fallback noise from Feishu: "${e.text.slice(0, 80)}"\n`);
-        } else if (opts.replyHook) {
-          // In conversationMode, suppress intermediate status messages while children are running
-          // ("已派 tl-xx 去…" etc.). Only route fragments to the aggregator when no active children.
-          const activeChildrenNow = opts.conversationMode
-            ? Array.from(getState().agents.values())
-                .filter((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
-            : [];
-          if (!opts.conversationMode || activeChildrenNow.length === 0) {
-            opts.replyHook(e.text, e.format);
-          } else {
-            process.stderr.write(`[${opts.id}] suppressed intermediate msg to Feishu (${activeChildrenNow.length} active children): "${e.text.slice(0, 60)}"\n`);
-          }
-        }
+        // All suppression, format, and sanitization decisions are centralised in the
+        // OutboundGateway. Pass _fallback through so SuppressFilter can catch it.
+        opts.replyHook?.(e.text, e.format, { _fallback: (e as any)._fallback });
       }
       if (opts.parentId && e.to === opts.parentId) {
         reportedToParent = true;
