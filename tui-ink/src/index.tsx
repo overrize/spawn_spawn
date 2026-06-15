@@ -1368,7 +1368,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     cur = info.parent;
   }
 
-  const systemPrompt = buildSystemPrompt(e.role, e.child, e.goal);
+  const systemPrompt = buildSystemPrompt(
+    e.role, e.child, e.goal, undefined,
+    e.dispatch?.prompt_file ?? undefined,
+  );
   const a = new HttpConvAgent({ id: e.child, role: e.role, providerCfg: workerProviderCfg, systemPrompt });
   agents.set(e.child, a);
   globalBus.registerAgent(e.child, a);
@@ -1402,6 +1405,9 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   let wLastToolKey = "";
   let wSameToolCount = 0;
   let wDoneNotified = false; // guard: only send completion notification to parent once
+  // Coding completion guard: tracks last RunTests outcome.
+  // Non-null means the worker called RunTests at least once this session.
+  let wLastTestFailed: number | null = null; // null=never run, 0=all pass, N=N failures
 
   // Quality tracking for worker
   let wQualTurns = 0;
@@ -1499,6 +1505,24 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         return;
       }
     }
+
+    // Coding completion guard: if RunTests was run and failed, block success claims.
+    // Intercepted BEFORE applyEvent so the "done" state is never committed.
+    if (ev.type === "agent.done" && ev.success && wLastTestFailed !== null && wLastTestFailed > 0) {
+      process.stderr.write(
+        `[${e.child}] completion guard: blocked agent.done(success) — RunTests shows ${wLastTestFailed} failure(s)\n`,
+      );
+      setImmediate(() => {
+        if (killedAgents.has(e.child) || getState().agents.get(e.child)?.state === "done") return;
+        a.sendCommand({
+          type: "user.message",
+          text: `[系统-测试未通过] 你声明 success:true，但最近一次 RunTests 显示 ${wLastTestFailed} 个失败。` +
+                `必须先修复所有失败的测试，然后重新运行 RunTests 确认全绿，再 agent.done。`,
+        });
+      });
+      return; // Reject: keep agent running so it can fix the failures
+    }
+
     applyEvent(ev);
     pm.observe(ev);
     secretary.observe(ev);
@@ -1672,6 +1696,12 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
             for (let i = 0; i < batch.length; i++) {
               const { id } = batch[i]!;
               const { ok, output } = results[i]!;
+              // Coding completion guard: track RunTests outcome so we can reject a
+              // premature agent.done(success:true) when tests are still failing.
+              if (batch[i]!.name === "RunTests") {
+                const failMatch = output.match(/failed:\s*(\d+)/);
+                wLastTestFailed = failMatch ? parseInt(failMatch[1]!, 10) : (ok ? 0 : 1);
+              }
               applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
             }
             const combined = batch.map((c, i) =>

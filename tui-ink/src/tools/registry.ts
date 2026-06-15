@@ -349,6 +349,285 @@ const WebSearch: ToolDef = {
   },
 };
 
+// ── Coding tools ─────────────────────────────────────────────────────────────
+
+// Decode a Buffer or string from a child process to UTF-8.
+function decodeBuffer(buf: Buffer | string): string {
+  return typeof buf === "string" ? buf : buf.toString("utf8");
+}
+
+/** Detect the project's test command and framework from the working directory. */
+export function detectTestCommand(dir: string): { cmd: string; framework: string } | null {
+  // Node.js: package.json scripts.test
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    const testScript = pkg.scripts?.test;
+    if (testScript && !testScript.startsWith("echo ")) {
+      return { cmd: "npm test", framework: "node" };
+    }
+  } catch { /* no package.json */ }
+
+  // Python: pytest
+  if (
+    fs.existsSync(path.join(dir, "pytest.ini")) ||
+    fs.existsSync(path.join(dir, "pyproject.toml")) ||
+    fs.existsSync(path.join(dir, "setup.py"))
+  ) {
+    return { cmd: "python -m pytest -v", framework: "pytest" };
+  }
+
+  // Rust
+  if (fs.existsSync(path.join(dir, "Cargo.toml"))) {
+    return { cmd: "cargo test", framework: "cargo" };
+  }
+
+  // Go
+  if (fs.existsSync(path.join(dir, "go.mod"))) {
+    return { cmd: "go test ./...", framework: "go" };
+  }
+
+  return null;
+}
+
+interface TestCounts { passed: number; failed: number; skipped: number; }
+
+/** Parse common test-runner output formats into pass/fail counts. */
+export function parseTestCounts(output: string, framework: string): TestCounts {
+  const r: TestCounts = { passed: 0, failed: 0, skipped: 0 };
+  const num = (re: RegExp): number => parseInt(output.match(re)?.[1] ?? "0", 10);
+  switch (framework) {
+    case "node":
+      // Node.js test runner: "ℹ pass N" / "ℹ fail N"
+      r.passed  = num(/ℹ\s+pass\s+(\d+)/);
+      r.failed  = num(/ℹ\s+fail\s+(\d+)/);
+      r.skipped = num(/ℹ\s+skipped\s+(\d+)/);
+      // Fallback: mocha-style "N passing"
+      if (r.passed === 0 && r.failed === 0) {
+        r.passed = num(/(\d+)\s+passing/);
+        r.failed = num(/(\d+)\s+failing/);
+      }
+      break;
+    case "pytest":
+      r.passed  = num(/(\d+)\s+passed/);
+      r.failed  = num(/(\d+)\s+failed/);
+      r.skipped = num(/(\d+)\s+(?:skipped|deselected)/);
+      break;
+    case "cargo":
+      r.passed = num(/test result:.*?(\d+)\s+passed/);
+      r.failed = num(/test result:.*?(\d+)\s+failed/);
+      break;
+    case "go":
+      r.passed = (output.match(/--- PASS/g) ?? []).length;
+      r.failed  = (output.match(/--- FAIL/g) ?? []).length;
+      if (r.passed === 0 && !output.includes("FAIL\t")) r.passed = 1; // "ok  package  0.1s"
+      break;
+  }
+  return r;
+}
+
+const RunTests: ToolDef = {
+  name: "RunTests",
+  description: "跑项目测试套件。完成编码后必须绿才能 agent.done。返回 passed/failed 数+失败详情",
+  argsSchema: "project_dir?(str default:cwd)",
+  needsApproval: false,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const dir = path.resolve(String(a.project_dir ?? a.dir ?? "."));
+    const detected = detectTestCommand(dir);
+    if (!detected) {
+      return err(
+        "Cannot detect test command — no package.json test script, pytest.ini, Cargo.toml, or go.mod found.",
+      );
+    }
+    const { cmd, framework } = detected;
+    const winCmd = process.platform === "win32" ? `chcp 65001 >nul 2>nul & ${cmd}` : cmd;
+    let rawOutput = "";
+    let exitedOk = false;
+    try {
+      const raw = execSync(winCmd, { encoding: "buffer", timeout: 180_000, cwd: dir, shell: true as any });
+      rawOutput = decodeBuffer(raw as unknown as Buffer);
+      exitedOk = true;
+    } catch (e: any) {
+      rawOutput = [
+        e.stdout ? decodeBuffer(e.stdout) : "",
+        e.stderr ? decodeBuffer(e.stderr) : "",
+      ].filter(Boolean).join("\n");
+      exitedOk = false;
+    }
+    const counts = parseTestCounts(rawOutput, framework);
+    // If we couldn't parse counts from output, fall back to exit code
+    if (counts.passed === 0 && counts.failed === 0) {
+      if (exitedOk) counts.passed = 1;
+      else counts.failed = 1;
+    }
+    const status = counts.failed === 0 ? "✅ PASS" : "❌ FAIL";
+    const summary =
+      `${status}  passed: ${counts.passed}  failed: ${counts.failed}  skipped: ${counts.skipped}\n` +
+      `[command] ${cmd}\n\n` +
+      `--- Output (last 60 lines) ---\n` +
+      rawOutput.split("\n").slice(-60).join("\n");
+    const result = summary.slice(0, 10_000);
+    return counts.failed === 0 ? ok(result) : { ok: false, output: result };
+  },
+};
+
+const TypeCheck: ToolDef = {
+  name: "TypeCheck",
+  description: "静态类型检查（tsc/mypy/go vet）。编辑后立即验证，返回错误列表或 clean",
+  argsSchema: "project_dir?(str default:cwd)",
+  needsApproval: false,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const dir = path.resolve(String(a.project_dir ?? a.dir ?? "."));
+
+    // TypeScript
+    if (fs.existsSync(path.join(dir, "tsconfig.json"))) {
+      try {
+        const out = String(execSync("npx tsc --noEmit 2>&1", {
+          encoding: "utf8", timeout: 60_000, cwd: dir, shell: true as any,
+        }));
+        return ok(`TypeScript: clean${out.trim() ? `\n${out.slice(0, 2000)}` : ""}`);
+      } catch (e: any) {
+        const errors = String(e.stdout ?? "") + String(e.stderr ?? "");
+        return { ok: false, output: `TypeScript errors:\n${errors.slice(0, 5000)}` };
+      }
+    }
+
+    // Python mypy
+    if (
+      fs.existsSync(path.join(dir, "pyproject.toml")) ||
+      fs.existsSync(path.join(dir, "setup.py"))
+    ) {
+      try {
+        const out = String(execSync("python -m mypy . --ignore-missing-imports 2>&1", {
+          encoding: "utf8", timeout: 60_000, cwd: dir, shell: true as any,
+        }));
+        return ok(`mypy: ${out.slice(0, 2000)}`);
+      } catch (e: any) {
+        return { ok: false, output: `mypy errors:\n${String(e.stdout ?? "").slice(0, 5000)}` };
+      }
+    }
+
+    // Go vet
+    if (fs.existsSync(path.join(dir, "go.mod"))) {
+      try {
+        execSync("go vet ./...", { encoding: "utf8", timeout: 30_000, cwd: dir, shell: true as any });
+        return ok("go vet: clean");
+      } catch (e: any) {
+        return { ok: false, output: `go vet errors:\n${String(e.stderr ?? "").slice(0, 5000)}` };
+      }
+    }
+
+    return ok("No type checker detected (no tsconfig.json, pyproject.toml, or go.mod).");
+  },
+};
+
+const TREE_IGNORE = new Set([
+  "node_modules", ".git", "dist", "build", "__pycache__",
+  ".next", "coverage", "target", ".cache", "vendor",
+]);
+
+function buildDirTree(
+  dir: string,
+  depth: number,
+  indent = "",
+  isLast = true,
+): string {
+  if (depth < 0) return "";
+  const name = path.basename(dir);
+  const connector = indent ? (isLast ? "└── " : "├── ") : "";
+  let result = indent + connector + name + "/\n";
+  if (depth === 0) return result;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => !TREE_IGNORE.has(e.name) && !e.name.startsWith("."))
+      .sort((a, b) => {
+        // directories first, then files; alphabetical within each group
+        if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+  } catch { return result; }
+  const childIndent = indent + (isLast ? "    " : "│   ");
+  entries.forEach((entry, idx) => {
+    const last = idx === entries.length - 1;
+    const child = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      result += buildDirTree(child, depth - 1, childIndent, last);
+    } else {
+      result += childIndent + (last ? "└── " : "├── ") + entry.name + "\n";
+    }
+  });
+  return result;
+}
+
+const CodeMap: ToolDef = {
+  name: "CodeMap",
+  description: "项目结构总览（目录树+关键文件+入口）。改代码前先建立全局认知",
+  argsSchema: "dir?(str default:cwd), depth?(int default:2)",
+  needsApproval: false,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const dir = path.resolve(String(a.dir ?? "."));
+    const depth = typeof a.depth === "number" ? Math.min(Math.max(a.depth, 1), 4) : 2;
+    const tree = buildDirTree(dir, depth);
+
+    const KEY_FILES = [
+      "package.json", "tsconfig.json", "pyproject.toml", "Cargo.toml",
+      "go.mod", "README.md", ".env.example", "docker-compose.yml", "Makefile",
+    ];
+    const present = KEY_FILES.filter((f) => fs.existsSync(path.join(dir, f)));
+
+    const parts: string[] = [`[CodeMap] ${dir}  (depth=${depth})\n\n`, tree];
+
+    if (present.length) parts.push(`\nKey files: ${present.join(", ")}`);
+
+    // Peek package.json for name, entry, test script
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
+        name?: string; main?: string; scripts?: Record<string, string>;
+      };
+      const info = [
+        pkg.name && `name="${pkg.name}"`,
+        pkg.main && `main="${pkg.main}"`,
+        pkg.scripts?.dev && `scripts.dev="${pkg.scripts.dev}"`,
+        pkg.scripts?.test && `scripts.test="${pkg.scripts.test}"`,
+      ].filter(Boolean);
+      if (info.length) parts.push(`\npackage.json: ${info.join("  ")}`);
+    } catch { /* no package.json */ }
+
+    return ok(parts.join("").slice(0, 10_000));
+  },
+};
+
+const FindReferences: ToolDef = {
+  name: "FindReferences",
+  description: "查找符号（函数/类/变量）在项目中的所有引用位置",
+  argsSchema: "symbol(str), dir?(str default:cwd), glob?(str, e.g. '*.ts')",
+  needsApproval: false,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const sym = String(a.symbol ?? "");
+    if (!sym) return err("missing symbol");
+    const dir = String(a.dir ?? ".");
+    const glob = a.glob ? `--glob ${JSON.stringify(String(a.glob))}` : "";
+    const cmd = `rg -n --word-regexp ${glob} ${JSON.stringify(sym)} ${JSON.stringify(dir)}`
+      .replace(/\s+/g, " ")
+      .trim();
+    try {
+      const out = String(execSync(cmd, { encoding: "utf8", timeout: 10_000, cwd: process.cwd() }));
+      return ok(out.slice(0, 20_000) || "(no references found)");
+    } catch (e: any) {
+      return (
+        rgNotFoundResult(e, "Grep") ??
+        ok((String(e.stdout ?? "")).slice(0, 20_000) || "(no references found)")
+      );
+    }
+  },
+};
+
 // ── rg 缺失检测（导出供测试用）────────────────────────────────────────────────
 
 /** Returns ok:false "rg not found" result when e.code===ENOENT, null otherwise. */
@@ -362,7 +641,10 @@ export function rgNotFoundResult(e: unknown, tool: "Glob" | "Grep"): ToolResult 
 
 // ── 注册表（Map 保证 O(1) 查找）─────────────────────────────────────────────
 
-const ALL_TOOLS: ToolDef[] = [Read, Write, Edit, Bash, Grep, Glob, LS, Think, WebFetch, WebSearch];
+const ALL_TOOLS: ToolDef[] = [
+  Read, Write, Edit, Bash, Grep, Glob, LS, Think, WebFetch, WebSearch,
+  RunTests, TypeCheck, CodeMap, FindReferences,
+];
 
 export const TOOL_REGISTRY = new Map<string, ToolDef>(
   ALL_TOOLS.map((t) => [t.name, t]),
@@ -432,8 +714,12 @@ export function buildToolSchemaBlock(role: AgentRole): string {
     Glob:  `{"pattern":"src/**/*.ts"}`,
     LS:    `{"path":"src"}`,
     Think:     `{"thought":"I should read the config first before deciding which files to edit"}`,
-    WebFetch:  `{"url":"https://example.com/docs","max_chars":4000}`,
-    WebSearch: `{"query":"feishu bot nodejs SDK","count":5}`,
+    WebFetch:      `{"url":"https://example.com/docs","max_chars":4000}`,
+    WebSearch:     `{"query":"feishu bot nodejs SDK","count":5}`,
+    RunTests:      `{"project_dir":"."}`,
+    TypeCheck:     `{"project_dir":"."}`,
+    CodeMap:       `{"dir":".","depth":2}`,
+    FindReferences:`{"symbol":"createAggregator","dir":"src","glob":"*.ts"}`,
   };
   const examples = tools
     .filter((t) => EXAMPLES[t.name])

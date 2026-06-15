@@ -19,6 +19,8 @@ export interface DispatchSpec {
   memory_quota_kb?: number;
   seed_facts?: string[];
   timeout_ms?: number;                 // 软超时：到期 PM 发 handup 纠正，不立即 kill
+  /** Override the worker system-prompt file (e.g. "worker-coding"). Default: "worker". */
+  prompt_file?: string;
   // Fork 子 agent 专用字段（与常规 spawn 兼容共存）
   fork?: boolean;                      // true = 走 Fork 路径（轻量分身，共享缓存前缀）
   cachePrefix?: CacheSafeParams;        // 父 agent 的缓存前缀（Fork 时必传）
