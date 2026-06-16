@@ -143,7 +143,7 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
     let pingTimer: ReturnType<typeof setInterval> | null = null;
 
     ws.on('open', () => {
-      log('connected');
+      log('connected — ready to receive im.message.receive_v1 events');
       reconnectAttempt = 0;
       pingTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.ping();
@@ -160,7 +160,11 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
           // Field 5 = headers (nested proto), field 8 = event JSON, field 9/11 = message IDs.
           const allFields = extractAllProtobufBytesFields(data);
           const payload = allFields[8];
-          if (!payload || payload.length === 0) return; // ping/control frame
+          if (!payload || payload.length === 0) {
+            // Heartbeat / ping / control frame — log to confirm WS is alive
+            log(`frame: no-payload (fields=${Object.keys(allFields).join(',')}) — heartbeat/control`);
+            return;
+          }
           jsonStr = payload.toString('utf-8');
         } else {
           jsonStr = data;
@@ -170,9 +174,13 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
 
         const header = frame['header'] as Record<string, unknown> | undefined;
         const eventType = header?.['event_type'] as string | undefined;
-        if (eventType !== 'im.message.receive_v1') return;
-
         const eventId = header?.['event_id'] as string | undefined;
+
+        // Log ALL event types received — not just im.message — so we can tell if the WS
+        // is delivering events at all and what types are coming in.
+        log(`[recv] event_type=${eventType ?? '(none)'} event_id=${(eventId ?? '').slice(-8) || '(none)'}`);
+
+        if (eventType !== 'im.message.receive_v1') return;
 
         const event = frame['event'] as Record<string, unknown> | undefined;
         if (!event) return;
@@ -208,6 +216,9 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const chatId = msgEvent.message?.chat_id || openId;
         const chatType = msgEvent.message?.chat_type || 'p2p';
         const messageId = msgEvent.message?.message_id ?? '';
+
+        // Always log the extracted text so we can confirm what was parsed from the message.
+        log(`[recv] text="${text.slice(0, 200)}" msg_type=${msgType} chat_type=${chatType} msgId=${messageId.slice(-8)}`);
 
         // Empty text: log with content preview for diagnosis, but do NOT add to seenEventIds.
         // This allows Feishu retries to be tried again if content was missing or in an

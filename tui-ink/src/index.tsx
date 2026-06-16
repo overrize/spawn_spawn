@@ -573,6 +573,7 @@ function connectFeishu(appId: string, appSecret: string): void {
           startTask(pmId, rt, anchorMsgId);
           userMessage(pmId, text);
           killedAgents.delete(pmId);
+          feishuLog(`[feishu-pm-inject] reconnect → PM ${pmId} text="${text.slice(0, 120)}" (len=${text.length})`);
           agents.get(pmId)!.sendCommand({ type: "user.message", text });
         } else {
           const q = feishuMsgQueue.get(pmId) ?? [];
@@ -591,6 +592,7 @@ function connectFeishu(appId: string, appSecret: string): void {
         sub: "飞书会话", model: cfg.agents.leader.model });
       feishuAggregators.set(pmId, createAggregator(pmId));
       userMessage(pmId, text);
+      feishuLog(`[feishu-pm-inject] new session → PM ${pmId} firstMessage="${text.slice(0, 120)}" (len=${text.length})`);
       startLeaderAgent({ id: pmId, firstMessage: text, promptFile: "pm",
         conversationMode: true, replyHook: makeGatewayHook(pmId),
         turnEndHook: () => {
@@ -650,6 +652,7 @@ function connectFeishu(appId: string, appSecret: string): void {
           userMessage(existingPmId, text);
           killedAgents.delete(existingPmId);
           markPendingInput(existingPmId);
+          feishuLog(`[feishu-pm-inject] existing session → PM ${existingPmId} text="${text.slice(0, 120)}" (len=${text.length})`);
           a.sendCommand({ type: "user.message", text });
         }
       } else {
@@ -709,7 +712,7 @@ function connectFeishu(appId: string, appSecret: string): void {
     },
     onMessage: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => {
       feishuLog(
-        `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length}`,
+        `[FeishuBridge] onMessage openId=...${openId.slice(-6)} msgId=${messageId.slice(-8)} len=${text.length} text="${text.slice(0, 120)}"`,
       );
 
       // Short-time same-content guard: reject exact duplicate text within 5s per user.
