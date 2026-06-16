@@ -172,17 +172,7 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const eventType = header?.['event_type'] as string | undefined;
         if (eventType !== 'im.message.receive_v1') return;
 
-        // Deduplicate: Feishu may deliver the same event multiple times
         const eventId = header?.['event_id'] as string | undefined;
-        if (eventId) {
-          if (seenEventIds.has(eventId)) { log(`dup event ${eventId.slice(-8)}, skipped`); return; }
-          seenEventIds.add(eventId);
-          if (seenEventIds.size > 500) {
-            // Evict oldest entries to bound memory (Set preserves insertion order)
-            const first = seenEventIds.values().next().value;
-            if (first) seenEventIds.delete(first);
-          }
-        }
 
         const event = frame['event'] as Record<string, unknown> | undefined;
         if (!event) return;
@@ -191,19 +181,53 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         const openId = msgEvent.sender?.sender_id?.open_id;
         if (!openId) return;
 
+        const msgType = msgEvent.message?.message_type ?? 'unknown';
+        const contentRaw = msgEvent.message?.content ?? '';
         let text = '';
         try {
-          const contentObj = JSON.parse(msgEvent.message?.content || '{}') as Record<string, unknown>;
+          const contentObj = JSON.parse(contentRaw || '{}') as Record<string, unknown>;
           text = (contentObj['text'] as string) || '';
+          // Feishu 'post' (rich text): extract from nested zh_cn/en_us structure
+          if (!text && (msgType === 'post' || contentObj['zh_cn'] || contentObj['en_us'])) {
+            const postBody = (contentObj['zh_cn'] ?? contentObj['en_us']) as
+              { title?: string; content?: Array<Array<{ tag: string; text?: string }>> } | undefined;
+            if (postBody) {
+              const parts: string[] = [];
+              if (postBody.title) parts.push(postBody.title);
+              for (const row of postBody.content ?? []) {
+                const rowText = row.filter((e) => e.tag === 'text').map((e) => e.text ?? '').join('');
+                if (rowText) parts.push(rowText);
+              }
+              text = parts.join('\n').trim();
+            }
+          }
         } catch {
-          text = msgEvent.message?.content || '';
+          text = contentRaw;
         }
 
         const chatId = msgEvent.message?.chat_id || openId;
         const chatType = msgEvent.message?.chat_type || 'p2p';
-
         const messageId = msgEvent.message?.message_id ?? '';
-        log(`msg from=...${openId.slice(-6)} chat_type=${chatType} len=${text.length} msgId=${messageId.slice(-8)}`);
+
+        // Empty text: log with content preview for diagnosis, but do NOT add to seenEventIds.
+        // This allows Feishu retries to be tried again if content was missing or in an
+        // unsupported format on first delivery.
+        if (!text.trim()) {
+          log(`empty msg msg_type=${msgType} content="${contentRaw.slice(0, 200)}" msgId=${messageId.slice(-8)} — skipped, not deduped`);
+          return;
+        }
+
+        // Dedup after successful text extraction so retries of empty messages aren't blocked.
+        if (eventId) {
+          if (seenEventIds.has(eventId)) { log(`dup event ${eventId.slice(-8)}, skipped`); return; }
+          seenEventIds.add(eventId);
+          if (seenEventIds.size > 500) {
+            const first = seenEventIds.values().next().value;
+            if (first) seenEventIds.delete(first);
+          }
+        }
+
+        log(`msg from=...${openId.slice(-6)} chat_type=${chatType} msg_type=${msgType} len=${text.length} msgId=${messageId.slice(-8)}`);
         onMessage?.(openId, text, chatId, chatType, messageId);
       } catch (err) {
         log(`message error: ${err instanceof Error ? err.message : String(err)}`);

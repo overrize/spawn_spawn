@@ -549,6 +549,12 @@ function connectFeishu(appId: string, appSecret: string): void {
     chatId: string,
     chatType: string,
   ): void => {
+    // Safety net: websocket.ts already filters empty messages, but guard here too
+    // so non-WS callers (tests, direct invocations) can't accidentally spawn PM with empty input.
+    if (!text.trim()) {
+      feishuLog(`[FeishuBridge] empty text from ...${openId.slice(-6)}, skipped`);
+      return;
+    }
     const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
     const replyId   = chatType === 'group' ? chatId : openId;
     const replyType: 'open_id' | 'chat_id' = chatType === 'group' ? 'chat_id' : 'open_id';
