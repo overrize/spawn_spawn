@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { parseTestCounts, detectTestCommand } from "../tools/registry.js";
+import { parseTestCounts, detectTestCommand, executeTool } from "../tools/registry.js";
 
 // ── parseTestCounts ───────────────────────────────────────────────────────────
 
@@ -97,6 +97,39 @@ describe("parseTestCounts — go", () => {
   });
 });
 
+
+
+describe("parseTestCounts — deno", () => {
+  const framework = "deno";
+
+  it("parses ok | N passed | M failed pattern", () => {
+    const output = "ok | 10 passed | 2 failed (200ms)\n";
+    const r = parseTestCounts(output, framework);
+    assert.equal(r.passed, 10);
+    assert.equal(r.failed, 2);
+  });
+
+  it("all-pass case: no failures", () => {
+    const output = "ok | 5 passed | 0 failed (50ms)\n";
+    const r = parseTestCounts(output, framework);
+    assert.equal(r.passed, 5);
+    assert.equal(r.failed, 0);
+  });
+
+  it("falls back for empty/unmatched output", () => {
+    const r = parseTestCounts("some random output", framework);
+    assert.equal(r.passed, 0);
+    assert.equal(r.failed, 0);
+  });
+
+  it("parses 'test result: ok. N passed; M failed' style", () => {
+    const output = "test result: ok. 42 passed; 3 failed; 0 ignored\n";
+    const r = parseTestCounts(output, framework);
+    assert.equal(r.passed, 42);
+    assert.equal(r.failed, 3);
+  });
+});
+
 // ── detectTestCommand ─────────────────────────────────────────────────────────
 
 describe("detectTestCommand", () => {
@@ -179,6 +212,89 @@ describe("detectTestCommand", () => {
     try {
       const result = detectTestCommand(dir);
       assert.equal(result, null);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Edit tool — CRLF normalization ───────────────────────────────────────────
+
+describe("Edit tool — CRLF normalization", () => {
+  const mkTmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "spawn-edit-"));
+
+  it("LF old_string matches CRLF file content", async () => {
+    const dir = mkTmp();
+    try {
+      const file = path.join(dir, "test.ts");
+      fs.writeFileSync(file, "const x = 1;\r\nconst y = 2;\r\n", "utf8");
+      const r = await executeTool("Edit", {
+        path: file,
+        old_string: "const x = 1;\nconst y = 2;",
+        new_string: "const x = 10;\nconst y = 20;",
+      });
+      assert.ok(r.ok, `Edit should succeed on CRLF file: ${r.output}`);
+      const after = fs.readFileSync(file, "utf8");
+      assert.ok(after.includes("const x = 10;"), "replacement content present");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("Edit preserves CRLF line endings after replacement", async () => {
+    const dir = mkTmp();
+    try {
+      const file = path.join(dir, "test.ts");
+      fs.writeFileSync(file, "line1\r\nline2\r\nline3\r\n", "utf8");
+      const r = await executeTool("Edit", {
+        path: file,
+        old_string: "line2",
+        new_string: "replaced",
+      });
+      assert.ok(r.ok);
+      const after = fs.readFileSync(file, "utf8");
+      assert.equal(after, "line1\r\nreplaced\r\nline3\r\n");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("Edit on LF file still works (no regression)", async () => {
+    const dir = mkTmp();
+    try {
+      const file = path.join(dir, "test.ts");
+      fs.writeFileSync(file, "line1\nline2\nline3\n", "utf8");
+      const r = await executeTool("Edit", {
+        path: file,
+        old_string: "line2",
+        new_string: "replaced",
+      });
+      assert.ok(r.ok);
+      const after = fs.readFileSync(file, "utf8");
+      assert.equal(after, "line1\nreplaced\nline3\n");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("multiline LF old_string matches CRLF file", async () => {
+    const dir = mkTmp();
+    try {
+      const file = path.join(dir, "test.ts");
+      fs.writeFileSync(
+        file,
+        "function foo() {\r\n  return 1;\r\n}\r\n",
+        "utf8",
+      );
+      const r = await executeTool("Edit", {
+        path: file,
+        old_string: "function foo() {\n  return 1;\n}",
+        new_string: "function foo() {\n  return 42;\n}",
+      });
+      assert.ok(r.ok, `multiline CRLF edit failed: ${r.output}`);
+      const after = fs.readFileSync(file, "utf8");
+      assert.ok(after.includes("return 42;"), "replacement applied");
+      assert.ok(after.includes("\r\n"), "CRLF preserved");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

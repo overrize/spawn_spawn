@@ -82,16 +82,25 @@ const Edit: ToolDef = {
       fs.writeFileSync(p, newStr, "utf8");
       return ok(`Created ${p} (${newStr.length} chars)`);
     }
-    const content = fs.readFileSync(p, "utf8");
-    const count = content.split(oldStr).length - 1;
+    const raw = fs.readFileSync(p, "utf8");
+    // Normalize to LF for matching so Windows CRLF files work with LF old_string.
+    const hasCrlf = raw.includes("\r\n");
+    const content = hasCrlf ? raw.replace(/\r\n/g, "\n") : raw;
+    const normalizedOld = oldStr.replace(/\r\n/g, "\n");
+    const normalizedNew = newStr.replace(/\r\n/g, "\n");
+    const count = content.split(normalizedOld).length - 1;
     if (count === 0) return err(`old_string not found in ${p}`);
     if (count > 1)   return err(`old_string found ${count} times in ${p}; be more specific`);
     // When deleting (newStr=""), also handle trailing newline
-    let updated = content.replace(oldStr, newStr);
-    if (newStr === "" && !oldStr.endsWith("\n") && content.includes(oldStr + "\n")) {
-      updated = content.replace(oldStr + "\n", "");
+    let updated: string;
+    if (normalizedNew === "" && !normalizedOld.endsWith("\n") && content.includes(normalizedOld + "\n")) {
+      updated = content.replace(normalizedOld + "\n", "");
+    } else {
+      updated = content.replace(normalizedOld, normalizedNew);
     }
-    fs.writeFileSync(p, updated, "utf8");
+    // Restore original line endings
+    const finalContent = hasCrlf ? updated.replace(/\n/g, "\r\n") : updated;
+    fs.writeFileSync(p, finalContent, "utf8");
     return ok(`Edited ${p}: replaced 1 occurrence`);
   },
 };
@@ -423,6 +432,18 @@ export function parseTestCounts(output: string, framework: string): TestCounts {
       r.failed  = (output.match(/--- FAIL/g) ?? []).length;
       if (r.passed === 0 && !output.includes("FAIL\t")) r.passed = 1; // "ok  package  0.1s"
       break;
+    case "deno":
+      // Deno: "ok | N passed | M failed (Xms)" or "test result: ok. N passed; M failed; ..."
+      r.passed  = num(/(\d+)\s+passed/);
+      r.failed  = num(/(\d+)\s+failed/);
+      if (r.passed === 0 && r.failed === 0) {
+        if (/\|\s+\d+\s+passed/.test(output)) {
+          r.passed = num(/\|\s+(\d+)\s+passed/);
+          r.failed = num(/\|\s+(\d+)\s+failed/);
+        }
+      }
+      break;
+
   }
   return r;
 }
@@ -742,3 +763,5 @@ function middleTruncate(s: string, max = 20_000): string {
     + `\n\n[... ${skipped.length} chars / ~${skippedLines} lines truncated ...]\n\n`
     + s.slice(-tail);
 }
+
+// FIXME: old block not found

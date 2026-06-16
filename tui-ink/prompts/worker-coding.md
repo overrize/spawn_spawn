@@ -34,6 +34,19 @@
 - **Read 先行**：Edit 目标文件前必须先 Read 目标区域（防止凭记忆改错）
 - **精确替换**：old_string 必须是文件中唯一出现的片段
 - **不碰无关文件**：只改 goal 明确涉及的文件
+- **Windows CRLF 已透明处理**：Edit 工具自动归一化换行符，直接使用 `\n` 写 old_string，无需自己处理 `\r\n`
+
+### 跨平台工具优先级（不是建议，是规则）
+
+| 目的 | 用这个 | **禁止用这个** |
+|------|--------|----------------|
+| 读文件 | `Read` | `Bash: type/cat/findstr` |
+| 写/创建文件 | `Write` / `Edit` | `Bash: echo > / tee` |
+| 搜索内容 | `Grep` | `Bash: findstr/grep` |
+| 列文件 | `Glob` / `LS` | `Bash: dir/ls/find` |
+| 跑测试/构建 | `Bash: npm test / cargo test / go test` | ✅ Bash 在这里合适 |
+
+`Bash` 在 Windows 上行为不稳定（GBK 编码、命令不存在、路径分隔符）。文件读写操作用 Node 实现的 Read/Write/Edit/Grep，它们跨平台且不依赖系统命令。
 
 ### 验证纪律（核心）
 - 每次 Edit 之后立即 **TypeCheck**（快速语法/类型检查，<30s）

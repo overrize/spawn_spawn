@@ -1098,11 +1098,13 @@ function startLeaderAgent(opts: LeaderOpts): void {
               const { ok, output } = results[i]!;
               applyEvent({ v: 1, type: "tool.result", agent: opts.id, id, ok, output });
             }
-            // Feed combined results back to the LLM — without this the PM hangs indefinitely
+            // Feed combined results back to the LLM — without this the PM hangs indefinitely.
+            // Use user.message so the [tool_result id=...] headers in `combined` aren't
+            // double-wrapped (sendCommand type:"tool.result" would add an extra header).
             const combined = batch.map((c, i) =>
               `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
             ).join("\n\n");
-            a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
+            a.sendCommand({ type: "user.message", text: combined });
           });
         });
       } else if (actedThisTurn) {
@@ -1409,6 +1411,12 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   // Non-null means the worker called RunTests at least once this session.
   let wLastTestFailed: number | null = null; // null=never run, 0=all pass, N=N failures
 
+  // Circuit breaker constants
+  const MAX_WORKER_TURNS = 40;
+  const MAX_CONSEC_FAIL_TOOLS = 5;
+  // Consecutive tool-failure counter — reset on any successful tool result
+  let wConsecToolFails = 0;
+
   // Quality tracking for worker
   let wQualTurns = 0;
   let wQualNudges = 0;
@@ -1557,6 +1565,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       wSameToolCount = 0;
       if (workerNudgePending) wQualNudges++;
       wQualTurns++;
+      // Hard turn limit — force handup so worker can't loop indefinitely
+      if (wQualTurns >= MAX_WORKER_TURNS) {
+        setImmediate(() => {
+          if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
+          a.sendCommand({
+            type: "user.message",
+            text: `[系统-轮数上限] 你已使用 ${wQualTurns} 轮，达到上限 ${MAX_WORKER_TURNS} 轮。必须在本轮内完成任务或立即 unit.handup 给 ${e.parent}（含当前进展和卡点），不允许继续下一轮。`,
+          });
+        });
+      }
     }
     if (ev.type === "unit.handup") wQualHandup = true;
     if (ev.type === "agent.done") {
@@ -1696,6 +1714,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
             for (let i = 0; i < batch.length; i++) {
               const { id } = batch[i]!;
               const { ok, output } = results[i]!;
+              // Track consecutive failures for circuit breaker
+              if (ok) { wConsecToolFails = 0; } else { wConsecToolFails++; }
               // Coding completion guard: track RunTests outcome so we can reject a
               // premature agent.done(success:true) when tests are still failing.
               if (batch[i]!.name === "RunTests") {
@@ -1704,10 +1724,20 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
               }
               applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
             }
-            const combined = batch.map((c, i) =>
+            // Use user.message so the [tool_result id=...] headers in `combined` aren't
+            // double-wrapped (sendCommand type:"tool.result" would add an extra header).
+            let combined = batch.map((c, i) =>
               `[tool_result id="${c.id}" ok="${results[i]!.ok}"]\n${results[i]!.output}`
             ).join("\n\n");
-            a.sendCommand({ type: "tool.result", id: batch[0]!.id, ok: true, output: combined });
+            // Circuit breaker: append forced-handup directive when consecutive failures hit threshold
+            if (wConsecToolFails >= MAX_CONSEC_FAIL_TOOLS) {
+              wConsecToolFails = 0;
+              combined +=
+                `\n\n[系统-熔断] 最近 ${MAX_CONSEC_FAIL_TOOLS} 次工具调用全部失败，触发降级熔断。` +
+                `禁止继续换工具试错。立即 unit.handup 给 ${e.parent}，说明：` +
+                `① 你在尝试什么操作 ② 用了哪些工具 ③ 每次的具体错误信息。`;
+            }
+            a.sendCommand({ type: "user.message", text: combined });
           });
         });
         // Worker acted but may still have pending todos — auto-close or nudge
