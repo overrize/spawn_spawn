@@ -1,18 +1,31 @@
-# multi-agent TUI
+# spawn
 
-终端多 Agent 协作界面。PM → Tech Lead → Worker 三层架构，HTTP 流式 LLM，支持 spawn DAG、工具审批、会话恢复。
+多 agent 对话系统。用户通过飞书或终端 TUI 发送任务，系统自动拆分并并行调度多个 LLM agent 完成，结果汇总回用户。
 
-## 快速开始
+**开发者文档（架构、内存系统、Feishu 接入、测试）→ [tui-ink/README.md](tui-ink/README.md)**
+
+## 快速上手
 
 ```bash
 cd tui-ink
 npm install
+cp .env.example .env      # 填入 API key
+npm run dev               # 启动 TUI
+npm run dev -- --demo     # 无 API key 演示模式
+```
 
-# demo 模式（不需要 API key，模拟事件流）
-npm run demo
+`.env` 必填项：
 
-# 真实模式：先配置 API key，再启动
-npm start
+```
+OPENAI_API_KEY=...        # 或其他兼容 OpenAI 格式的 provider
+OPENAI_BASE_URL=...       # 例如 https://api.deepseek.com
+```
+
+飞书接入（可选）：
+
+```
+FEISHU_APP_ID=...
+FEISHU_APP_SECRET=...
 ```
 
 ### 系统依赖
@@ -25,23 +38,10 @@ brew install ripgrep       # macOS
 scoop install ripgrep      # Windows（需在系统 PATH）
 ```
 
-### 配置 API Key
-
-```bash
-# Linux / macOS
-mkdir -p ~/.config/multi-agent-tui
-cp tui-ink/config.example.json ~/.config/multi-agent-tui/config.json
-# 编辑 config.json，填入 apiKey
-
-# Windows
-mkdir %USERPROFILE%\.config\multi-agent-tui
-copy tui-ink\config.example.json %USERPROFILE%\.config\multi-agent-tui\config.json
-```
-
-**也可以在 TUI 内用命令配置**（自动写入文件）：
+**也可以在 TUI 内用命令配置 provider**：
 
 ```
-/connect leader anthropic claude-sonnet-4-5 sk-ant-YOUR_KEY
+/connect leader deepseek deepseek-chat sk-YOUR_KEY
 /connect worker deepseek deepseek-chat sk-YOUR_KEY
 ```
 
@@ -282,30 +282,48 @@ grep '\[quality\]' debug.log | awk -F'score=' '{print $2}' | awk '$1+0 < 60'
 ## 目录结构
 
 ```
-.
-├── prompts/                    角色 prompt
-│   ├── _base.md                公共前导：协议格式 + 行动偏见铁律
-│   ├── pm.md                   PM：Stage 0 并发感知 + 三阶段决策
-│   ├── leader.md               Tech Lead：spawn 路由 + handup 处理
-│   └── worker.md               Worker：goal 边界 + agent.done 格式
-│
-└── tui-ink/                    终端 UI（Ink / React + TypeScript）
-    └── src/
-        ├── protocol.ts         事件协议类型定义（TuiEvent / AgentCommand）
-        ├── store.ts            Zustand 全局状态 + applyEvent
-        ├── ui.tsx              三栏 Ink 组件
-        ├── index.tsx           入口：快捷键 / 路由 / agent 生命周期
-        ├── adapters/
-        │   └── httpAgent.ts    HTTP 流式 adapter（Anthropic / DeepSeek / OpenAI）
-        ├── pm/
-        │   └── ProcessManager.ts  spawn 校验 / 超时 / 告警
-        ├── memory/
-        │   ├── MemoryStore.ts  .spawn/memory/ 原子 I/O
-        │   └── SecretaryProxy.ts  自动维护 AgentMemory + btw 旁路
-        ├── cache/
-        │   └── CachePrefixManager.ts  prompt cache 前缀复用
-        └── tools/
-            └── registry.ts    工具白名单 + executeTool + 审批判断
+spawn-work/
+├── README.md                   本文件
+├── tui-ink/                    主程序（Ink / React + TypeScript）
+│   ├── README.md               开发者文档 ← 看这里
+│   ├── .env.example            环境变量模板
+│   ├── prompts/                角色 prompt
+│   │   ├── _base.md            公共前导：协议格式 + 行动偏见铁律
+│   │   ├── pm.md               PM：Stage 0 并发感知 + 三阶段决策
+│   │   ├── leader.md           Tech Lead：spawn 路由 + handup 处理
+│   │   ├── worker.md           Worker：goal 边界 + agent.done 格式
+│   │   └── worker-coding.md    Worker 编码专用 prompt（工具优先级 + CRLF）
+│   └── src/
+│       ├── protocol.ts         事件协议类型（TuiEvent / AgentCommand）
+│       ├── store.ts            Zustand 全局状态 + applyEvent
+│       ├── index.tsx           入口：快捷键 / 路由 / agent 生命周期
+│       ├── adapters/
+│       │   └── httpAgent.ts    HTTP 流式 LLM adapter
+│       ├── bus/
+│       │   └── Bus.ts          SpawnBus：全局 PubSub 事件总线
+│       ├── inbound/
+│       │   └── feishu.ts       飞书消息解析（text/post/at）→ InboundMessage
+│       ├── runtime/
+│       │   ├── ConversationRuntime.ts  全双工会话状态机（base/fork）
+│       │   ├── TurnController.ts       单轮输入缓冲 + 并发保护
+│       │   ├── TaskScheduler.ts        异步任务队列调度
+│       │   └── FollowupRouter.ts       追问路由（PM fork 接力）
+│       ├── feishu/
+│       │   ├── websocket.ts    飞书 WS 长连接（protobuf 解析 + 重连）
+│       │   ├── outbound/
+│       │   │   └── OutboundGateway.ts  统一出口：抑制 → 格式 → 消毒 → 发送
+│       │   └── replyAggregator.ts      chunk 聚合 + turn-end flush
+│       ├── memory/
+│       │   ├── MemoryStore.ts  .spawn/memory/ 原子 I/O
+│       │   └── SecretaryProxy.ts  自动维护 AgentMemory + btw 旁路
+│       ├── pm/
+│       │   └── ProcessManager.ts  spawn 校验 / 超时 / 告警
+│       ├── execution/
+│       │   └── WorkspaceBoundary.ts  worker 工作目录隔离
+│       ├── cache/
+│       │   └── CachePrefixManager.ts  prompt cache 前缀复用
+│       └── tools/
+│           └── registry.ts    工具白名单 + executeTool + 审批判断
 ```
 
 ---
