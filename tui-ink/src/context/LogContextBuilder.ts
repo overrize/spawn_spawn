@@ -33,10 +33,42 @@ export interface LogContext {
   };
 }
 
-export type MissKind = "gap" | "recent-user-msg" | "todo-missing";
+export type MissKind = "gap" | "recent-user-msg" | "todo-missing" | "decision-missing";
+
+/**
+ * Cause codes — each maps to the source path that should be publishing to the bus.
+ *
+ * recent-user-msg causes:
+ *   slash-command     → handled in index.tsx command dispatcher, never enters bus
+ *   nudge             → sendCommand() path, bypasses httpAgent.emit
+ *   task-injection    → PM/TL receiving a structured task via sendCommand()
+ *   tool-result-text  → applyEvent() appends tool results to this.messages directly
+ *
+ * todo-missing causes:
+ *   tombstone-null    → Secretary has never seen a todo.set for this agent
+ *   tombstone-stale   → todo.set fired but Secretary hasn't flushed since
+ *
+ * decision-missing causes:
+ *   keyword-miss      → assistant turn contained decision keyword but Secretary didn't capture it
+ *                       (happens when the turn is protocol-only JSON with no prose)
+ *
+ * gap causes:
+ *   ring-overflow     → BUS_LOG_SIZE too small for the task length; increase env var
+ */
+export type MissCause =
+  | "slash-command"
+  | "nudge"
+  | "task-injection"
+  | "tool-result-text"
+  | "tombstone-null"
+  | "tombstone-stale"
+  | "keyword-miss"
+  | "ring-overflow"
+  | "unknown";
 
 export interface ShadowMiss {
   kind: MissKind;
+  cause: MissCause;
   detail: string;
 }
 
@@ -165,44 +197,91 @@ export function shadowDiff(
   if (newCtx.hasGap) {
     misses.push({
       kind: "gap",
-      detail: `ring overflow — events before offset ${newCtx.stats.fromOffset} are lost`,
+      cause: "ring-overflow",
+      detail: `ring overflow — events before offset ${newCtx.stats.fromOffset} are lost; increase BUS_LOG_SIZE (current default 2000)`,
     });
   }
 
   const newContent = newCtx.messages.map((m) => m.content).join("\n");
 
-  // 2. Recent user-role messages (last 5)
+  // 2. Recent user-role messages (last 5) — classify by source path
   const recentUser = oldMessages.filter((m) => m.role === "user").slice(-5);
   for (const msg of recentUser) {
-    // Strip tool_result protocol headers to get human-readable content
-    const clean = msg.content
+    // Strip tool_result and system protocol headers
+    const raw = msg.content;
+    const hasToolResult = /\[tool_result/i.test(raw);
+    const clean = raw
       .replace(/\[tool_result[^\]]*\]\n?[^\n]*/gm, "")
       .replace(/\[system-[^\]]*\][^\n]*/gm, "")
       .trim();
-    if (clean.length < 30) continue; // too short / protocol-only
+
+    if (hasToolResult && clean.length < 30) continue; // pure protocol payload, not human text
+
+    if (clean.length < 30) continue; // too short to be meaningful
 
     const probe = clean.slice(0, 60);
-    if (!newContent.includes(probe.slice(0, 30))) {
-      misses.push({
-        kind: "recent-user-msg",
-        detail: `"${probe.slice(0, 60).replace(/\n/g, "\\n")}"`,
-      });
-    }
+    if (newContent.includes(probe.slice(0, 30))) continue; // already covered
+
+    // Classify the cause by content signature
+    const cause = classifyUserMsgCause(clean, hasToolResult);
+    misses.push({
+      kind: "recent-user-msg",
+      cause,
+      detail: `[cause=${cause}] "${probe.replace(/\n/g, "\\n")}"`,
+    });
   }
 
-  // 3. Todo: if oldMessages contain a recent todo.set pattern but newCtx lacks active todos
+  // 3. Todo: if oldMessages contain active todo markers but newCtx lacks a todo block
   const hasTodoInOld = oldMessages
     .slice(-10)
     .some((m) => m.content.includes("[run]") || m.content.includes("[todo]"));
   const hasTodoInNew = newContent.includes("【当前 todo】");
   if (hasTodoInOld && !hasTodoInNew) {
+    // Distinguish: Secretary never saw a todo.set vs. saw one but tombstone not flushed yet
+    const cause: MissCause = newCtx.stats.factCount === 0 ? "tombstone-null" : "tombstone-stale";
     misses.push({
       kind: "todo-missing",
-      detail: "oldMessages has active todo items but newCtx has no todo block (tombstone.last_todo may be stale)",
+      cause,
+      detail: `active todo in oldMessages missing from newCtx (${cause})`,
     });
   }
 
+  // 4. Decision keywords in recent assistant turns not reflected in working_set
+  const recentAssistant = oldMessages.filter((m) => m.role === "assistant").slice(-3);
+  for (const msg of recentAssistant) {
+    const prose = msg.content.split("\n").filter((l) => !l.trim().startsWith("{")).join(" ").trim();
+    if (prose.length < 20) continue;
+    if (!DECISION_PATTERN.test(prose)) continue;
+    const snippet = prose.slice(0, 80);
+    if (!newContent.includes(snippet.slice(0, 30))) {
+      misses.push({
+        kind: "decision-missing",
+        cause: "keyword-miss",
+        detail: `[cause=keyword-miss] "${snippet.replace(/\n/g, "\\n")}"`,
+      });
+    }
+  }
+
   return misses;
+}
+
+// Matches decision keywords from SecretaryProxy (kept in sync manually — both must match)
+const DECISION_PATTERN = /应该|决定|选择|采用|方案|确认|将要|采取|should|decided|chosen|use|using|will\s/i;
+
+/**
+ * Infer which source path produced a user-role message that's missing from the bus.
+ * Each cause maps to a specific code path that would need to publish to the bus.
+ */
+function classifyUserMsgCause(clean: string, hasToolResult: boolean): MissCause {
+  if (hasToolResult) return "tool-result-text";
+  if (clean.startsWith("/")) return "slash-command";
+  // Structured task injection: multi-line, has section markers or JSON-ish structure
+  if (clean.includes("\n") && (clean.includes("goal:") || clean.includes("## ") || clean.includes("任务"))) {
+    return "task-injection";
+  }
+  // Short imperative — most likely a user nudge sent via sendCommand()
+  if (clean.length < 150 && !clean.includes("\n")) return "nudge";
+  return "unknown";
 }
 
 // ── Formatted stderr log line ─────────────────────────────────────────────────
@@ -217,11 +296,17 @@ export function logShadowDiff(
   const prefix = `[shadow-ctx] agent=${agentId} turn=${turnIdx}`;
   const statStr = `facts=${newCtx.stats.factCount} decisions=${newCtx.stats.decisionCount} delta=${newCtx.stats.deltaEventCount}`;
   if (misses.length === 0) {
-    process.stderr.write(`${prefix} ✓ no gaps (${statStr})\n`);
+    process.stderr.write(`${prefix} ✓ no-miss (${statStr})\n`);
   } else {
-    process.stderr.write(`${prefix} ⚠ ${misses.length} miss(es) (${statStr}):\n`);
+    // Tally causes for easy grep/sort in log analysis
+    const causeTally = misses.reduce<Record<string, number>>((acc, m) => {
+      acc[m.cause] = (acc[m.cause] ?? 0) + 1;
+      return acc;
+    }, {});
+    const tallyStr = Object.entries(causeTally).map(([c, n]) => `${c}×${n}`).join(" ");
+    process.stderr.write(`${prefix} ⚠ ${misses.length} miss(es) (${statStr}) causes=[${tallyStr}]:\n`);
     for (const m of misses) {
-      process.stderr.write(`  [${m.kind}] ${m.detail}\n`);
+      process.stderr.write(`  [${m.kind}/${m.cause}] ${m.detail}\n`);
     }
   }
 }
