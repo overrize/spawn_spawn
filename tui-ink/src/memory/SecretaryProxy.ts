@@ -30,9 +30,17 @@ export class SecretaryProxy extends EventEmitter {
     this.factSeq = memory.working_set.facts.length;
     this.decisionSeq = memory.working_set.decisions.length;
     this.secretaryAlias = `${memory.agent_id}-secretary`;
-    // Cursor starts at the current bus head — events before this are already
-    // captured in the snapshot we loaded (or irrelevant for a fresh agent).
-    this._logCursor = globalBus.getHeadOffset();
+    // Cursor: if the tombstone carries a cursor from the SAME process epoch, honour it
+    // (intra-process recovery). Otherwise discard it — the ring was reset at restart.
+    if (
+      memory.tombstone.log_cursor !== undefined &&
+      memory.tombstone.log_cursor_epoch === globalBus.getEpoch()
+    ) {
+      this._logCursor = memory.tombstone.log_cursor;
+    } else {
+      // Cross-restart or fresh agent: treat current head as baseline.
+      this._logCursor = globalBus.getHeadOffset();
+    }
     // Persist initial state + register new session entry
     saveMemory(memory.agent_id, memory);
     startSession(memory.agent_id, memory.session_hash ?? "unknown");
@@ -296,11 +304,13 @@ export class SecretaryProxy extends EventEmitter {
   }
 
   private saveAsync(): void {
-    // Snapshot the cursor at decision time — not inside setImmediate — so the
-    // tombstone.log_cursor accurately reflects "state as of this moment".
+    // Snapshot cursor + epoch at decision time, not inside setImmediate, so the
+    // tombstone accurately reflects "state as of this moment" for gap detection.
     const cursor = globalBus.getHeadOffset();
+    const epoch  = globalBus.getEpoch();
     this._logCursor = cursor;
     this.memory.tombstone.log_cursor = cursor;
+    this.memory.tombstone.log_cursor_epoch = epoch;
     this.memory.updated_at = Date.now();
     setImmediate(() => {
       if (!this.destroyed) saveMemory(this.memory.agent_id, this.memory);
@@ -309,8 +319,10 @@ export class SecretaryProxy extends EventEmitter {
 
   private flushSync(): void {
     const cursor = globalBus.getHeadOffset();
+    const epoch  = globalBus.getEpoch();
     this._logCursor = cursor;
     this.memory.tombstone.log_cursor = cursor;
+    this.memory.tombstone.log_cursor_epoch = epoch;
     this.memory.updated_at = Date.now();
     saveMemory(this.memory.agent_id, this.memory);
   }

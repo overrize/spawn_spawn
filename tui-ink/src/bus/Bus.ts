@@ -41,7 +41,9 @@ export interface LogEntry {
   event: BusPayload;
 }
 
-const LOG_RING_SIZE = Math.max(100, parseInt(process.env.BUS_LOG_SIZE ?? "500", 10));
+// Default 2000: enough for ~4 concurrent agents × 40-turn tasks × ~12 events/turn.
+// Override with BUS_LOG_SIZE env var.
+const LOG_RING_SIZE = Math.max(100, parseInt(process.env.BUS_LOG_SIZE ?? "2000", 10));
 
 type TypedHandler<T extends BusPayload["type"]> = (
   event: Extract<BusPayload, { type: T }>,
@@ -63,6 +65,9 @@ export class SpawnBus {
   // ── Ring buffer log ──────────────────────────────────────────────────────
   private readonly _log: LogEntry[] = [];
   private _nextOffset = 0;
+  // Process-lifetime epoch — changes on every restart. Used to detect stale
+  // tombstone.log_cursor values from a previous process run.
+  private readonly _epoch: string = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
   constructor() {
     this.ee.setMaxListeners(200);
@@ -105,16 +110,35 @@ export class SpawnBus {
 
   // ── Log query API ─────────────────────────────────────────────────────────
 
+  /** Process-lifetime epoch string — changes on every restart. */
+  getEpoch(): string { return this._epoch; }
+
   /** Current head offset (= total events published, not clamped to ring size). */
   getHeadOffset(): number { return this._nextOffset; }
 
   /**
-   * Return all log entries with offset >= sinceOffset.
-   * If sinceOffset falls before the oldest entry in the ring, returns what's available.
+   * Return log entries with offset >= sinceOffset, optionally filtered to one agent.
+   *
+   * hasGap = true means sinceOffset predates the oldest retained entry — the caller
+   * MUST fall back to sessions.json rather than treating this as a complete delta.
+   *
+   * agentId filter: when set, only returns events where event.agent === agentId
+   * OR the event is a spawn/message addressed to that agent. Reduces cross-agent
+   * noise in multi-user scenarios and slows ring eviction pressure on single agents.
    */
-  getLog(sinceOffset = 0): { entries: LogEntry[]; headOffset: number } {
-    const entries = this._log.filter((e) => e.offset >= sinceOffset);
-    return { entries, headOffset: this._nextOffset };
+  getLog(
+    sinceOffset = 0,
+    agentId?: string,
+  ): { entries: LogEntry[]; headOffset: number; hasGap: boolean } {
+    const oldestOffset = this._log[0]?.offset ?? this._nextOffset;
+    // hasGap: there are entries we needed but have been evicted.
+    // Empty ring (size=0) with sinceOffset=0 is not a gap.
+    const hasGap = this._log.length > 0 && sinceOffset < oldestOffset;
+    let entries = this._log.filter((e) => e.offset >= sinceOffset);
+    if (agentId !== undefined) {
+      entries = entries.filter((e) => isRelevantEvent(e.event, agentId));
+    }
+    return { entries, headOffset: this._nextOffset, hasGap };
   }
 
   /** Diagnostic snapshot — ring size, head offset, oldest retained offset. */
@@ -183,6 +207,20 @@ export class SpawnBus {
       0,
     );
   }
+}
+
+/**
+ * True when an event is "relevant" to a given agent for context-rebuilding purposes.
+ * Used by getLog(sinceOffset, agentId) to filter cross-agent noise.
+ */
+function isRelevantEvent(event: BusPayload, agentId: string): boolean {
+  // Events emitted BY this agent
+  if ("agent" in event && (event as { agent: string }).agent === agentId) return true;
+  // Messages addressed TO this agent
+  if (event.type === "message" && "to" in event && (event as { to: string }).to === agentId) return true;
+  // Spawn events where this agent is the child (context injection)
+  if (event.type === "spawn" && "child" in event && (event as { child: string }).child === agentId) return true;
+  return false;
 }
 
 /** Process-wide singleton. Import and use directly. */

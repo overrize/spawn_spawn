@@ -36,6 +36,8 @@ export interface Tombstone {
   last_todo?: string;  // JSON serialized last todo.set items
   /** Bus log offset at last Secretary flush — replay log from here to reconstruct state delta. */
   log_cursor?: number;
+  /** Bus epoch at flush time — if mismatched on load, the cursor is from a dead process and must be discarded. */
+  log_cursor_epoch?: string;
 }
 
 export interface AgentMemory {
