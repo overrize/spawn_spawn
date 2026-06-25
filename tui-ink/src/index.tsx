@@ -33,13 +33,14 @@ import {
   applyEvent, ensureAgent, getState, selectAgent, useStore, userMessage,
   approve, reject, abortAgent, setLayout, scrollBy, scrollAgentBy, setMinLevel, setEffort,
   resumeAgent, updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents, setTokenBudget,
+  selectAgentVisible,
   setPendingRating, clearPendingRating,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
 import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
 import type { PaletteName, ProviderConfig } from "./config.js";
 import { SecretaryProxy } from "./memory/SecretaryProxy.js";
-import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, deleteAgentMemory } from "./memory/MemoryStore.js";
+import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, deleteAgentMemory, topFactsByWeight, loadSessions } from "./memory/MemoryStore.js";
 import { ProcessManager } from "./pm/ProcessManager.js";
 import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./tools/registry.js";
 import type { AgentRole } from "./tools/registry.js";
@@ -59,6 +60,10 @@ import { FeishuReplyAggregator } from "./feishu/replyAggregator.js";
 import { FeishuInputWindowManager } from "./feishu/input-window.js";
 import { globalBus } from "./bus/Bus.js";
 import { OutboundGateway } from "./feishu/outbound/OutboundGateway.js";
+import { TaskScheduler } from "./runtime/TaskScheduler.js";
+import { ConversationRuntime } from "./runtime/ConversationRuntime.js";
+import { TurnController } from "./runtime/TurnController.js";
+import { classifyFollowup } from "./runtime/FollowupRouter.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -143,6 +148,7 @@ function readIfExists(p: string): string {
 const agents = new Map<string, HttpConvAgent>();
 const secretaries = new Map<string, SecretaryProxy>(); // agentId → Secretary
 const pm = new ProcessManager();
+const scheduledTasks = new TaskScheduler();
 // Feishu: open_id → pmId (e.g. "feishu-a1b2c3d4")
 const feishuSessions = new Map<string, string>();
 let feishuConnected = false;
@@ -276,7 +282,7 @@ interface LeaderOpts {
   resumedMemoryId?: string;
   promptFile?: string;      // "pm" for root, "leader" for tech leads
   firstMessage?: string;    // override initial LLM message (used when PM first starts)
-  replyHook?: (text: string, format?: "text" | "document", meta?: { _fallback?: boolean }) => void; // called when message.to=user (Feishu bridge)
+  replyHook?: (text: string, format?: "text" | "document", meta?: { _fallback?: boolean; agentId?: string }) => void; // called when message.to=user (Feishu bridge)
   turnEndHook?: () => void;            // called when Feishu PM turn ends — flushes aggregator
   conversationMode?: boolean;          // if true: stop after each user reply, no auto-nudge
   // Phase B: forked task options
@@ -320,6 +326,35 @@ function connectFeishu(appId: string, appSecret: string): void {
   feishuBridge.subscribe(createCardRenderer(tokenManager));
 
   const cfg = loadConfig();
+  const conversationRuntimeShadow = new ConversationRuntime({
+    maxConcurrent: FEISHU_MAX_CONCURRENT,
+    autoDrainOnComplete: false,
+    makeBasePmId: (openId) => `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`,
+  });
+  const shadowForkByAnchor = new Map<string, string>();
+  const shadowLog = (label: string, actions: unknown[]): void => {
+    if (process.env.SPAWN_SHADOW_RUNTIME !== "1") return;
+    feishuLog(`[ConversationRuntime:shadow] ${label} ${JSON.stringify(actions).slice(0, 1000)}`);
+  };
+  const shadowAccept = (openId: string, text: string, messageId: string): void => {
+    const actions = conversationRuntimeShadow.accept({ conversationId: openId, text, messageId });
+    for (const action of actions) {
+      if (action.type === "fork_start") shadowForkByAnchor.set(messageId, action.forkId);
+    }
+    shadowLog("accept", actions);
+  };
+  const shadowCompleteFork = (openId: string, messageId: string, answer: string): void => {
+    const forkId = shadowForkByAnchor.get(messageId);
+    if (!forkId) return;
+    const actions = conversationRuntimeShadow.completeFork(openId, forkId, answer);
+    shadowLog("completeFork", actions);
+  };
+  const shadowCompleteBase = (openId: string, pmId: string): void => {
+    const bpm = agents.get(pmId);
+    if (!(bpm instanceof HttpConvAgent)) return;
+    const actions = conversationRuntimeShadow.completeBase(openId, bpm.getMessages());
+    shadowLog("completeBase", actions);
+  };
 
   // Helper: start a new task for pmId, emit task_spawned, send placeholder card
   const startTask = (pmId: string, rt: { replyId: string; replyType: 'open_id' | 'chat_id' }, msgId: string): void => {
@@ -340,16 +375,56 @@ function connectFeishu(appId: string, appSecret: string): void {
   // sendCard   → format=document: route to card renderer for a structured card.
   // Note: text arrives pre-sanitized from the OutboundGateway (markdown stripped for text,
   // kept for document). The aggregator only needs to route, not re-sanitize.
+  const finalSentByRootMessage = new Set<string>();
+  const finalGuardKey = (taskId: string, pmIdLocal: string): string | null => {
+    const task = taskRegistry.get(taskId);
+    if (!task) return null;
+    return task.rootMessageId || `${pmIdLocal}:${taskId}`;
+  };
+  const hasFinalSent = (taskId: string, pmIdLocal: string): boolean => {
+    const task = taskRegistry.get(taskId);
+    const key = finalGuardKey(taskId, pmIdLocal);
+    if (!task || !key) return true;
+    if (finalSentByRootMessage.has(key) || task.status === "done") {
+      feishuLog(`[FeishuFinalGuard] suppressed duplicate final task=${taskId} pm=${pmIdLocal} root=${key}`);
+      return true;
+    }
+    return false;
+  };
+  const markFinalSent = (taskId: string, pmIdLocal: string): void => {
+    const key = finalGuardKey(taskId, pmIdLocal);
+    if (key) finalSentByRootMessage.add(key);
+  };
+  const claimFinalSend = (taskId: string, pmIdLocal: string): boolean => {
+    if (hasFinalSent(taskId, pmIdLocal)) {
+      return false;
+    }
+    markFinalSent(taskId, pmIdLocal);
+    return true;
+  };
+  const displayAgentName = (agentId?: string): string => {
+    if (!agentId) return "PM";
+    if (agentId === "pm" || /^feishu-[0-9a-f]{8}$/.test(agentId)) return `PM ${agentId}`;
+    if (agentId.startsWith("feishu-fork-")) return `Fork ${agentId}`;
+    const info = getState().agents.get(agentId);
+    const role = info?.role ?? "Agent";
+    return `${role} ${agentId}`;
+  };
+  const appendResponderNote = (text: string, agentId?: string, taskId?: string): string => {
+    const taskNote = taskId ? `\n任务 ID：${taskId}` : "";
+    return `${text.trim()}\n\n回答 agent：${displayAgentName(agentId)}${taskNote}`;
+  };
   const createAggregator = (pmIdLocal: string): FeishuReplyAggregator =>
     new FeishuReplyAggregator(
       // sendBubble
-      async (text: string) => {
+      async (text: string, meta?: { agentId?: string }) => {
         const taskId = pmCurrentTask.get(pmIdLocal);
         if (!taskId) return;
+        if (hasFinalSent(taskId, pmIdLocal)) return;
         const task = taskRegistry.get(taskId);
         if (!task) return;
         const elapsedSec = ((Date.now() - task.startedAt) / 1000).toFixed(1);
-        const withTiming = `${text}\n\n⏱ ${elapsedSec}s`;
+        const withTiming = `${appendResponderNote(text, meta?.agentId, taskId)}\n⏱ ${elapsedSec}s`;
         if (task.rootMessageId) {
           await replyToMessageWithText(task.rootMessageId, withTiming, tokenManager);
         } else {
@@ -358,14 +433,17 @@ function connectFeishu(appId: string, appSecret: string): void {
         if (task.reactionId && task.rootMessageId) {
           deleteProcessingReaction(task.rootMessageId, task.reactionId, tokenManager);
         }
+        markFinalSent(taskId, pmIdLocal);
         task.status = 'done';
       },
       // sendCard
-      async (text: string) => {
+      async (text: string, meta?: { agentId?: string }) => {
         const taskId = pmCurrentTask.get(pmIdLocal);
         if (!taskId) return;
-        feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM', finalText: text });
-        feishuBridge.emit({ type: 'task_done', taskId, summary: text });
+        if (!claimFinalSend(taskId, pmIdLocal)) return;
+        const finalText = appendResponderNote(text, meta?.agentId, taskId);
+        feishuBridge.emit({ type: 'agent_done', taskId, agentPath: 'PM', finalText });
+        feishuBridge.emit({ type: 'task_done', taskId, summary: finalText });
       },
     );
 
@@ -379,12 +457,12 @@ function connectFeishu(appId: string, appSecret: string): void {
   // makeGatewayHook: factory for the replyHook option passed to startLeaderAgent.
   // Computes dynamic context (active children) and routes into the OutboundGateway.
   const makeGatewayHook = (pmIdLocal: string) =>
-    (replyText: string, format?: "text" | "document", meta?: { _fallback?: boolean }): void => {
+    (replyText: string, format?: "text" | "document", meta?: { _fallback?: boolean; agentId?: string }): void => {
       const activeChildren = Array.from(getState().agents.values()).filter(
         (ag) => ag.parent === pmIdLocal && (ag.state === "run" || ag.state === "idle"),
       );
       outboundGateway.accept(
-        { text: replyText, format, _fallback: meta?._fallback ?? false, agentId: pmIdLocal },
+        { text: replyText, format, _fallback: meta?._fallback ?? false, agentId: meta?.agentId ?? pmIdLocal },
         { pmId: pmIdLocal, conversationMode: true, hasActiveChildren: activeChildren.length > 0 },
       );
     };
@@ -452,7 +530,7 @@ function connectFeishu(appId: string, appSecret: string): void {
 
     // Capture the fork's reply text so we can merge Q/A back into base PM history.
     let forkAnswer = "";
-    const forkReplyHook = (replyText: string, format?: "text" | "document", meta?: { _fallback?: boolean }): void => {
+    const forkReplyHook = (replyText: string, format?: "text" | "document", meta?: { _fallback?: boolean; agentId?: string }): void => {
       // Only accumulate non-fallback text into history
       if (!meta?._fallback) {
         forkAnswer += (forkAnswer ? "\n" : "") + replyText;
@@ -518,6 +596,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       turnEndHook: () => {
         outboundGateway.flush(forkId);
         feishuBusy.delete(forkId);
+        shadowCompleteFork(openId, anchorMsgId, forkAnswer);
         // Buffer Q/A for merge back into base PM history on next base PM turnEnd.
         // Only buffer when the fork actually produced a reply (skip silent failures).
         if (forkAnswer) {
@@ -555,6 +634,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       feishuLog(`[FeishuBridge] empty text from ...${openId.slice(-6)}, skipped`);
       return;
     }
+    shadowAccept(openId, text, anchorMsgId);
     const pmId = `feishu-${crypto.createHash("sha256").update(openId).digest("hex").slice(0, 8)}`;
     const replyId   = chatType === 'group' ? chatId : openId;
     const replyType: 'open_id' | 'chat_id' = chatType === 'group' ? 'chat_id' : 'open_id';
@@ -597,6 +677,7 @@ function connectFeishu(appId: string, appSecret: string): void {
         conversationMode: true, replyHook: makeGatewayHook(pmId),
         turnEndHook: () => {
           feishuBusy.delete(pmId); // pre-clear: drain routing fix (Bug 2)
+          shadowCompleteBase(openId, pmId);
           const bpm = agents.get(pmId);
           if (bpm instanceof HttpConvAgent) {
             let cleanHistory = bpm.getMessages();
@@ -628,7 +709,25 @@ function connectFeishu(appId: string, appSecret: string): void {
       );
       if (a instanceof HttpConvAgent) {
         if (feishuBusy.has(existingPmId)) {
-          // Phase B: base PM is busy → try to fork a concurrent task instead of queuing.
+          // Keep obvious follow-ups on the same PM history. Independent messages
+          // can still fork for full-duplex concurrency.
+          const followup = classifyFollowup(text);
+          if (followup.isFollowup) {
+            const q = feishuMsgQueue.get(existingPmId) ?? [];
+            q.push({ text, messageId: anchorMsgId });
+            feishuMsgQueue.set(existingPmId, q);
+            markPendingInput(existingPmId);
+            feishuLog(
+              `[FeishuFollowup] queued to base ${existingPmId} reason=${followup.reason}` +
+              ` len=${q.length} text="${text.slice(0, 80)}"`,
+            );
+            if (anchorMsgId && feishuTokenManager) {
+              addProcessingReaction(anchorMsgId, feishuTokenManager).catch(() => {});
+            }
+            return;
+          }
+
+          // Phase B: base PM is busy → try to fork a concurrent independent task.
           const forkCount = feishuForks.get(openId)?.size ?? 0;
           if (forkCount < FEISHU_MAX_CONCURRENT - 1) {
             startConcurrentTask(openId, existingPmId, text, anchorMsgId, chatId, chatType);
@@ -674,6 +773,7 @@ function connectFeishu(appId: string, appSecret: string): void {
             conversationMode: true, replyHook: makeGatewayHook(newPmId),
             turnEndHook: () => {
               feishuBusy.delete(newPmId);
+              shadowCompleteBase(openId, newPmId);
               const bpm2 = agents.get(newPmId);
               if (bpm2 instanceof HttpConvAgent) {
                 let cleanHistory2 = bpm2.getMessages();
@@ -817,6 +917,12 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let reportedToParent = false;   // true when TL/Worker sent message to their parent this turn
   let lastToolCallKey = "";       // loop detection: last "tool:argsJSON" key
   let sameToolCallCount = 0;      // how many consecutive times same tool+args was called
+  let terminalEventAccepted = false; // non-root leaders/forks ignore delayed events after agent.done
+  const turnShadow = new TurnController();
+  const logTurnShadow = (): void => {
+    if (process.env.SPAWN_SHADOW_TURN !== "1") return;
+    process.stderr.write(`[TurnController:shadow] ${opts.id} ${JSON.stringify(turnShadow.snapshot())}\n`);
+  };
 
   // Quality tracking — emitted as structured stderr log on agent.done
   let qualTurns = 0;
@@ -826,6 +932,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let lastTotalMs = 0;
 
   a.on("event", (e: TuiEvent) => {
+    if (terminalEventAccepted && e.type !== "token.usage") {
+      process.stderr.write(`[${opts.id}] dropped ${e.type} after terminal agent.done\n`);
+      return;
+    }
+
     // Spawn — pre-check then dispatch to correct handler
     if (e.type === "spawn") {
       // Guard 1: reject before store write if the child ID already exists.
@@ -848,6 +959,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
         return;
       }
       actedThisTurn = true;
+      turnShadow.markAction();
       applyEvent(normalized);
       pm.observe(normalized);
       secretary?.observe(normalized);
@@ -910,6 +1022,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
     }
     if (e.type === "todo.set") {
       actedThisTurn = true;
+      turnShadow.markAction();
       const summary = (e.items as Array<{state: string; text: string}>).map((t) => `[${t.state}]${t.text.slice(0,30)}`).join(", ");
       process.stderr.write(`[${opts.id}] todo.set ${e.items.length} items: ${summary}\n`);
     }
@@ -919,6 +1032,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
     // ─────────────────────────────────────────────────────────────────────────
 
     if (e.type === "agent.state" && e.state === "run") {
+      turnShadow.beginTurn();
       actedThisTurn = false;
       sentToUserThisTurn = false;
       reportedToParent = false;
@@ -932,6 +1046,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "tool.call") {
       actedThisTurn = true;
+      turnShadow.markAction();
       const toolKey = `${e.name}:${JSON.stringify(e.args)}`;
       if (toolKey === lastToolCallKey) { sameToolCallCount++; } else { lastToolCallKey = toolKey; sameToolCallCount = 1; }
       if (!toolNeedsApproval(e.name, e.args as Record<string, unknown>)) {
@@ -957,12 +1072,14 @@ function startLeaderAgent(opts: LeaderOpts): void {
       actedThisTurn = true;
       if (e.to === "user") {
         sentToUserThisTurn = true;
+        turnShadow.markUserReply();
         // All suppression, format, and sanitization decisions are centralised in the
         // OutboundGateway. Pass _fallback through so SuppressFilter can catch it.
-        opts.replyHook?.(e.text, e.format, { _fallback: (e as any)._fallback });
+        opts.replyHook?.(e.text, e.format, { _fallback: (e as any)._fallback, agentId: e.agent });
       }
       if (opts.parentId && e.to === opts.parentId) {
         reportedToParent = true;
+        turnShadow.markParentReport();
         // Extract any file paths TL reported to PM so they can be injected at PM's turnEnd.
         const pathMatches = e.text.match(
           /(?:[A-Za-z]:[\\/]|\/|\.\/)(?:[^\s,，。）\]"'\n\\]+)\.(?:md|txt|json|csv|yaml|yml)/gi,
@@ -973,6 +1090,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
           pmPendingArtifacts.set(opts.parentId, pending);
           process.stderr.write(`[${opts.id}] artifact paths captured for ${opts.parentId}: ${pathMatches.join(", ")}\n`);
         }
+      }
+      if (e.to !== "user" && (!opts.parentId || e.to !== opts.parentId)) {
+        turnShadow.markAction();
       }
       if (e.to !== "user") {
         const routed = globalBus.routeMessage(opts.id, e.to, e.text);
@@ -992,6 +1112,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "agent.done") {
       actedThisTurn = true;
+      turnShadow.markAction();
+      if (opts.parentId || opts.isForkedTask) {
+        terminalEventAccepted = true;
+        toolQueue.length = 0;
+      }
       if (!opts.isForkedTask) {
         const tok = getState().tokensByAgent.get(opts.id);
         const rejects = (getState().messagesByAgent.get(opts.id) ?? [])
@@ -1028,11 +1153,9 @@ function startLeaderAgent(opts: LeaderOpts): void {
       // Resolve foreground tracking so parent's pm.getForegroundChildren() reflects completion
       pm.completeForeground(opts.id, { success: e.success, reason: e.reason, evidence: e.evidence });
       const parentAgent = agents.get(opts.parentId);
-      // Don't wake a killed/finished parent — child completion should not restart it
-      if (killedAgents.has(opts.parentId)) return;
+      // Don't wake a killed/finished parent — child completion should not restart it.
       const parentState = getState().agents.get(opts.parentId)?.state;
-      if (parentState === "done") return;
-      if (parentAgent instanceof HttpConvAgent) {
+      if (!killedAgents.has(opts.parentId) && parentState !== "done" && parentAgent instanceof HttpConvAgent) {
         if (e.success) {
           const evidenceLines = e.evidence?.length
             ? "\n证据:\n" + e.evidence.map((s) => `  - ${s}`).join("\n") : "";
@@ -1051,7 +1174,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
       if (!opts.isForkedTask) deleteAgentMemory(opts.id);
     }
 
-    if (e.type === "unit.handup") qualHandup = true;
+    if (e.type === "unit.handup") {
+      qualHandup = true;
+      turnShadow.markParentReport();
+    }
 
     // unit.handup — forward to parent
     if (e.type === "unit.handup" && opts.parentId) {
@@ -1078,6 +1204,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
     // Idle — drain tool queue or nudge
     if (e.type === "agent.state" && e.state === "idle") {
       if (getState().agents.get(opts.id)?.state === "done") return;
+      turnShadow.endTurn();
+      logTurnShadow();
       if (toolQueue.length > 0) {
         // Loop detection: warn before draining if same tool called 2+ times in a row
         if (sameToolCallCount >= 2) {
@@ -1416,9 +1544,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   let wLastToolKey = "";
   let wSameToolCount = 0;
   let wDoneNotified = false; // guard: only send completion notification to parent once
+  let workerTerminal = false; // once agent.done is accepted, drop delayed/prose/tool events
+  const workerTurnShadow = new TurnController();
+  const logWorkerTurnShadow = (): void => {
+    if (process.env.SPAWN_SHADOW_TURN !== "1") return;
+    process.stderr.write(`[TurnController:shadow] ${e.child} ${JSON.stringify(workerTurnShadow.snapshot())}\n`);
+  };
   // Coding completion guard: tracks last RunTests outcome.
   // Non-null means the worker called RunTests at least once this session.
   let wLastTestFailed: number | null = null; // null=never run, 0=all pass, N=N failures
+  let wLastRunTestsSummary = "";
 
   // Circuit breaker constants
   const MAX_WORKER_TURNS = 40;
@@ -1433,7 +1568,20 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   let wLastTtftMs = 0;
   let wLastTotalMs = 0;
 
+  const isTestRunnerBash = (ev: Extract<TuiEvent, { type: "tool.call" }>): boolean => {
+    if (ev.name !== "Bash") return false;
+    const cmd = typeof ev.args === "object" && ev.args !== null
+      ? String((ev.args as Record<string, unknown>).command ?? (ev.args as Record<string, unknown>).cmd ?? "")
+      : "";
+    return /\b(?:npm\s+test|node\s+--test|bun\s+test|vitest|jest|pytest|cargo\s+test|go\s+test)\b/i.test(cmd);
+  };
+
   a.on("event", (ev: TuiEvent) => {
+    if (workerTerminal && ev.type !== "token.usage") {
+      process.stderr.write(`[${e.child}] dropped ${ev.type} after terminal agent.done\n`);
+      return;
+    }
+
     // spawn: pre-check BEFORE applyEvent to prevent ghost agents in store
     if (ev.type === "spawn") {
       // Auto-rename on ID collision (concurrent forks often generate "tl-01" collisions).
@@ -1457,6 +1605,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         return;
       }
       workerActedThisTurn = true;
+      workerTurnShadow.markAction();
       applyEvent(normalizedEv);
       pm.observe(normalizedEv);
       secretary.observe(normalizedEv);
@@ -1490,6 +1639,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       const isTLToUser = senderRole === "Leader" && ev.to === "user" && !!e.parent;
       if (isWorkerToUser || isWorkerToWorker || isTLToUser) {
         workerActedThisTurn = true; // prevent auto-continuation nudge loop
+        workerTurnShadow.markAction();
         // _fallback messages are internal protocol noise (LLM wrote prose instead of JSON).
         // Drop silently — don't redirect to PM or it pollutes PM's context.
         if ((ev as any)._fallback) {
@@ -1570,8 +1720,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       if (ev.total_ms !== undefined) wLastTotalMs = ev.total_ms;
     }
     if (ev.type === "agent.state" && ev.state === "run") {
-      wLastToolKey = "";
-      wSameToolCount = 0;
+      workerTurnShadow.beginTurn();
       if (workerNudgePending) wQualNudges++;
       wQualTurns++;
       // Hard turn limit — force handup so worker can't loop indefinitely
@@ -1587,7 +1736,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     }
     if (ev.type === "unit.handup") wQualHandup = true;
     if (ev.type === "agent.done") {
+      workerTerminal = true;
+      toolQueue.length = 0;
       workerActedThisTurn = true;
+      workerTurnShadow.markAction();
       const wTok = getState().tokensByAgent.get(e.child);
       const wScore = Math.max(0, Math.min(100,
         100
@@ -1609,11 +1761,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       // Resolve foreground tracking so parent's pm.getForegroundChildren() reflects completion
       pm.completeForeground(e.child, { success: ev.success, reason: ev.reason, evidence: ev.evidence });
       const parentAgent = agents.get(e.parent);
-      // Don't wake a killed/finished parent
-      if (killedAgents.has(e.parent)) return;
+      // Don't wake a killed/finished parent.
       const parentSt = getState().agents.get(e.parent)?.state;
       // Guard: only notify parent once — workers can emit agent.done multiple times if nudged
-      if (!wDoneNotified && parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
+      if (!wDoneNotified && !killedAgents.has(e.parent) && parentSt !== "done" && parentAgent instanceof HttpConvAgent) {
         wDoneNotified = true;
         if (ev.success) {
           const evidenceLines = ev.evidence?.length
@@ -1634,6 +1785,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       deleteAgentMemory(e.child);
     }
     if (ev.type === "unit.handup") {
+      workerTurnShadow.markParentReport();
       const parentAgent = agents.get(e.parent);
       if (parentAgent instanceof HttpConvAgent) {
         const findingLines = ev.findings?.length
@@ -1662,8 +1814,27 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     // Destructive Bash commands are routed to leader instead of asking user directly.
     if (ev.type === "tool.call") {
       workerActedThisTurn = true;
+      workerTurnShadow.markAction();
       const wToolKey = `${ev.name}:${JSON.stringify(ev.args)}`;
       if (wToolKey === wLastToolKey) { wSameToolCount++; } else { wLastToolKey = wToolKey; wSameToolCount = 1; }
+      if (wSameToolCount >= 3) {
+        const output =
+          `[系统-重复工具拦截] 你已连续 ${wSameToolCount} 次调用相同的 ${ev.name} 和相同参数。` +
+          `该调用已被拒绝，不会再次执行。请基于已有 tool.result 推进；` +
+          `如果已完成，立即 message.to=${e.parent} 汇报并 agent.done。`;
+        applyEvent({ v: 1, type: "tool.result", agent: e.child, id: ev.id, ok: false, output });
+        a.sendCommand({ type: "user.message", text: output });
+        return;
+      }
+      if (wLastTestFailed === 0 && (ev.name === "RunTests" || isTestRunnerBash(ev))) {
+        const output =
+          `[系统-测试已通过] 最近一次 RunTests 已全绿，禁止重复运行测试消耗时间。\n` +
+          `${wLastRunTestsSummary}\n\n` +
+          `现在必须 message.to=${e.parent} 汇报改动和测试结果，然后 agent.done(success:true)。`;
+        applyEvent({ v: 1, type: "tool.result", agent: e.child, id: ev.id, ok: false, output });
+        a.sendCommand({ type: "user.message", text: output });
+        return;
+      }
       const mustApprove = toolNeedsApproval(ev.name, ev.args as Record<string, unknown>);
       if (!mustApprove) {
         toolQueue.push(ev);
@@ -1691,11 +1862,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     // Sending a message counts as acting — same logic as in startLeader.
     if (ev.type === "message") {
       workerActedThisTurn = true;
+      if (ev.to === e.parent) workerTurnShadow.markParentReport();
+      else if (ev.to === "user") workerTurnShadow.markUserReply();
+      else workerTurnShadow.markAction();
     }
 
     // Agent 变 idle → 批量执行排队的工具并把结果回喂给 agent
     if (ev.type === "agent.state" && ev.state === "idle") {
       if (getState().agents.get(e.child)?.state === "done") return;
+      workerTurnShadow.endTurn();
+      logWorkerTurnShadow();
       if (toolQueue.length > 0) {
         if (wSameToolCount >= 2) {
           const loopTool = wLastToolKey.split(":")[0] ?? "";
@@ -1705,7 +1881,6 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
             if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
             a.sendCommand({ type: "user.message", text: warnMsg });
           });
-          wSameToolCount = 0;
         }
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
@@ -1723,6 +1898,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
             for (let i = 0; i < batch.length; i++) {
               const { id } = batch[i]!;
               const { ok, output } = results[i]!;
+              if (batch[i]!.name === "Edit" || batch[i]!.name === "Write") {
+                wLastTestFailed = null;
+                wLastRunTestsSummary = "";
+              }
               // Track consecutive failures for circuit breaker
               if (ok) { wConsecToolFails = 0; } else { wConsecToolFails++; }
               // Coding completion guard: track RunTests outcome so we can reject a
@@ -1730,6 +1909,12 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
               if (batch[i]!.name === "RunTests") {
                 const failMatch = output.match(/failed:\s*(\d+)/);
                 wLastTestFailed = failMatch ? parseInt(failMatch[1]!, 10) : (ok ? 0 : 1);
+                if (wLastTestFailed === 0) {
+                  const passMatch = output.match(/passed:\s*(\d+)/);
+                  const skippedMatch = output.match(/skipped:\s*(\d+)/);
+                  wLastRunTestsSummary =
+                    `RunTests PASS: passed=${passMatch?.[1] ?? "?"}, failed=0, skipped=${skippedMatch?.[1] ?? "0"}`;
+                }
               }
               applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
             }
@@ -1745,6 +1930,12 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
                 `\n\n[系统-熔断] 最近 ${MAX_CONSEC_FAIL_TOOLS} 次工具调用全部失败，触发降级熔断。` +
                 `禁止继续换工具试错。立即 unit.handup 给 ${e.parent}，说明：` +
                 `① 你在尝试什么操作 ② 用了哪些工具 ③ 每次的具体错误信息。`;
+            }
+            if (batch.some((c) => c.name === "RunTests") && wLastTestFailed === 0) {
+              combined +=
+                `\n\n[系统-测试通过收束] ${wLastRunTestsSummary}。` +
+                `禁止再次调用 RunTests 或 Bash 测试命令。立即 message.to=${e.parent} 汇报改动和测试结果，` +
+                `然后 agent.done(success:true)。`;
             }
             a.sendCommand({ type: "user.message", text: combined });
           });
@@ -1837,7 +2028,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   // Worker gets cross-task context without needing to re-read parent history.
   const parentSec = secretaries.get(e.parent);
   if (parentSec) {
-    const parentFacts = parentSec.getMemory().working_set.facts.slice(-5);
+    const parentFacts = topFactsByWeight(parentSec.getMemory(), 5);
     if (parentFacts.length > 0) {
       const factsBlock = parentFacts.map((f) => `  - ${f.text}`).join("\n");
       initMsg += `\n\n【父级已确认事实 (TL working_set)】\n${factsBlock}`;
@@ -2112,6 +2303,16 @@ function fmtKIndex(n: number): string {
   return String(n);
 }
 
+function parseScheduleDelay(raw: string, now = Date.now()): number | null {
+  const m = raw.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 0) return null;
+  const unit = (m[2] ?? "ms").toLowerCase();
+  const mult = unit === "h" ? 3_600_000 : unit === "m" ? 60_000 : unit === "s" ? 1_000 : 1;
+  return now + Math.round(n * mult);
+}
+
 // ── App ─────────────────────────────────────────────────────────────────────
 interface CmdDef {
   name: string;
@@ -2237,6 +2438,44 @@ function App() {
       }).join("\n");
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `📋 未完成会话 (${sessions.length}):\n${lines}\n\n/resume <agentId|hash> 恢复` });
     } },
+    { name: "memory", desc: "/memory [agentId] — 查看 Secretary 记录的 facts / decisions / 子节点", handler: (args) => {
+      const targetId = args[0] ?? getState().selectedAgent ?? "pm";
+      const sec = secretaries.get(targetId);
+      const mem = sec?.getMemory() ?? loadMemory(targetId);
+      if (!mem) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: `未找到 "${targetId}" 的 memory。可用 agent: ${[...secretaries.keys()].join(", ") || "无"}` });
+        return;
+      }
+      const facts = topFactsByWeight(mem, 10);
+      const decisions = mem.working_set.decisions.slice(-5);
+      const children = mem.child_handles;
+      const sessions = loadSessions(targetId);
+      const sizeByes = JSON.stringify(mem).length;
+
+      const lines: string[] = [
+        `── memory: ${targetId} (${(sizeByes / 1024).toFixed(1)} KB) ──`,
+        `sessions: ${sessions.length}/${5}  |  facts: ${mem.working_set.facts.length}  |  decisions: ${mem.working_set.decisions.length}`,
+      ];
+      if (facts.length > 0) {
+        lines.push("\n【facts · top-10 by weight】");
+        facts.forEach((f, i) => lines.push(`  ${i + 1}. [w=${f.weight ?? 1}] ${f.text.slice(0, 120)}`));
+      } else {
+        lines.push("\n【facts】(空)");
+      }
+      if (decisions.length > 0) {
+        lines.push("\n【decisions · 最近 5 条】");
+        decisions.forEach((d) => lines.push(`  · ${d.text.slice(0, 120)}`));
+      }
+      if (children.length > 0) {
+        lines.push("\n【child_handles】");
+        children.forEach((c) => lines.push(`  ${c.status === "running" ? "◐" : c.status === "done" ? "✓" : "✗"} ${c.agent_id.slice(0, 20)} — ${c.goal?.slice(0, 60) ?? ""}`));
+      }
+      if (mem.tombstone.compact_summary) {
+        lines.push(`\n【tombstone】${mem.tombstone.compact_summary.slice(0, 200)}`);
+      }
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: lines.join("\n") });
+    } },
     { name: "fanout", desc: "/fanout [N] — 查看/设置最大并发子节点数 (1-16)", handler: (args) => {
       if (!args[0]) {
         applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `当前 maxFanout=${pm.getMaxFanout()}，用 /fanout <N> 修改（1-16）` });
@@ -2249,6 +2488,41 @@ function App() {
       }
       pm.setFanout(n);
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text: `maxFanout 已更新为 ${n}` });
+    } },
+    { name: "schedule", desc: "/schedule <10s|5m|2h> <task> — schedule a PM task", handler: (args) => {
+      const delay = args[0];
+      const text = args.slice(1).join(" ").trim();
+      if (!delay || !text) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: "用法：/schedule 10m 检查构建状态" });
+        return;
+      }
+      const runAt = parseScheduleDelay(delay);
+      if (runAt === null) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: "时间格式支持：500ms / 10s / 5m / 2h" });
+        return;
+      }
+      const ev = scheduledTasks.schedule({ conversationId: "tui:pm", text, runAt });
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `已安排 ${ev.task.id}：${new Date(runAt).toLocaleString()} 执行\n${text}` });
+    } },
+    { name: "tasks", desc: "/tasks [cancel <id>] — list or cancel scheduled tasks", handler: (args) => {
+      if (args[0] === "cancel" && args[1]) {
+        const ev = scheduledTasks.cancel(args[1]);
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: ev ? `已取消 ${ev.task.id}` : `无法取消 ${args[1]}（不存在或已结束）` });
+        return;
+      }
+      const tasks = scheduledTasks.list();
+      const active = tasks.filter((t) => t.state === "scheduled" || t.state === "running" || t.state === "waiting_user");
+      const lines = active.map((t) =>
+        `[${t.state}] ${t.id} @ ${new Date(t.runAt).toLocaleString()} — ${t.text.slice(0, 80)}`
+      );
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: lines.length
+          ? `计划任务：\n${lines.join("\n")}\n\n/tasks cancel <id> 取消`
+          : "暂无计划任务。用 /schedule <10s|5m|2h> <task> 新建。" });
     } },
     { name: "resume",  desc: "/resume [agentId|hash] — resume from memory", handler: (args) => {
       const input = args[0] ?? "pm";
@@ -2485,6 +2759,20 @@ function App() {
     // so we always call sendCommand immediately — no React-level blocking needed.
     a.sendCommand({ type: "user.message", text: body });
   };
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const due = scheduledTasks.due(Date.now());
+      for (const ev of due) {
+        applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+          text: `⏰ 计划任务触发 ${ev.task.id}: ${ev.task.text}` });
+        dispatchUser(`@pm [计划任务 ${ev.task.id}] ${ev.task.text}`);
+        scheduledTasks.complete(ev.task.id);
+      }
+    }, 1000);
+    timer.unref();
+    return () => clearInterval(timer);
+  }, []);
 
   // 启动: 注册 PM + process-monitor 占位，检查未完成会话
   useEffect(() => {
@@ -2851,7 +3139,8 @@ function App() {
       const ids = agentList;
       if (!ids.length) return;
       const idx = ids.indexOf(sel);
-      selectAgent(ids[(idx + 1) % ids.length]!);
+      const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+      selectAgentVisible(ids[(idx + 1) % ids.length]!, maxVis);
     }
   });
 
@@ -2973,6 +3262,7 @@ const LOG_FILE = path.join(process.cwd(), "tui.log");
   const sessionStart = Date.now();
   logStream.write(`\n--- session ${new Date().toISOString()} ---\n`);
   const origWrite = process.stderr.write.bind(process.stderr) as typeof process.stderr.write;
+  const mirrorToTerminal = process.env.SPAWN_TTY_LOGS === "1";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (process.stderr as any).write = (chunk: any, encodingOrCb?: any, cb?: any): boolean => {
     const text = typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8");
@@ -2980,7 +3270,10 @@ const LOG_FILE = path.join(process.cwd(), "tui.log");
     const elapsed = `+${((Date.now() - sessionStart) / 1000).toFixed(1)}s`;
     const timestamped = text.replace(/^(?!\x1b)(.)/mg, `${elapsed} $1`);
     logStream.write(timestamped);
-    return origWrite(chunk, encodingOrCb, cb);
+    if (mirrorToTerminal) return origWrite(chunk, encodingOrCb, cb);
+    const callback = typeof encodingOrCb === "function" ? encodingOrCb : cb;
+    if (callback) queueMicrotask(callback);
+    return true;
   };
 })();
 

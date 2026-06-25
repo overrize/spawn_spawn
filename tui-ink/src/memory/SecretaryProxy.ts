@@ -5,7 +5,7 @@
 import { EventEmitter } from "node:events";
 import type { TuiEvent } from "../protocol.js";
 import type { AgentMemory, MemoryFact, MemoryDecision } from "./types.js";
-import { saveMemory, appendMessage, appendReminder, startSession } from "./MemoryStore.js";
+import { saveMemory, appendMessage, appendReminder, startSession, topFactsByWeight } from "./MemoryStore.js";
 
 const DECISION_KEYWORDS = /应该|决定|选择|采用|方案|确认|将要|采取|should|decided|chosen|use|using|will\s/i;
 const TIME_KEYWORDS = /下午|上午|晚上|早上|明天|后天|今天|[0-9]+[:：][0-9]+|[0-9]+\s*点|pm\b|am\b/i;
@@ -190,7 +190,7 @@ export class SecretaryProxy extends EventEmitter {
    */
   ingestChildMemory(childMem: AgentMemory): void {
     if (this.destroyed) return;
-    for (const f of childMem.working_set.facts.slice(-5)) {
+    for (const f of topFactsByWeight(childMem, 5)) {
       this.addFact({
         id: `f${++this.factSeq}`,
         text: `[${childMem.agent_id}] ${f.text}`,
