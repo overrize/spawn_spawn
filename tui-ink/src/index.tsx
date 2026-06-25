@@ -2453,9 +2453,12 @@ function App() {
       const sessions = loadSessions(targetId);
       const sizeByes = JSON.stringify(mem).length;
 
+      const logCursor = sec?.getLogCursor() ?? mem.tombstone.log_cursor ?? 0;
+      const busStats = globalBus.logStats();
       const lines: string[] = [
         `── memory: ${targetId} (${(sizeByes / 1024).toFixed(1)} KB) ──`,
         `sessions: ${sessions.length}/${5}  |  facts: ${mem.working_set.facts.length}  |  decisions: ${mem.working_set.decisions.length}`,
+        `log_cursor: ${logCursor}  |  bus_head: ${busStats.headOffset}  |  ring: ${busStats.size} (oldest offset: ${busStats.oldestOffset})`,
       ];
       if (facts.length > 0) {
         lines.push("\n【facts · top-10 by weight】");

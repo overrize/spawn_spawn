@@ -30,6 +30,19 @@ import type { TuiEvent, AgentCommand } from "../protocol.js";
 
 export type BusPayload = TuiEvent;
 
+// ── Append-only ring buffer log ────────────────────────────────────────────
+// Every published event is appended here (monotone offset). Oldest entries
+// are evicted once the buffer exceeds LOG_RING_SIZE. Subscribers can call
+// getLog(sinceOffset) to pull incremental slices without re-reading history.
+
+export interface LogEntry {
+  offset: number;   // monotonically increasing, process-lifetime unique
+  ts: number;       // Date.now() at publish time
+  event: BusPayload;
+}
+
+const LOG_RING_SIZE = Math.max(100, parseInt(process.env.BUS_LOG_SIZE ?? "500", 10));
+
 type TypedHandler<T extends BusPayload["type"]> = (
   event: Extract<BusPayload, { type: T }>,
 ) => void;
@@ -46,6 +59,10 @@ export class SpawnBus {
   private readonly agents = new Map<string, AgentRef>();
   /** Maps logical (requested) agent ID → actual (renamed) agent ID for collision recovery. */
   private readonly aliases = new Map<string, string>();
+
+  // ── Ring buffer log ──────────────────────────────────────────────────────
+  private readonly _log: LogEntry[] = [];
+  private _nextOffset = 0;
 
   constructor() {
     this.ee.setMaxListeners(200);
@@ -81,6 +98,32 @@ export class SpawnBus {
     this.ee.emit(event.type, event);
     // Fan out to wildcard subscribers (applyEvent, feishu bridge, etc.).
     this.ee.emit(WILDCARD, event);
+    // Append to ring buffer — evict oldest when full.
+    this._log.push({ offset: this._nextOffset++, ts: Date.now(), event });
+    if (this._log.length > LOG_RING_SIZE) this._log.shift();
+  }
+
+  // ── Log query API ─────────────────────────────────────────────────────────
+
+  /** Current head offset (= total events published, not clamped to ring size). */
+  getHeadOffset(): number { return this._nextOffset; }
+
+  /**
+   * Return all log entries with offset >= sinceOffset.
+   * If sinceOffset falls before the oldest entry in the ring, returns what's available.
+   */
+  getLog(sinceOffset = 0): { entries: LogEntry[]; headOffset: number } {
+    const entries = this._log.filter((e) => e.offset >= sinceOffset);
+    return { entries, headOffset: this._nextOffset };
+  }
+
+  /** Diagnostic snapshot — ring size, head offset, oldest retained offset. */
+  logStats(): { size: number; headOffset: number; oldestOffset: number } {
+    return {
+      size: this._log.length,
+      headOffset: this._nextOffset,
+      oldestOffset: this._log[0]?.offset ?? 0,
+    };
   }
 
   /**

@@ -6,6 +6,7 @@ import { EventEmitter } from "node:events";
 import type { TuiEvent } from "../protocol.js";
 import type { AgentMemory, MemoryFact, MemoryDecision } from "./types.js";
 import { saveMemory, appendMessage, appendReminder, startSession, topFactsByWeight } from "./MemoryStore.js";
+import { globalBus } from "../bus/Bus.js";
 
 const DECISION_KEYWORDS = /应该|决定|选择|采用|方案|确认|将要|采取|should|decided|chosen|use|using|will\s/i;
 const TIME_KEYWORDS = /下午|上午|晚上|早上|明天|后天|今天|[0-9]+[:：][0-9]+|[0-9]+\s*点|pm\b|am\b/i;
@@ -18,6 +19,9 @@ export class SecretaryProxy extends EventEmitter {
   private destroyed = false;
   // Accept btw messages addressed to "<id>-secretary" as well as "<id>"
   private readonly secretaryAlias: string;
+  // Bus log offset: the working_set reflects all events published up to this point.
+  // On resume: replay log from this offset onwards to recover events not yet in working_set.
+  private _logCursor: number = 0;
 
   constructor(memory: AgentMemory) {
     super();
@@ -26,6 +30,9 @@ export class SecretaryProxy extends EventEmitter {
     this.factSeq = memory.working_set.facts.length;
     this.decisionSeq = memory.working_set.decisions.length;
     this.secretaryAlias = `${memory.agent_id}-secretary`;
+    // Cursor starts at the current bus head — events before this are already
+    // captured in the snapshot we loaded (or irrelevant for a fresh agent).
+    this._logCursor = globalBus.getHeadOffset();
     // Persist initial state + register new session entry
     saveMemory(memory.agent_id, memory);
     startSession(memory.agent_id, memory.session_hash ?? "unknown");
@@ -183,6 +190,9 @@ export class SecretaryProxy extends EventEmitter {
 
   getMemory(): Readonly<AgentMemory> { return this.memory; }
 
+  /** Bus log offset at last flush — replay getLog(cursor) to recover state since last snapshot. */
+  getLogCursor(): number { return this._logCursor; }
+
   /**
    * PM-Secretary calls this when a child Leader (Tech Lead) completes.
    * Pulls the TL's top facts/decisions up into PM's working_set so PM
@@ -286,6 +296,11 @@ export class SecretaryProxy extends EventEmitter {
   }
 
   private saveAsync(): void {
+    // Snapshot the cursor at decision time — not inside setImmediate — so the
+    // tombstone.log_cursor accurately reflects "state as of this moment".
+    const cursor = globalBus.getHeadOffset();
+    this._logCursor = cursor;
+    this.memory.tombstone.log_cursor = cursor;
     this.memory.updated_at = Date.now();
     setImmediate(() => {
       if (!this.destroyed) saveMemory(this.memory.agent_id, this.memory);
@@ -293,6 +308,9 @@ export class SecretaryProxy extends EventEmitter {
   }
 
   private flushSync(): void {
+    const cursor = globalBus.getHeadOffset();
+    this._logCursor = cursor;
+    this.memory.tombstone.log_cursor = cursor;
     this.memory.updated_at = Date.now();
     saveMemory(this.memory.agent_id, this.memory);
   }

@@ -34,6 +34,8 @@ export interface Tombstone {
   final_artifacts: string[];
   resume_hint: string | null;
   last_todo?: string;  // JSON serialized last todo.set items
+  /** Bus log offset at last Secretary flush — replay log from here to reconstruct state delta. */
+  log_cursor?: number;
 }
 
 export interface AgentMemory {
