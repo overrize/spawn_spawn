@@ -13,6 +13,10 @@ import { buildLogContext, shadowDiff, logShadowDiff } from "../context/LogContex
 const USE_LOG_CONTEXT = !!process.env.USE_LOG_CONTEXT;
 const SHADOW_MODE     = process.env.SHADOW_MODE !== "false"; // default true when USE_LOG_CONTEXT is on
 
+if (USE_LOG_CONTEXT) {
+  process.stderr.write(`[shadow-ctx] ENABLED — SHADOW_MODE=${SHADOW_MODE} (live mode: ${!SHADOW_MODE})\n`);
+}
+
 /**
  * Build the /chat/completions path from a baseUrl.
  *
@@ -233,7 +237,10 @@ export class HttpConvAgent extends EventEmitter {
     // When misses reach zero consistently, set SHADOW_MODE=false to let log context take over.
     if (USE_LOG_CONTEXT) {
       const newCtx = buildLogContext(this.cfg.id);
-      if (newCtx) {
+      if (!newCtx) {
+        // Memory file not found — Secretary hasn't flushed yet (usually only on turn 0).
+        process.stderr.write(`[shadow-ctx] agent=${this.cfg.id} turn=${this._loopIdx} SKIP — no memory file yet\n`);
+      } else {
         const misses = shadowDiff(this.messages, newCtx);
         logShadowDiff(this.cfg.id, this._loopIdx, newCtx, misses);
         // Live mode: substitute this.messages with log projection.
