@@ -14,7 +14,7 @@
  *     guiding which inbound events need to be published to the bus next.
  */
 
-import { globalBus } from "../bus/Bus.js";
+import { globalBus, SpawnBus } from "../bus/Bus.js";
 import { loadMemory, topFactsByWeight } from "../memory/MemoryStore.js";
 import type { AgentMemory } from "../memory/types.js";
 
@@ -84,17 +84,19 @@ export function buildLogContext(agentId: string): LogContext | null {
   return buildLogContextFromMemory(agentId, memory);
 }
 
-export function buildLogContextFromMemory(agentId: string, memory: AgentMemory): LogContext {
+export function buildLogContextFromMemory(agentId: string, memory: AgentMemory, bus: SpawnBus = globalBus): LogContext {
   // Cursor: honour tombstone only when epoch matches (same process lifetime).
-  let logCursor = 0;
+  // On epoch mismatch (cross-restart or fresh agent), default to headOffset so we
+  // don't replay stale history from a dead process's ring segment.
+  let logCursor = bus.getHeadOffset();
   if (
     memory.tombstone.log_cursor !== undefined &&
-    memory.tombstone.log_cursor_epoch === globalBus.getEpoch()
+    memory.tombstone.log_cursor_epoch === bus.getEpoch()
   ) {
     logCursor = memory.tombstone.log_cursor;
   }
 
-  const { entries, headOffset, hasGap } = globalBus.getLog(logCursor, agentId);
+  const { entries, headOffset, hasGap } = bus.getLog(logCursor, agentId);
 
   // ── Working set summary ───────────────────────────────────────────────────
   const facts = topFactsByWeight(memory, 15);
@@ -164,9 +166,12 @@ export function buildLogContextFromMemory(agentId: string, memory: AgentMemory):
     ? `[GAP WARNING] 环形缓冲区已溢出 — offset ${logCursor} 之前的事件已丢失，以下为可用片段。\n\n`
     : "";
 
+  // Always include gap warning even when working_set + delta are empty —
+  // the gap itself is critical signal for the shadow diff.
+  const fullContent = (gapPrefix + content).trim();
   return {
-    messages: content.trim()
-      ? [{ role: "user" as const, content: gapPrefix + content }]
+    messages: fullContent
+      ? [{ role: "user" as const, content: fullContent }]
       : [],
     hasGap,
     stats: {
@@ -215,9 +220,11 @@ export function shadowDiff(
       .replace(/\[system-[^\]]*\][^\n]*/gm, "")
       .trim();
 
-    if (hasToolResult && clean.length < 30) continue; // pure protocol payload, not human text
+    if (hasToolResult && clean.length < 20) continue; // pure protocol payload with no real text
 
-    if (clean.length < 30) continue; // too short to be meaningful
+    // Filter truly empty / meaningless messages (< 5 chars after strip).
+    // Do NOT apply a high threshold — CJK nudges like "继续" are 2 chars but meaningful.
+    if (clean.length < 5) continue;
 
     const probe = clean.slice(0, 60);
     if (newContent.includes(probe.slice(0, 30))) continue; // already covered
