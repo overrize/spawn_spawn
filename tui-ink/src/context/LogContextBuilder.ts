@@ -14,9 +14,21 @@
  *     guiding which inbound events need to be published to the bus next.
  */
 
+import fs from "node:fs";
+import path from "node:path";
 import { globalBus, SpawnBus } from "../bus/Bus.js";
 import { loadMemory, topFactsByWeight } from "../memory/MemoryStore.js";
 import type { AgentMemory } from "../memory/types.js";
+
+// Shadow log file — plain text, one line per entry, survives PowerShell stderr weirdness.
+// Set SHADOW_LOG_FILE env var to override path. Default: shadow.log in cwd.
+const SHADOW_LOG_PATH = process.env.SHADOW_LOG_FILE ?? path.join(process.cwd(), "shadow.log");
+
+function shadowWrite(line: string): void {
+  try {
+    fs.appendFileSync(SHADOW_LOG_PATH, line + "\n", "utf8");
+  } catch { /* non-fatal */ }
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -293,27 +305,37 @@ function classifyUserMsgCause(clean: string, hasToolResult: boolean): MissCause 
 
 // ── Formatted stderr log line ─────────────────────────────────────────────────
 
-/** Emit shadow diff results to stderr. Called by httpAgent when USE_LOG_CONTEXT is set. */
+/**
+ * Write shadow diff results to SHADOW_LOG_PATH (plain text, avoids PowerShell stderr encoding issues).
+ * Pass a custom `writer` in tests to capture output without touching the filesystem.
+ */
 export function logShadowDiff(
   agentId: string,
   turnIdx: number,
   newCtx: LogContext,
   misses: ShadowMiss[],
+  writer: (line: string) => void = shadowWrite,
 ): void {
-  const prefix = `[shadow-ctx] agent=${agentId} turn=${turnIdx}`;
+  const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+  const prefix = `${ts} [shadow-ctx] agent=${agentId} turn=${turnIdx}`;
   const statStr = `facts=${newCtx.stats.factCount} decisions=${newCtx.stats.decisionCount} delta=${newCtx.stats.deltaEventCount}`;
   if (misses.length === 0) {
-    process.stderr.write(`${prefix} ✓ no-miss (${statStr})\n`);
+    writer(`${prefix} OK no-miss (${statStr})`);
   } else {
-    // Tally causes for easy grep/sort in log analysis
     const causeTally = misses.reduce<Record<string, number>>((acc, m) => {
       acc[m.cause] = (acc[m.cause] ?? 0) + 1;
       return acc;
     }, {});
-    const tallyStr = Object.entries(causeTally).map(([c, n]) => `${c}×${n}`).join(" ");
-    process.stderr.write(`${prefix} ⚠ ${misses.length} miss(es) (${statStr}) causes=[${tallyStr}]:\n`);
+    const tallyStr = Object.entries(causeTally).map(([c, n]) => `${c}x${n}`).join(" ");
+    writer(`${prefix} MISS ${misses.length} (${statStr}) causes=[${tallyStr}]`);
     for (const m of misses) {
-      process.stderr.write(`  [${m.kind}/${m.cause}] ${m.detail}\n`);
+      writer(`  [${m.kind}/${m.cause}] ${m.detail}`);
     }
   }
+}
+
+/** Called once at app startup when USE_LOG_CONTEXT is set. */
+export function logShadowStart(shadowMode: boolean): void {
+  const ts = new Date().toISOString().slice(11, 23);
+  shadowWrite(`${ts} [shadow-ctx] ENABLED SHADOW_MODE=${shadowMode} log=${SHADOW_LOG_PATH}`);
 }

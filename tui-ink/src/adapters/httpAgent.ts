@@ -8,13 +8,19 @@ import { loadMessages } from "../memory/MemoryStore.js";
 import { serializeCachePrefix } from "../cache/CachePrefixManager.js";
 import { globalBus } from "../bus/Bus.js";
 import { parseAgentOutput } from "../protocol/normalizer.js";
-import { buildLogContext, shadowDiff, logShadowDiff } from "../context/LogContextBuilder.js";
+import { appendFileSync } from "node:fs";
+import { buildLogContext, shadowDiff, logShadowDiff, logShadowStart } from "../context/LogContextBuilder.js";
+
+const SHADOW_LOG = process.env.SHADOW_LOG_FILE ?? `${process.cwd()}/shadow.log`;
+function shadowAppend(line: string) {
+  try { appendFileSync(SHADOW_LOG, line + "\n", "utf8"); } catch { /* non-fatal */ }
+}
 
 const USE_LOG_CONTEXT = !!process.env.USE_LOG_CONTEXT;
 const SHADOW_MODE     = process.env.SHADOW_MODE !== "false"; // default true when USE_LOG_CONTEXT is on
 
 if (USE_LOG_CONTEXT) {
-  process.stderr.write(`[shadow-ctx] ENABLED — SHADOW_MODE=${SHADOW_MODE} (live mode: ${!SHADOW_MODE})\n`);
+  logShadowStart(SHADOW_MODE);
 }
 
 /**
@@ -233,25 +239,20 @@ export class HttpConvAgent extends EventEmitter {
     this.emit("_raw_message", { role: "user", content: text });
 
     // USE_LOG_CONTEXT shadow mode: build log-derived context and diff against this.messages.
-    // In shadow mode (SHADOW_MODE=true, the default) only logs diffs — never changes behaviour.
+    // In shadow mode (SHADOW_MODE=true, the default) only logs diffs — no behaviour change.
     // When misses reach zero consistently, set SHADOW_MODE=false to let log context take over.
     if (USE_LOG_CONTEXT) {
+      const ts = new Date().toISOString().slice(11, 23);
       const newCtx = buildLogContext(this.cfg.id);
       if (!newCtx) {
-        // Memory file not found — Secretary hasn't flushed yet (usually only on turn 0).
-        process.stderr.write(`[shadow-ctx] agent=${this.cfg.id} turn=${this._loopIdx} SKIP — no memory file yet\n`);
+        shadowAppend(`${ts} [shadow-ctx] agent=${this.cfg.id} turn=${this._loopIdx} SKIP no-memory-yet`);
       } else {
         const misses = shadowDiff(this.messages, newCtx);
         logShadowDiff(this.cfg.id, this._loopIdx, newCtx, misses);
-        // Live mode: substitute this.messages with log projection.
-        // Gated behind !SHADOW_MODE AND no gap — never switch on a known-incomplete context.
         if (!SHADOW_MODE && !newCtx.hasGap && newCtx.messages.length > 0) {
-          // Replace everything except the system prompt (index 0 is never a user turn in our setup)
-          // and the just-pushed user turn (last message).
-          // The projection becomes message[0]; the new user turn stays at the end.
           const lastMsg = this.messages[this.messages.length - 1]!;
           this.messages = [...newCtx.messages, lastMsg];
-          process.stderr.write(`[log-ctx] agent=${this.cfg.id} turn=${this._loopIdx} LIVE — replaced history with log projection (${newCtx.stats.deltaEventCount} delta events)\n`);
+          shadowAppend(`${ts} [log-ctx] agent=${this.cfg.id} turn=${this._loopIdx} LIVE delta=${newCtx.stats.deltaEventCount}`);
         }
       }
     }

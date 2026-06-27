@@ -267,43 +267,33 @@ describe("shadowDiff — decision-missing", () => {
 });
 
 describe("logShadowDiff output format", () => {
-  it("prints ✓ no-miss on clean run", () => {
+  it("OK no-miss on clean run", () => {
     const lines: string[] = [];
-    const orig = process.stderr.write.bind(process.stderr);
-    (process.stderr as any).write = (s: string) => { lines.push(s); return true; };
-    try {
-      logShadowDiff("pm-1", 3, {
-        messages: [],
-        hasGap: false,
-        stats: { factCount: 2, decisionCount: 1, deltaEventCount: 5, fromOffset: 0, headOffset: 5 },
-      }, []);
-      assert.ok(lines.some((l) => l.includes("✓ no-miss")));
-      assert.ok(lines.some((l) => l.includes("facts=2")));
-    } finally {
-      (process.stderr as any).write = orig;
-    }
+    logShadowDiff("pm-1", 3, {
+      messages: [],
+      hasGap: false,
+      stats: { factCount: 2, decisionCount: 1, deltaEventCount: 5, fromOffset: 0, headOffset: 5 },
+    }, [], (l) => lines.push(l));
+    assert.ok(lines.some((l) => l.includes("OK no-miss")), "no-miss marker");
+    assert.ok(lines.some((l) => l.includes("facts=2")), "stats included");
+    assert.ok(lines.some((l) => l.includes("[shadow-ctx]")), "prefix present");
   });
 
-  it("prints causes tally on miss", () => {
+  it("MISS with cause tally and kind/cause format", () => {
     const lines: string[] = [];
-    const orig = process.stderr.write.bind(process.stderr);
-    (process.stderr as any).write = (s: string) => { lines.push(s); return true; };
-    try {
-      logShadowDiff("pm-1", 4, {
-        messages: [],
-        hasGap: false,
-        stats: { factCount: 0, decisionCount: 0, deltaEventCount: 0, fromOffset: 0, headOffset: 0 },
-      }, [
-        { kind: "recent-user-msg", cause: "nudge", detail: "继续" },
-        { kind: "recent-user-msg", cause: "nudge", detail: "好的" },
-        { kind: "todo-missing", cause: "tombstone-stale", detail: "stale" },
-      ]);
-      const combined = lines.join("");
-      assert.ok(combined.includes("nudge×2"), "nudge tally");
-      assert.ok(combined.includes("tombstone-stale×1"), "tombstone tally");
-      assert.ok(combined.includes("[recent-user-msg/nudge]"), "kind/cause format");
-    } finally {
-      (process.stderr as any).write = orig;
-    }
+    logShadowDiff("pm-1", 4, {
+      messages: [],
+      hasGap: false,
+      stats: { factCount: 0, decisionCount: 0, deltaEventCount: 0, fromOffset: 0, headOffset: 0 },
+    }, [
+      { kind: "recent-user-msg", cause: "nudge", detail: "继续" },
+      { kind: "recent-user-msg", cause: "nudge", detail: "好的" },
+      { kind: "todo-missing", cause: "tombstone-stale", detail: "stale" },
+    ], (l) => lines.push(l));
+    const combined = lines.join("\n");
+    assert.ok(combined.includes("nudgex2"), "nudge tally");
+    assert.ok(combined.includes("tombstone-stalex1"), "tombstone tally");
+    assert.ok(combined.includes("[recent-user-msg/nudge]"), "kind/cause format");
+    assert.ok(combined.includes("MISS 3"), "miss count");
   });
 });
