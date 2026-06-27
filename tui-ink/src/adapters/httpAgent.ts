@@ -241,19 +241,31 @@ export class HttpConvAgent extends EventEmitter {
     // USE_LOG_CONTEXT shadow mode: build log-derived context and diff against this.messages.
     // In shadow mode (SHADOW_MODE=true, the default) only logs diffs — no behaviour change.
     // When misses reach zero consistently, set SHADOW_MODE=false to let log context take over.
+    //
+    // HARD ISOLATION: this is diagnostic-only code sitting BEFORE the main try/finally
+    // that clears _busy. Any exception escaping here would leave _busy=true forever and
+    // permanently wedge this agent (no replies, no running state). The entire block is
+    // therefore wrapped so a shadow/log-context failure can NEVER affect the live send path.
     if (USE_LOG_CONTEXT) {
-      const ts = new Date().toISOString().slice(11, 23);
-      const newCtx = buildLogContext(this.cfg.id);
-      if (!newCtx) {
-        shadowAppend(`${ts} [shadow-ctx] agent=${this.cfg.id} turn=${this._loopIdx} SKIP no-memory-yet`);
-      } else {
-        const misses = shadowDiff(this.messages, newCtx);
-        logShadowDiff(this.cfg.id, this._loopIdx, newCtx, misses);
-        if (!SHADOW_MODE && !newCtx.hasGap && newCtx.messages.length > 0) {
-          const lastMsg = this.messages[this.messages.length - 1]!;
-          this.messages = [...newCtx.messages, lastMsg];
-          shadowAppend(`${ts} [log-ctx] agent=${this.cfg.id} turn=${this._loopIdx} LIVE delta=${newCtx.stats.deltaEventCount}`);
+      try {
+        const ts = new Date().toISOString().slice(11, 23);
+        const newCtx = buildLogContext(this.cfg.id);
+        if (!newCtx) {
+          shadowAppend(`${ts} [shadow-ctx] agent=${this.cfg.id} turn=${this._loopIdx} SKIP no-memory-yet`);
+        } else {
+          const misses = shadowDiff(this.messages, newCtx);
+          logShadowDiff(this.cfg.id, this._loopIdx, newCtx, misses);
+          // Live takeover is gated behind SHADOW_MODE=false AND no gap. Never mutate
+          // this.messages in shadow mode — diagnostics stay strictly read-only.
+          if (!SHADOW_MODE && !newCtx.hasGap && newCtx.messages.length > 0) {
+            const lastMsg = this.messages[this.messages.length - 1]!;
+            this.messages = [...newCtx.messages, lastMsg];
+            shadowAppend(`${ts} [log-ctx] agent=${this.cfg.id} turn=${this._loopIdx} LIVE delta=${newCtx.stats.deltaEventCount}`);
+          }
         }
+      } catch (e) {
+        // Swallow — diagnostics must never break or wedge the agent.
+        try { shadowAppend(`[shadow-ctx] agent=${this.cfg.id} ERROR ${e instanceof Error ? e.message : String(e)}`); } catch { /* ignore */ }
       }
     }
 
