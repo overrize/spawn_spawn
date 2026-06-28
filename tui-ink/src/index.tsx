@@ -931,6 +931,45 @@ function startLeaderAgent(opts: LeaderOpts): void {
   let lastTtftMs = 0;
   let lastTotalMs = 0;
 
+  // Unified child-Leader convergence (Feishu 已读不回 / 已读空回 fix).
+  // A non-conversation sub-Leader (TL) can pass through MANY idle exits without ever
+  // converging (1307 replied-no-todos, 1346 auto-close, 1362/1408 gaveUp, fall-throughs),
+  // leaving store.state="idle" forever → parent PM waits indefinitely → feishuBusy never
+  // releases → pending Feishu messages never drain. Rather than patch each exit, the idle
+  // handler's terminal/no-op exits "make way" for sub-Leaders (guard: convMode || !parentId)
+  // and route them all to ONE of three dead-zone fallbacks, which call this single function.
+  // Contract: relay TL's real output to parent FIRST (so PM has content to tell the user,
+  // not 已读空回), THEN synthesize agent.done so the existing done pipeline runs (store→done
+  // clears PM activeChildren, completeForeground + parent-notify + unregister via a.emit).
+  const convergeChildLeader = (reasonTag: string, conv: { gaveUp?: boolean } = {}): void => {
+    const parentId = opts.parentId!;
+    let report: string;
+    if (conv.gaveUp) {
+      // Gave-up path: stale prose is misleading — relay an explicit "abandoned" notice.
+      report = `[${opts.id} 汇报] 多次推进无效，已放弃该子任务。请基于已有上下文向用户说明当前进展。`;
+    } else {
+      // Pick the most recent CLEAN assistant prose: not empty, not raw protocol JSON,
+      // and not DeepSeek DSML tool-call noise (relaying DSML markup is worse than a placeholder).
+      const lastProse = [...a.getMessages()].reverse().find((m) => {
+        const t = m.content.trim();
+        return m.role === "assistant" && t !== "" &&
+          !t.startsWith("{") && !t.startsWith("<") && !m.content.includes("｜｜DSML｜｜");
+      })?.content.trim() ?? "";
+      report = lastProse
+        ? `[${opts.id} 汇报] ${lastProse.slice(0, 1500)}`
+        : `[${opts.id} 汇报] 子任务已完成，TL 未生成有效汇总。请基于已有上下文向用户说明当前进展。`;
+    }
+    process.stderr.write(`[${opts.id}] idle → child-leader converge [${reasonTag}] relay+done (gaveUp=${!!conv.gaveUp})\n`);
+    const parentAgent = agents.get(parentId);
+    if (parentAgent instanceof HttpConvAgent && !killedAgents.has(parentId)) {
+      parentAgent.sendCommand({ type: "user.message", text: report });
+      reportedToParent = true;
+    }
+    a.emit("event", {
+      v: 1, type: "agent.done", agent: opts.id, success: true, reason: reasonTag,
+    } as TuiEvent);
+  };
+
   a.on("event", (e: TuiEvent) => {
     if (terminalEventAccepted && e.type !== "token.usage") {
       process.stderr.write(`[${opts.id}] dropped ${e.type} after terminal agent.done\n`);
@@ -1304,46 +1343,12 @@ function startLeaderAgent(opts: LeaderOpts): void {
               a.sendCommand({ type: "user.message", text: `【系统】你回复了用户但还有未完成任务：${pendingTodos}。立刻执行。` });
             });
           }
-        } else if (sentToUserThisTurn && !hasTodo) {
-          // PM replied to user and has no pending tasks — done, nothing to nudge
+        } else if (sentToUserThisTurn && !hasTodo && (opts.conversationMode || !opts.parentId)) {
+          // PM replied to user and has no pending tasks — done, nothing to nudge.
+          // Make-way guard: sub-Leaders fall through to the dead-zone fallback below.
           process.stderr.write(`[${opts.id}] idle → replied+no-todos, done\n`);
-        } else if (
-          !opts.conversationMode && opts.parentId &&
-          !hasActiveChildren && hasRun && !hasTodo && !reportedToParent
-        ) {
-          // Child-Leader dead-zone convergence (Feishu 已读不回 fix).
-          // A non-conversation sub-Leader (TL) whose children are all done, that still has
-          // a `run` todo it never finished, and that never reported to its parent, would
-          // otherwise hit 1310 auto-close: its run items get marked done (假完成) and it
-          // emits no further idle event — TL sits in store.state="idle" (active) forever,
-          // so the parent PM waits on it indefinitely → feishuBusy never releases →
-          // pending Feishu messages never drain → user gets 已读不回.
-          // This branch intercepts that exact dead-zone BEFORE auto-close swallows it.
-          // We MUST relay TL's actual output to the parent first (else PM wakes with nothing
-          // and replies emptily = 已读空回), THEN synthesize agent.done so the existing done
-          // pipeline runs (store→done clears PM activeChildren, completeForeground +
-          // parent-notify + unregister all fire via the a.emit path).
-          const myMsgs = a.getMessages();
-          const lastProse = [...myMsgs].reverse()
-            .find((m) => m.role === "assistant" && m.content.trim() !== "" && !m.content.trim().startsWith("{"))
-            ?.content.trim() ?? "";
-          const hasProse = lastProse !== "";
-          process.stderr.write(`[${opts.id}] idle → child-leader dead-zone converge, relay+done (prose=${hasProse ? "yes" : "EMPTY"})\n`);
-          const parentAgent = agents.get(opts.parentId);
-          if (parentAgent instanceof HttpConvAgent && !killedAgents.has(opts.parentId)) {
-            const report = hasProse
-              ? `[${opts.id} 汇报] ${lastProse.slice(0, 1500)}`
-              : `[${opts.id} 汇报] 子任务已完成，TL 未生成汇总。请基于已有上下文向用户说明当前进展。`;
-            parentAgent.sendCommand({ type: "user.message", text: report });
-            reportedToParent = true;
-          }
-          // Synthesize agent.done through the real pipeline (a.emit → bus publish + handler
-          // re-entry: store→done, terminalEventAccepted, parent notify, unregister).
-          a.emit("event", {
-            v: 1, type: "agent.done", agent: opts.id,
-            success: true, reason: "child-leader dead-zone auto-converge",
-          } as TuiEvent);
-        } else if (hasRun && !hasTodo) {
+        } else if (hasRun && !hasTodo && (opts.conversationMode || !opts.parentId)) {
+          // Make-way guard: sub-Leaders fall through to the dead-zone fallback below.
           process.stderr.write(`[${opts.id}] idle → hasRun+no-todo, auto-close run items\n`);
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
           applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
@@ -1359,7 +1364,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
               text: `【系统】todo 未完成：${pendingTodos}。立刻执行下一步（tool.call 或 spawn 或直接回答）。`,
             });
           });
-        } else if (hasTodo) {
+        } else if (hasTodo && (opts.conversationMode || !opts.parentId)) {
+          // Make-way guard: sub-Leaders fall through to the dead-zone fallback below.
           process.stderr.write(`[${opts.id}] idle → gaveUp after 3 nudges\n`);
           gaveUp = true;
           const pendingTodos = todos.filter((t) => t.state === "todo").map((t) => t.text).join("; ");
@@ -1386,6 +1392,12 @@ function startLeaderAgent(opts: LeaderOpts): void {
           process.stderr.write(`[${opts.id}] idle → actedThisTurn+conversationMode+no-branch-matched, releasing feishuBusy\n`);
           opts.turnEndHook?.();
           feishuBusy.delete(opts.id);
+        } else if (!opts.conversationMode && opts.parentId && !hasActiveChildren && !reportedToParent) {
+          // Child-Leader dead-zone fallback (link A — acted). Any sub-Leader that acted but was
+          // not converged by a specific exit above (made-way 1307/1346/1362, or fell through)
+          // lands here. !hasActiveChildren protects a TL still waiting on a worker; !reportedToParent
+          // skips those already handled by the reportedToParent exit.
+          convergeChildLeader("idle-acted-deadzone");
         }
       } else if (!actedThisTurn && !gaveUp) {
         const todos = getState().todosByAgent.get(opts.id) ?? [];
@@ -1405,7 +1417,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
             const pending2 = todos.filter((t: {state:string;text:string}) => t.state === "todo" || t.state === "run").map((t: {text:string}) => t.text).join("; ");
             a.sendCommand({ type: "user.message", text: `【系统-强制执行】你已经规划了 todo 但没有采取任何行动。现在必须立刻输出以下之一：\n1. spawn 指令（如果需要 TL 执行）\n2. tool.call 指令（如果 PM 自己能处理）\n3. message.to=user（如果可以直接回答）\n未完成项：${pending2}\n不允许再次只输出 todo.set 或 step。` });
           });
-        } else if (hasPending) {
+        } else if (hasPending && (opts.conversationMode || !opts.parentId)) {
+          // Make-way guard: sub-Leaders fall through to the link-B dead-zone fallback below.
           gaveUp = true;
           const pendingTodos = todos.filter((t) => t.state === "todo" || t.state === "run").map((t) => t.text).join("; ");
           if (opts.parentId) {
@@ -1434,9 +1447,21 @@ function startLeaderAgent(opts: LeaderOpts): void {
               text: "【系统-回复缺失】你刚才处理了消息但没有输出任何内容（无 message、无 tool.call、无 spawn）。请立刻 message→user 回复用户，或说明你在等待什么。",
             });
           });
+        } else if (!opts.conversationMode && opts.parentId && activeChildren2.length === 0 && pm.getForegroundChildren(opts.id).length === 0 && !reportedToParent) {
+          // Child-Leader dead-zone fallback (link B — no action). Sub-Leader took no action,
+          // nudges exhausted (or no pending work), no active children, never reported — converge.
+          convergeChildLeader("idle-noaction-deadzone");
         } else {
           continuations = 0;
         }
+      } else if (!opts.conversationMode && opts.parentId && !reportedToParent) {
+        // Top-level dead-zone fallback: a sub-Leader with actedThisTurn=false && gaveUp=true
+        // falls through BOTH chains above (acted chain and !acted&&!gaveUp chain). Converge it
+        // with gave-up semantics (relay an explicit "abandoned" notice, not stale prose).
+        const hasKids = Array.from(getState().agents.values())
+          .some((ag) => ag.parent === opts.id && (ag.state === "run" || ag.state === "idle"))
+          || pm.getForegroundChildren(opts.id).length > 0;
+        if (!hasKids) convergeChildLeader("gaveup-deadzone", { gaveUp: true });
       }
     }
   });
@@ -2372,6 +2397,9 @@ function App() {
   const agentPaneScroll  = useStore((s) => s.agentPaneScroll);
   const effort           = useStore((s) => s.effort);
   const [effortSelecting, setEffortSelecting] = useState(false);
+  // Zen mode: hide left (AGENTS) and right (TODO) panes, keep only the centre ConvPane
+  // so the conversation text can be selected/copied without sidebar columns interleaving.
+  const [zenMode, setZenMode] = useState(false);
   const [exitSecsLeft, setExitSecsLeft] = useState(0);
   const exitConfirm                     = exitSecsLeft > 0;
   const exitConfirmTimer                = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -2629,6 +2657,7 @@ function App() {
     } },
     { name: "palette", desc: "切换配色 paper | green | amber", handler: (args) => { const name = args[0] as PaletteName; if (name && name in PALETTES) { setPaletteName(name); savePalette(name); } } },
     { name: "layout",  desc: "切换布局 v1 | v3",             handler: (args) => { const l = args[0]; if (l === "v1" || l === "v3") { setLayout(l); saveLayout(l); } } },
+    { name: "zen",     desc: "切换 Zen 模式（隐藏左右面板，只留中间文本方便复制）", handler: () => { setZenMode((v) => !v); } },
     { name: "log",     desc: "日志级别 debug | info | warn | error", handler: (args) => { const l = args[0] as LogLevel; if (["debug","info","warn","error"].includes(l)) setMinLevel(l); } },
     { name: "feishu", desc: "/feishu <app_id> <app_secret> — 连接飞书 WebSocket（无参数显示状态）", handler: (args) => {
       const [appId, appSecret] = args;
@@ -3190,6 +3219,12 @@ function App() {
         {layout === "v3" ? (
           <Box flexDirection="column" flexGrow={1}>
             <DagView maxHeight={12} />
+            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+          </Box>
+        ) : zenMode ? (
+          // Zen mode: centre ConvPane only — no AGENTS/TODO sidebars, so users can
+          // select/copy the conversation text without sidebar columns breaking lines.
+          <Box flexGrow={1}>
             <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
           </Box>
         ) : (
