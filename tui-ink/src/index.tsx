@@ -1307,6 +1307,42 @@ function startLeaderAgent(opts: LeaderOpts): void {
         } else if (sentToUserThisTurn && !hasTodo) {
           // PM replied to user and has no pending tasks — done, nothing to nudge
           process.stderr.write(`[${opts.id}] idle → replied+no-todos, done\n`);
+        } else if (
+          !opts.conversationMode && opts.parentId &&
+          !hasActiveChildren && hasRun && !hasTodo && !reportedToParent
+        ) {
+          // Child-Leader dead-zone convergence (Feishu 已读不回 fix).
+          // A non-conversation sub-Leader (TL) whose children are all done, that still has
+          // a `run` todo it never finished, and that never reported to its parent, would
+          // otherwise hit 1310 auto-close: its run items get marked done (假完成) and it
+          // emits no further idle event — TL sits in store.state="idle" (active) forever,
+          // so the parent PM waits on it indefinitely → feishuBusy never releases →
+          // pending Feishu messages never drain → user gets 已读不回.
+          // This branch intercepts that exact dead-zone BEFORE auto-close swallows it.
+          // We MUST relay TL's actual output to the parent first (else PM wakes with nothing
+          // and replies emptily = 已读空回), THEN synthesize agent.done so the existing done
+          // pipeline runs (store→done clears PM activeChildren, completeForeground +
+          // parent-notify + unregister all fire via the a.emit path).
+          const myMsgs = a.getMessages();
+          const lastProse = [...myMsgs].reverse()
+            .find((m) => m.role === "assistant" && m.content.trim() !== "" && !m.content.trim().startsWith("{"))
+            ?.content.trim() ?? "";
+          const hasProse = lastProse !== "";
+          process.stderr.write(`[${opts.id}] idle → child-leader dead-zone converge, relay+done (prose=${hasProse ? "yes" : "EMPTY"})\n`);
+          const parentAgent = agents.get(opts.parentId);
+          if (parentAgent instanceof HttpConvAgent && !killedAgents.has(opts.parentId)) {
+            const report = hasProse
+              ? `[${opts.id} 汇报] ${lastProse.slice(0, 1500)}`
+              : `[${opts.id} 汇报] 子任务已完成，TL 未生成汇总。请基于已有上下文向用户说明当前进展。`;
+            parentAgent.sendCommand({ type: "user.message", text: report });
+            reportedToParent = true;
+          }
+          // Synthesize agent.done through the real pipeline (a.emit → bus publish + handler
+          // re-entry: store→done, terminalEventAccepted, parent notify, unregister).
+          a.emit("event", {
+            v: 1, type: "agent.done", agent: opts.id,
+            success: true, reason: "child-leader dead-zone auto-converge",
+          } as TuiEvent);
         } else if (hasRun && !hasTodo) {
           process.stderr.write(`[${opts.id}] idle → hasRun+no-todo, auto-close run items\n`);
           const closed = todos.map((t) => ({ ...t, state: t.state === "run" ? "done" : t.state }));
