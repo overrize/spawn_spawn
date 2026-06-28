@@ -2400,6 +2400,9 @@ function App() {
   // Zen mode: hide left (AGENTS) and right (TODO) panes, keep only the centre ConvPane
   // so the conversation text can be selected/copied without sidebar columns interleaving.
   const [zenMode, setZenMode] = useState(false);
+  // Status mode: show ONLY the left AGENTS pane (hide centre ConvPane + right TODO),
+  // a focused view of agent statuses.
+  const [statusMode, setStatusMode] = useState(false);
   const [exitSecsLeft, setExitSecsLeft] = useState(0);
   const exitConfirm                     = exitSecsLeft > 0;
   const exitConfirmTimer                = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -2658,6 +2661,7 @@ function App() {
     { name: "palette", desc: "切换配色 paper | green | amber", handler: (args) => { const name = args[0] as PaletteName; if (name && name in PALETTES) { setPaletteName(name); savePalette(name); } } },
     { name: "layout",  desc: "切换布局 v1 | v3",             handler: (args) => { const l = args[0]; if (l === "v1" || l === "v3") { setLayout(l); saveLayout(l); } } },
     { name: "zen",     desc: "切换 Zen 模式（隐藏左右面板，只留中间文本方便复制）", handler: () => { setZenMode((v) => !v); } },
+    { name: "status",  desc: "切换 Status 模式（只显示左侧 agents 状态面板）", handler: () => { setStatusMode((v) => !v); } },
     { name: "log",     desc: "日志级别 debug | info | warn | error", handler: (args) => { const l = args[0] as LogLevel; if (["debug","info","warn","error"].includes(l)) setMinLevel(l); } },
     { name: "feishu", desc: "/feishu <app_id> <app_secret> — 连接飞书 WebSocket（无参数显示状态）", handler: (args) => {
       const [appId, appSecret] = args;
@@ -3226,6 +3230,11 @@ function App() {
           // select/copy the conversation text without sidebar columns breaking lines.
           <Box flexGrow={1}>
             <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+          </Box>
+        ) : statusMode ? (
+          // Status mode: left AGENTS pane only — a focused agent-status view.
+          <Box flexGrow={1}>
+            <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} />
           </Box>
         ) : (
           // Responsive sidebar widths: shrink panes on narrow terminals so
