@@ -3232,9 +3232,10 @@ function App() {
             <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
           </Box>
         ) : statusMode ? (
-          // Status mode: left AGENTS pane only — a focused agent-status view.
+          // Status mode: left AGENTS pane only, expanded — a focused agent-status view
+          // with each agent's recent prompts and token usage.
           <Box flexGrow={1}>
-            <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} />
+            <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} expanded />
           </Box>
         ) : (
           // Responsive sidebar widths: shrink panes on narrow terminals so

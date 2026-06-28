@@ -150,7 +150,7 @@ export function VDivider() {
 }
 
 // ── 左栏:agents 列表 ───────────────────────────────────────────────────────
-export function AgentsPane({ width, scroll = 0 }: { width: number; scroll?: number }) {
+export function AgentsPane({ width, scroll = 0, expanded = false }: { width: number; scroll?: number; expanded?: boolean }) {
   const p = usePalette();
   const allAgents = useStore((s) => Array.from(s.agents.values()));
   const sel = useStore((s) => s.selectedAgent);
@@ -170,7 +170,8 @@ export function AgentsPane({ width, scroll = 0 }: { width: number; scroll?: numb
   const availRows = Math.max(6, (process.stdout.rows ?? 24) - 5);
   // Each AgentRow is 1–4 lines depending on sub/model/step/todo, but for scroll
   // purposes we count virtual rows (1 per agent + 1 per divider).
-  const maxVisible = Math.max(3, Math.floor(availRows / 3));
+  // Expanded rows are taller (base + up to 3 prompts + tokens ≈ 7 lines), so fewer fit.
+  const maxVisible = Math.max(2, Math.floor(availRows / (expanded ? 7 : 3)));
   const clampedScroll = Math.max(0, Math.min(scroll, Math.max(0, allRows.length - maxVisible)));
   const visibleRows = allRows.slice(clampedScroll, clampedScroll + maxVisible);
   const above = clampedScroll;
@@ -190,7 +191,7 @@ export function AgentsPane({ width, scroll = 0 }: { width: number; scroll?: numb
         {visibleRows.map((row, i) =>
           row === "divider"
             ? <Box key="div" marginTop={1}><Text dimColor>── done ──</Text></Box>
-            : <AgentRow key={row.id} a={row} selected={row.id === sel} dimmed={row.state === "done" || row.state === "err"} />
+            : <AgentRow key={row.id} a={row} selected={row.id === sel} dimmed={row.state === "done" || row.state === "err"} expanded={expanded} />
         )}
       </Box>
       {hiddenCount > 0 && (
@@ -202,7 +203,7 @@ export function AgentsPane({ width, scroll = 0 }: { width: number; scroll?: numb
   );
 }
 
-function AgentRow({ a, selected, dimmed }: { a: AgentInfo; selected: boolean; dimmed?: boolean }) {
+function AgentRow({ a, selected, dimmed, expanded = false }: { a: AgentInfo; selected: boolean; dimmed?: boolean; expanded?: boolean }) {
   const p = usePalette();
   const depth = a.depth ?? (a.parent ? 1 : 0);
   const indent = depth > 0 ? "  ".repeat(depth) + "└" : "";
@@ -211,6 +212,12 @@ function AgentRow({ a, selected, dimmed }: { a: AgentInfo; selected: boolean; di
   const step = useStore((s) => s.stepByAgent.get(a.id));
   const todos = useStore((s) => s.todosByAgent.get(a.id) ?? []);
   const todoDone = todos.filter((t) => t.state === "done").length;
+  // Expanded (Status mode): show the agent's recent inbound prompts + token usage.
+  const allMsgs = useStore((s) => s.messagesByAgent.get(a.id) ?? []);
+  const tok = useStore((s) => s.tokensByAgent.get(a.id));
+  const recentPrompts = expanded
+    ? allMsgs.filter((m) => m.agent === "user" && m.text.trim() !== "").slice(-3)
+    : [];
   return (
     <Box flexDirection="column">
       <Box>
@@ -238,6 +245,19 @@ function AgentRow({ a, selected, dimmed }: { a: AgentInfo; selected: boolean; di
       {todos.length > 0 && (
         <Box marginLeft={marginLeft}>
           <Text dimColor>todo {todoDone}/{todos.length}</Text>
+        </Box>
+      )}
+      {expanded && tok && (tok.prompt > 0 || tok.completion > 0) && (
+        <Box marginLeft={marginLeft}>
+          <Text dimColor>🪙 ↑{tok.prompt} ↓{tok.completion}</Text>
+        </Box>
+      )}
+      {expanded && recentPrompts.length > 0 && (
+        <Box flexDirection="column" marginLeft={marginLeft}>
+          <Text dimColor>最近 prompt:</Text>
+          {recentPrompts.map((m, i) => (
+            <Text key={i} dimColor wrap="truncate-end">  · {m.text.replace(/\s+/g, " ").trim()}</Text>
+          ))}
         </Box>
       )}
     </Box>
