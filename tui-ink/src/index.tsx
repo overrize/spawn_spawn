@@ -1615,6 +1615,9 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   // Non-null means the worker called RunTests at least once this session.
   let wLastTestFailed: number | null = null; // null=never run, 0=all pass, N=N failures
   let wLastRunTestsSummary = "";
+  // Test-evidence tracking for completion guard (covers Bash test runs, not just the RunTests tool):
+  let wRanTestCommand = false;           // worker invoked RunTests OR a test-runner Bash cmd this session
+  let wTestAttemptedButNoResult = false; // a test run produced NO parseable result (ECONNABORTED / cmd error / empty)
 
   // Circuit breaker constants
   const MAX_WORKER_TURNS = 40;
@@ -1750,6 +1753,23 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       });
       return; // Reject: keep agent running so it can fix the failures
     }
+    // 方案2(证据判定，非关键词)：worker 跑过测试命令(wRanTestCommand)，却从未取得有效通过记录
+    // (wLastTestFailed 仍为 null — failN>0 已被上面拦，0 是真全绿放行)，却声称 success → 拦截。
+    if (ev.type === "agent.done" && ev.success && wRanTestCommand && wLastTestFailed === null) {
+      process.stderr.write(
+        `[${e.child}] completion guard: blocked agent.done(success) — ran test cmd but NO valid test result (attempted=${wTestAttemptedButNoResult})\n`,
+      );
+      setImmediate(() => {
+        if (killedAgents.has(e.child) || getState().agents.get(e.child)?.state === "done") return;
+        a.sendCommand({
+          type: "user.message",
+          text: `[系统-无测试证据] 你声称 success:true，但系统没有任何有效的测试运行记录` +
+                `（测试命令跑过但未产出可解析的 pass/fail 计数，可能因网络中断、命令不存在或输出为空）。` +
+                `必须真正跑通测试并确认全绿（RunTests 或 node --test 输出含 pass≥1 且 fail 为 0），再 agent.done。`,
+        });
+      });
+      return; // Reject: no valid test evidence for a success claim
+    }
 
     applyEvent(ev);
     pm.observe(ev);
@@ -1876,6 +1896,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     if (ev.type === "tool.call") {
       workerActedThisTurn = true;
       workerTurnShadow.markAction();
+      if (ev.name === "RunTests" || isTestRunnerBash(ev)) wRanTestCommand = true;
       const wToolKey = `${ev.name}:${JSON.stringify(ev.args)}`;
       if (wToolKey === wLastToolKey) { wSameToolCount++; } else { wLastToolKey = wToolKey; wSameToolCount = 1; }
       if (wSameToolCount >= 3) {
@@ -1962,6 +1983,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
               if (batch[i]!.name === "Edit" || batch[i]!.name === "Write") {
                 wLastTestFailed = null;
                 wLastRunTestsSummary = "";
+                wTestAttemptedButNoResult = false;
               }
               // Track consecutive failures for circuit breaker
               if (ok) { wConsecToolFails = 0; } else { wConsecToolFails++; }
@@ -1971,10 +1993,33 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
                 const failMatch = output.match(/failed:\s*(\d+)/);
                 wLastTestFailed = failMatch ? parseInt(failMatch[1]!, 10) : (ok ? 0 : 1);
                 if (wLastTestFailed === 0) {
+                  wTestAttemptedButNoResult = false;
                   const passMatch = output.match(/passed:\s*(\d+)/);
                   const skippedMatch = output.match(/skipped:\s*(\d+)/);
                   wLastRunTestsSummary =
                     `RunTests PASS: passed=${passMatch?.[1] ?? "?"}, failed=0, skipped=${skippedMatch?.[1] ?? "0"}`;
+                }
+              } else if (isTestRunnerBash(batch[i]!)) {
+                // Bash 跑测试 — node test runner 格式 (# fail N / ℹ fail N)，独立正则，三态回填。
+                // 全绿判定必须 passN ≥ 1：pass 0/fail 0(测试没跑起来的异常输出)不得判全绿，
+                // 落到"无有效结果"被 guard 拦——worker 不能靠输出里有个 pass 字样蒙混。
+                // BACKLOG: RunTests 分支的 `ok ? 0` 有同款"未真跑即判 0"隐患；两处全绿判定将来应
+                // 抽成同一函数(要求 pass≥1)防逻辑漂移。本次范围内不改 RunTests 分支以免扩大。
+                const failM = output.match(/(?:#|ℹ)\s*fail(?:ed)?\s+(\d+)/i);
+                const passM = output.match(/(?:#|ℹ)\s*pass(?:ed)?\s+(\d+)/i);
+                const failN = failM ? parseInt(failM[1]!, 10) : null;
+                const passN = passM ? parseInt(passM[1]!, 10) : null;
+                if (failN !== null && failN > 0) {
+                  wLastTestFailed = failN;
+                  wTestAttemptedButNoResult = false;
+                } else if (passN !== null && passN > 0 && (failN === 0 || failN === null)) {
+                  // 真全绿：至少 1 个 pass 且无 fail
+                  wLastTestFailed = 0;
+                  wTestAttemptedButNoResult = false;
+                  wLastRunTestsSummary = `Bash test PASS: passed=${passN}, failed=${failN ?? 0}`;
+                } else {
+                  // pass 0 / fail 0 / 都解不出（ECONNABORTED、命令不存在、空输出）→ 无有效结果
+                  wTestAttemptedButNoResult = true; // wLastTestFailed 保持 null
                 }
               }
               applyEvent({ v: 1, type: "tool.result", agent: e.child, id, ok, output });
