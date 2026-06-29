@@ -970,6 +970,46 @@ function startLeaderAgent(opts: LeaderOpts): void {
     } as TuiEvent);
   };
 
+  // Drain a conversation-mode PM after it has replied to the user: release the serial
+  // feishuBusy lock and dispatch the next queued follow-up. Shared by the clean-exit path
+  // (replied + no todos) and the dead-zone path (replied + stale todos + nudges exhausted).
+  // Without the dead-zone caller, a PM that spawned a TL holds feishuBusy forever after its
+  // first reply — every later follow-up ("结论呢"…) queues but never drains (only-replies-once bug).
+  const drainConvModePM = (closeStaleTodos: boolean): void => {
+    if (closeStaleTodos) {
+      const todos = getState().todosByAgent.get(opts.id) ?? [];
+      if (todos.some((t) => t.state === "todo" || t.state === "run")) {
+        const closed = todos.map((t) => ({ ...t, state: (t.state === "todo" || t.state === "run") ? "done" : t.state }));
+        applyEvent({ v: 1, type: "todo.set", agent: opts.id, items: closed as any });
+      }
+    }
+    opts.turnEndHook?.();
+    feishuBusy.delete(opts.id);
+    const nextItem = feishuMsgQueue.get(opts.id)?.shift();
+    if (nextItem) {
+      const { text: nextMsg, messageId: nextMsgId } = nextItem;
+      process.stderr.write(`[${opts.id}] delivering queued msg: "${nextMsg.slice(0, 60)}"\n`);
+      feishuBusy.add(opts.id);
+      const rt = feishuReplyTarget.get(opts.id);
+      if (rt && feishuTokenManager) {
+        const task = createTask({ pmId: opts.id, ...rt, rootMessageId: nextMsgId }, feishuTokenManager);
+        taskRegistry.set(task.taskId, task);
+        pmCurrentTask.set(opts.id, task.taskId);
+        feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🦞 PM' });
+        if (nextMsgId) {
+          addProcessingReaction(nextMsgId, feishuTokenManager)
+            .then((rid) => { task.reactionId = rid; })
+            .catch(() => {});
+        }
+      }
+      setImmediate(() => {
+        if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
+        userMessage(opts.id, nextMsg);
+        a.sendCommand({ type: "user.message", text: nextMsg });
+      });
+    }
+  };
+
   a.on("event", (e: TuiEvent) => {
     if (terminalEventAccepted && e.type !== "token.usage") {
       process.stderr.write(`[${opts.id}] dropped ${e.type} after terminal agent.done\n`);
@@ -1305,34 +1345,12 @@ function startLeaderAgent(opts: LeaderOpts): void {
         } else if (sentToUserThisTurn && opts.conversationMode && !hasTodo && !hasActiveChildren) {
           // Conversation mode: replied to user, no pending todos, no in-flight children → done
           process.stderr.write(`[${opts.id}] idle → conversationMode replied+no-todos+no-children, done\n`);
-          opts.turnEndHook?.();
-          feishuBusy.delete(opts.id);
-          const nextItem = feishuMsgQueue.get(opts.id)?.shift();
-          if (nextItem) {
-            const { text: nextMsg, messageId: nextMsgId } = nextItem;
-            process.stderr.write(`[${opts.id}] delivering queued msg: "${nextMsg.slice(0, 60)}"\n`);
-            feishuBusy.add(opts.id);
-            const rt = feishuReplyTarget.get(opts.id);
-            if (rt && feishuTokenManager) {
-              // Use real nextMsgId so replyToMessageWithCard can anchor under the correct message
-              const task = createTask({ pmId: opts.id, ...rt, rootMessageId: nextMsgId }, feishuTokenManager);
-              taskRegistry.set(task.taskId, task);
-              pmCurrentTask.set(opts.id, task.taskId);
-              feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🦞 PM' });
-              if (nextMsgId) {
-                addProcessingReaction(nextMsgId, feishuTokenManager)
-                  .then((rid) => { task.reactionId = rid; })
-                  .catch(() => {});
-              }
-            }
-            setImmediate(() => {
-              if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
-              userMessage(opts.id, nextMsg);
-              a.sendCommand({ type: "user.message", text: nextMsg });
-            });
-          }
+          drainConvModePM(false);
         } else if (sentToUserThisTurn && opts.conversationMode && hasTodo) {
-          // Conversation mode: replied to user but still has todos → nudge to finish work
+          // Conversation mode: replied to user but still has todos. (hasActiveChildren is already
+          // false here — the 1297 branch caught it.) Nudge to finish; if nudges are exhausted,
+          // converge anyway so the PM releases feishuBusy + drains queued follow-ups instead of
+          // holding the serial lock forever (only-replies-once bug after spawning a TL).
           process.stderr.write(`[${opts.id}] idle → conversationMode replied but hasTodo, nudging cont=${continuations}\n`);
           if (continuations < 3) {
             continuations++;
@@ -1342,6 +1360,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
               if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
               a.sendCommand({ type: "user.message", text: `【系统】你回复了用户但还有未完成任务：${pendingTodos}。立刻执行。` });
             });
+          } else {
+            // Nudges exhausted — stale meta-todos (work already delegated to a finished TL) must
+            // not trap the PM. Auto-close them, release feishuBusy, dispatch next follow-up.
+            process.stderr.write(`[${opts.id}] idle → conversationMode replied + nudges exhausted, converging\n`);
+            drainConvModePM(true);
           }
         } else if (sentToUserThisTurn && !hasTodo && (opts.conversationMode || !opts.parentId)) {
           // PM replied to user and has no pending tasks — done, nothing to nudge.
