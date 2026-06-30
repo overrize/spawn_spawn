@@ -1648,6 +1648,18 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   // Consecutive tool-failure counter — reset on any successful tool result
   let wConsecToolFails = 0;
 
+  // Hard circuit (#2 main-chain liveness / full-duplex 地基): force-converge a stalled worker so it
+  // can NEVER hold `active` forever and lock its TL/PM back into half-duplex. Unlike the nudge/escalate
+  // path (workerContinuations resets on non-nudge runs → never reaches the gaveUp escalate, and even
+  // that only notifies parent without agent.done), these counters are NOT resettable and ALWAYS end in
+  // a forced agent.done(false) that releases `active`.
+  const WORKER_HARD_STALL_N = 5;         // consecutive no-progress idle turns → circuit (early-stop 主力)
+  const WORKER_HARD_MS = 15 * 60 * 1000; // wall-clock cap (防爆兜底, 宁松勿紧, 早停靠 stall)
+  let wStallCount = 0;                    // turns with NO action AND NO queued tools (network-error空转/死锁)
+  const wHardStartTs = Date.now();        // worker spawn wall-clock origin
+  let wHardCircuitFired = false;          // one-shot guard
+  let wLastFailOutput = "";               // most recent failing tool output (for handup last-error ③)
+
   // Quality tracking for worker
   let wQualTurns = 0;
   let wQualNudges = 0;
@@ -1661,6 +1673,34 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       ? String((ev.args as Record<string, unknown>).command ?? (ev.args as Record<string, unknown>).cmd ?? "")
       : "";
     return /\b(?:npm\s+test|node\s+--test|bun\s+test|vitest|jest|pytest|cargo\s+test|go\s+test)\b/i.test(cmd);
+  };
+
+  // Force-converge a hard-stalled worker. Emits handup (③: 已完成 + 卡点 + 最后错误 — 半成品不随熔断丢)
+  // THEN agent.done(false). Both flow through the existing handup/done handlers, which notify the parent
+  // via sendCommand → the parent's QUEUE (⑤: never preempts the parent's in-flight turn). The done(false)
+  // reuses the existing failure-notify path (④: TL → message→user with 重试/换方法/放弃 options), so the
+  // background task's outcome flows back into the conversation on its own — no need for the user to ask.
+  const fireHardCircuit = (reason: string): void => {
+    if (wHardCircuitFired) return;
+    if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
+    wHardCircuitFired = true;
+    const todos = getState().todosByAgent.get(e.child) ?? [];
+    const doneTodos = todos.filter((t) => t.state === "done").map((t) => t.text);
+    const stuckTodo = todos.find((t) => t.state === "run" || t.state === "todo")?.text ?? "(无明确 todo)";
+    const lastErr = wLastFailOutput || "(无捕获错误，疑似网络重试无产出 / 空转)";
+    process.stderr.write(
+      `[hard-circuit] worker=${e.child} reason=${reason} stall=${wStallCount} ` +
+      `elapsed=${Math.round((Date.now() - wHardStartTs) / 1000)}s stuck-todo="${stuckTodo}" ` +
+      `last-error="${lastErr.replace(/\s+/g, " ").slice(0, 120)}"\n`,
+    );
+    a.emit("event", {
+      v: 1, type: "unit.handup", agent: e.child, parent: e.parent,
+      summary: `[硬熔断:${reason}] 已完成: ${doneTodos.join("; ") || "(无)"}；卡在: ${stuckTodo}；最后错误: ${lastErr.replace(/\s+/g, " ").slice(0, 200)}`,
+      artifacts: [], facts_to_promote: [], decisions: [], failed_acceptance: [stuckTodo],
+    } as TuiEvent);
+    a.emit("event", {
+      v: 1, type: "agent.done", agent: e.child, success: false, reason: `hard-circuit ${reason}`,
+    } as TuiEvent);
   };
 
   a.on("event", (ev: TuiEvent) => {
@@ -1977,6 +2017,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       if (getState().agents.get(e.child)?.state === "done") return;
       workerTurnShadow.endTurn();
       logWorkerTurnShadow();
+      // Hard-circuit stall tracking (#2): a turn with NO action AND NO queued tools = no progress
+      // (network-error 空转 / idle 死锁 命中). NOT reset by nudges, so it eventually fires — unlike the
+      // resettable workerContinuations path that network errors keep zeroing out.
+      if (toolQueue.length === 0 && !workerActedThisTurn) wStallCount++;
+      else wStallCount = 0;
+      if (!wHardCircuitFired) {
+        const elapsed = Date.now() - wHardStartTs;
+        if (wStallCount >= WORKER_HARD_STALL_N) { fireHardCircuit(`stall x${wStallCount}`); return; }
+        if (elapsed > WORKER_HARD_MS) { fireHardCircuit(`wall-clock ${Math.round(elapsed / 60000)}min`); return; }
+      }
       if (toolQueue.length > 0) {
         if (wSameToolCount >= 2) {
           const loopTool = wLastToolKey.split(":")[0] ?? "";
@@ -2008,8 +2058,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
                 wLastRunTestsSummary = "";
                 wTestAttemptedButNoResult = false;
               }
-              // Track consecutive failures for circuit breaker
-              if (ok) { wConsecToolFails = 0; } else { wConsecToolFails++; }
+              // Track consecutive failures for circuit breaker + capture last failure for hard-circuit handup.
+              if (ok) { wConsecToolFails = 0; } else { wConsecToolFails++; wLastFailOutput = output; }
               // Coding completion guard: track RunTests outcome so we can reject a
               // premature agent.done(success:true) when tests are still failing.
               if (batch[i]!.name === "RunTests") {
