@@ -1,0 +1,130 @@
+# Spawn 1.0 工作计划
+
+> 版本：v1.0.0 · 2026-07-20 · 对齐 [PLAN.md](PLAN.md) Draft v0.2
+> 状态：Active
+>
+> 版本规则：工作计划与 PLAN.md 联动。PLAN 定调变更 → 本文件升 minor（v1.1.0）并将旧版快照存入
+> `archive/`；任务级增删改状态 → 直接原地更新并在文末「变更记录」加一行，不升版本。
+> 每个里程碑出口必须产出一份回归记录（`regression/`，用 TEMPLATE.md），未归档回归记录的里程碑不得关闭。
+
+---
+
+## 总览
+
+| 里程碑 | 主题 | 出口标准（Gate） | 状态 |
+|---|---|---|---|
+| M0 | 埋点契约 | G7：核心失败/降级/恢复事件写入结构化 HealthMetric | 未开始 |
+| M1 | 内核加固 | G2（Zod 强校验）、G5（index.tsx 拆分 <1500 行），测试全绿 | 未开始 |
+| M2 | 双轨与工具 | G1（协议双轨）、G6（trace_id 全链路） | 未开始 |
+| M3 | 进化地基 | G3（记忆升级）、G4（评估闭环）→ 1.0 发布 | 未开始 |
+
+依赖：M0 先行（后续所有进化能力依赖稳定指标）→ M1 是 M2/M3 前置（拆分后才好插 adapter 与 trace）。
+例外：M3-2 评测用例的积累从 M1 即开始，不等 M3 启动。
+
+任务状态取值：`未开始 | 进行中 | 待回归 | 完成 | 取消`。
+「回归验证」列是该任务关闭的客观依据，也是里程碑回归记录的检查清单来源。
+
+---
+
+## 分工
+
+两个角色，边界按"写实现的人不给自己发验收"划分：
+
+| 角色 | 负责 | 不做 |
+|---|---|---|
+| **执行侧（同事）** | 全部实现类任务：埋点、Zod 改造、runtime 拆分、双轨适配、adapter/MCP、向量记忆、prompt 版本机制、安全模型与 TUI 修复 | 不自行关闭任务（只能置为「待回归」）；不改评测用例的判定标准 |
+| **QA / 回归侧（Claude）** | 测试基线与用例集建设、每个 PR 的代码评审、里程碑出口回归执行与记录归档、评测集与坏例标注、PLAN/WORKPLAN/回归文档维护 | 不写功能实现代码；发现问题回给执行侧修，不代改 |
+
+### 任务归属
+
+| 里程碑 | 执行侧（实现） | QA/回归侧（Claude） |
+|---|---|---|
+| M0 | M0-1 类型与落盘、M0-2..5 四条路径埋点、M0-6 `/metrics` | 各埋点任务的断言用例评审；M0 出口回归 + 归档 |
+| M1 | M1-1 Zod 改造、M1-2/3/4 记忆修复实现、M1-6a..e 五步拆分 | **M1-5 事件序列快照基线（QA 产出，拆分前必须先交）**；M1-2 中文重复 fact 用例集；每步拆分 PR 的快照核对；M1 出口回归 |
+| M2 | M2-1 capabilities、M2-2 native 轨、M2-3 健康度评分、M2-5 adapter、M2-6 MCP、M2-7 trace 传播 | **M2-4 parser 评测集（从 shadow.log/stderr 沉淀坏例）**；M2-2 双轨等价性测试的判定用例；M2-6"零核心改动"验收演示；M2 出口回归 |
+| M3 | M3-1 向量记忆、M3-3 prompt 版本机制、M3-5 进化触发器、M3-6 安全模型、M3-7 TUI 修复 | **M3-2 评测集 ≥30 条（M1 起持续积累）**；M3-4 坏例归档标注与回流；G4 完整流程验收演示；发布回归 + 最终记录 |
+
+### 协作节奏
+
+1. **测试先行**：涉及行为基线的（M1-5 快照、双轨等价性、评测集判定），QA 侧先交用例，执行侧实现到绿——避免"实现完了再补测试"导致基线迁就实现。
+2. **关闭权分离**：执行侧完成 → 置「待回归」→ QA 侧核对该任务「回归验证」列 → 置「完成」。
+3. **分歧升级**：用例判定标准与实现产生冲突、或同一任务两次回归失败 → 升级到 PLAN 层面重新评估，不在任务内拉锯。
+
+---
+
+## M0 · 埋点契约
+
+先把"系统怎么坏的"变成长期可查询数据。stderr 保留但不再是数据契约。
+
+| ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
+|---|---|---|---|---|---|
+| M0-1 | 定义 HealthMetric / TraceEvent / EvalResult 类型与落盘（追加式 JSONL，`.spawn/metrics/`） | `src/runtime/HealthMetrics.ts` + 存储层 | 类型单测；写入/读取/损坏行容错单测 | — | 未开始 |
+| M0-2 | normalizer 接入：`protocol_parse_failed` / `protocol_repaired` / `fallback_message_emitted` | normalizer 埋点 + `_fallbackWarnCount` 迁移 | 用现有坏输出用例断言事件产出；114+ 测试全绿 | M0-1 | 未开始 |
+| M0-3 | tool loop / ProcessManager 接入：`tool_call_repeated` / `no_progress_nudge` / `hard_circuit_fired` / `dispatch_timeout` | 守卫路径埋点 | ProcessManager 现有测试扩展断言 HealthMetric | M0-1 | 未开始 |
+| M0-4 | memory / resume 接入：`memory_fact_merged` / `memory_fact_dropped` / `resume_context_missing` | SecretaryProxy / MemoryStore / resume 路径埋点 | pm-hierarchy + integration 测试扩展 | M0-1 | 未开始 |
+| M0-5 | 任务收敛事件：`trace_completed` / `trace_failed` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` | done-guard 与任务终态埋点 | 完成守卫测试扩展 | M0-1 | 未开始 |
+| M0-6 | 查询入口：`/metrics` slash command（按 event_type/agent/时间过滤）或等价 CLI | TUI 命令或脚本 | 手工验收 + 快照测试 | M0-1..5 | 未开始 |
+
+**出口**：G7 达成；跑一次真实任务后 `.spawn/metrics/` 有完整事件流；回归记录归档。
+
+## M1 · 内核加固
+
+| ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
+|---|---|---|---|---|---|
+| M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 未开始 |
+| M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 未开始 |
+| M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | tokenizer 估算层 | 中英文混合历史截断对比测试 | — | 未开始 |
+| M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | 协议 + SecretaryProxy 改造 | decision 提取用例（中/英） | — | 未开始 |
+| M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/` 扩充 | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 未开始 |
+| M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获） | 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始 |
+| M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿 | M1-5, M1-1 | 未开始 |
+| M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
+| M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
+| M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿 | M1-6a..d | 未开始 |
+
+**出口**：G2、G5 达成；`npm test` + `typecheck` 全绿；回归记录归档。
+拆分按 a→e 分 PR 小步走，每步快照必须不变。
+
+## M2 · 双轨与工具
+
+| ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
+|---|---|---|---|---|---|
+| M2-1 | provider `capabilities: { nativeFC, structuredOutput }` 配置与运行时选轨 | config 扩展 | config-presets 测试扩展 | M1 | 未开始 |
+| M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 | M2-1 | 未开始 |
+| M2-3 | 文本轨修复管线指标 → provider 协议健康度评分 | 健康度聚合 | 指标断言测试 | M0-2 | 未开始 |
+| M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | 用例文件 + 测试 | 全部用例通过或明确 xfail | — | 未开始 |
+| M2-5 | ToolRegistry 抽 adapter 层：Local / Mcp / Http 同接口，权限与观测在 adapter 之上收口 | adapter 层 | 现有工具行为不回归（registry 测试）；tool span 产出 | M1-6b | 未开始 |
+| M2-6 | MCP 最小接入：stdio MCP server 挂载为工具组 | McpAdapter | 新增一个 MCP 工具全程零核心代码改动（验收演示） | M2-5 | 未开始 |
+| M2-7 | trace_id/parent_span 全链路传播 + `/trace <id>` 调用树还原 | trace 传播 + TUI 命令 | 单任务链路日志可还原完整调用树（G6 验收用例） | M1-6a | 未开始 |
+
+**出口**：G1、G6 达成；native 轨 `fallback_message_emitted` = 0；回归记录归档。
+
+## M3 · 进化地基
+
+| ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
+|---|---|---|---|---|---|
+| M3-1 | 向量化长期记忆：写入时 embedding（sqlite-vec 或纯文件索引）；按 goal 检索 top-k 注入替代时间序注入；GC 改为热数据 50 条 + 全量归档 | 向量记忆层 | 跨 session 相关性注入命中率基线；embedding 失败降级 n-gram 的容错测试 | M1-2 | 未开始 |
+| M3-2 | 评测集 ≥30 条端到端用例（任务拆分/工具准确率/协议遵守/收敛/记忆质量），QA-TL 执行器，demo/live 双模式 | eval 用例 + 执行器 | 评测集在 demo 模式全量可跑，live 抽样可跑 | M1 起持续积累 | 未开始 |
+| M3-3 | prompt 即数据：frontmatter 版本号、运行时记录 prompt_version、评测门禁、一键回滚 | prompt 版本机制 | 演示：改 prompt → 门禁拦截劣化 → 回滚（G4 验收用例） | M3-2 | 未开始 |
+| M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
+| M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
+| M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
+| M3-7 | TUI 输入层修复：Tab 卡住 / cursor 消失 / 审批锁全局输入，纳入 ink-testing-library 回归 | 修复 + 回归用例 | 已知输入 bug 清零且有回归用例 | — | 未开始 |
+
+**出口**：G3、G4 达成；完整演示「线上 bad case → HealthMetric 归档 → QA-TL 分析 → 改 prompt → 门禁 → 回滚」；**1.0 发布**，发布前跑全量回归并归档最终回归记录。
+
+---
+
+## 回归策略
+
+1. **常规回归**：每个任务合入前 `npm run typecheck` + `npm test` 全绿；触碰编排路径的必须过 M1-5 事件序列快照。
+2. **里程碑回归**：里程碑出口跑全量测试 + 该里程碑「回归验证」列全部核对，按 `regression/TEMPLATE.md` 记录归档为 `regression/<里程碑>-<YYYYMMDD>.md`。
+3. **发布回归**：1.0 发布前额外跑 M3-2 评测集（demo 全量 + live 抽样），HealthMetric 摘要写入发布回归记录。
+4. 回归失败 → 任务退回「进行中」，修复后重跑；连续两次失败升级到 PLAN 层面重新评估任务拆分。
+
+## 变更记录
+
+| 日期 | 版本 | 变更 | 记录人 |
+|---|---|---|---|
+| 2026-07-20 | v1.0.0 | 初版：对齐 PLAN v0.2（双主线 + G7 + HealthMetric 契约 + M0 阶段 + 5-runtime 拆分） | Claude |
+| 2026-07-20 | v1.0.0 | 增加「分工」节：执行侧（同事）做实现，QA/回归侧（Claude）做基线/评审/回归/文档；关闭权分离 | Claude |

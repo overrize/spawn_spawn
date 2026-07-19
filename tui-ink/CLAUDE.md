@@ -137,6 +137,16 @@ Grep/Glob 测试用 `hasRg` 守卫：rg 不在 PATH 时自动 skip，CI 安装 r
 
 ---
 
+## Spawn 1.0 专项文档
+
+1.0 版本（结构优化 + 自主进化埋点）的方案、工作计划、回归记录统一放在 `docs/spawn-1.0/`：
+- `PLAN.md` — 定调方案（G1-G7、HealthMetric 契约、WS1-6、M0-M3）
+- `WORKPLAN.md` — 任务级工作计划（状态在此更新，任务关闭以「回归验证」列为准）
+- `regression/` — 里程碑出口/发布的回归记录（没有回归记录的里程碑不得关闭）
+- `archive/` — 历史版本快照
+
+---
+
 ## 近期重要变更（供上下文参考）
 
 - **session-level 消息历史**：从 5-message 滑动窗口改为 5-session 滑动窗口，每 session 内消息完整保留

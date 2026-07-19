@@ -4,3 +4,6 @@ dist/
 .spawn/
 *.tmp
 .env
+
+# Re-include project docs (parent repo .gitignore has a global 'docs/' rule)
+!docs/
