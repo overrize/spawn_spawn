@@ -13,7 +13,7 @@
 
 | 里程碑 | 主题 | 出口标准（Gate） | 状态 |
 |---|---|---|---|
-| M0 | 埋点契约 | G7：核心失败/降级/恢复事件写入结构化 HealthMetric | 未开始 |
+| M0 | 埋点契约 | G7：核心失败/降级/恢复事件写入结构化 HealthMetric | 待手工验收 |
 | M1 | 内核加固 | G2（Zod 强校验）、G5（index.tsx 拆分 <1500 行），测试全绿 | 未开始 |
 | M2 | 双轨与工具 | G1（协议双轨）、G6（trace_id 全链路） | 未开始 |
 | M3 | 进化地基 | G3（记忆升级）、G4（评估闭环）→ 1.0 发布 | 未开始 |
@@ -60,10 +60,10 @@
 |---|---|---|---|---|---|
 | M0-1 | 定义 HealthMetric / TraceEvent / EvalResult 类型与落盘（追加式 JSONL，`.spawn/metrics/`） | `src/runtime/HealthMetrics.ts` + 存储层 | 类型单测；写入/读取/损坏行容错单测 | — | 完成 |
 | M0-2 | normalizer 接入：`protocol_parse_failed` / `protocol_repaired` / `fallback_message_emitted` | normalizer 埋点 + `_fallbackWarnCount` 迁移 | 用现有坏输出用例断言事件产出；114+ 测试全绿 | M0-1 | 完成 |
-| M0-3 | tool loop / ProcessManager 接入：`tool_call_repeated` / `no_progress_nudge` / `hard_circuit_fired` / `dispatch_timeout` | 守卫路径埋点 | ProcessManager 现有测试扩展断言 HealthMetric | M0-1 | 进行中 |
+| M0-3 | tool loop / ProcessManager 接入：`tool_call_repeated` / `no_progress_nudge` / `hard_circuit_fired` / `dispatch_timeout` | 守卫路径埋点 | ProcessManager 现有测试扩展断言 HealthMetric | M0-1 | 完成 |
 | M0-4 | memory / resume 接入：`memory_fact_merged` / `memory_fact_dropped` / `resume_context_missing` | SecretaryProxy / MemoryStore / resume 路径埋点 | pm-hierarchy + integration 测试扩展 | M0-1 | 完成 |
-| M0-5 | 任务收敛事件：`trace_completed` / `trace_failed` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` | done-guard 与任务终态埋点 | 完成守卫测试扩展 | M0-1 | 未开始 |
-| M0-6 | 查询入口：`/metrics` slash command（按 event_type/agent/时间过滤）或等价 CLI | TUI 命令或脚本 | 手工验收 + 快照测试 | M0-1..5 | 未开始 |
+| M0-5 | 任务收敛事件：`trace_completed` / `trace_failed` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` | done-guard 与任务终态埋点 | 完成守卫测试扩展 | M0-1 | 完成 |
+| M0-6 | 查询入口：`/metrics` slash command（按 event_type/agent/时间过滤）或等价 CLI | TUI 命令或脚本 | 手工验收 + 快照测试 | M0-1..5 | 待手工验收 |
 
 **出口**：G7 达成；跑一次真实任务后 `.spawn/metrics/` 有完整事件流；回归记录归档。
 
@@ -80,7 +80,7 @@
 | M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿 | M1-5, M1-1 | 未开始 |
 | M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
-| M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
+| M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
 
 **出口**：G2、G5 达成；`npm test` + `typecheck` 全绿；回归记录归档。
 拆分按 a→e 分 PR 小步走，每步快照必须不变。
@@ -131,7 +131,13 @@
 | 2026-07-20 | v1.0.0 | M0-1/M0-2 实现完成，状态置为「待回归」：HealthMetric JSONL 存储 + normalizer 协议失败/修复/fallback 埋点 | 执行侧 |
 | 2026-07-20 | v1.0.0 | M0-3 实现完成，状态置为「待回归」：ProcessManager `loop_suspected/no_progress/dispatch_timeout` 和 worker `hard_circuit_fired` 已接入 HealthMetric | 执行侧 |
 | 2026-07-20 | v1.0.0 | M0-4 实现完成，状态置为「待回归」：SecretaryProxy `memory_fact_merged/memory_fact_dropped` 与 resume `resume_context_missing` 已接入 HealthMetric；memory 路径已补断言 | 执行侧 |
+| 2026-07-20 | v1.0.0 | M0-5 实现完成，状态置为「待回归」：`agent.done` 终态写 `trace_completed/trace_failed`，完成守卫写 `agent_done_blocked_by_guard/test_failed_but_claimed_done` | 执行侧 |
 | 2026-07-20 | v1.0.0 | **M0-3 回归不通过，退回「进行中」**（typecheck 干净、411/411 绿，但断言不满足验证标准）：① `tool_call_repeated` 已断言 ✓；② `no_progress_nudge`/`dispatch_timeout` 只有映射无断言——整改：导出 `metricTypeForAlert` 纯函数并补 4 分支单测（3 映射 + default null）；③ `hard_circuit_fired` 埋点在 index.tsx 闭包内不可单测（worker-circuit.test.ts 测的是重实现的决策函数，不覆盖真实埋点）——接受递延：随 M1-6e 拆出后补测，已写入 M1-6e 回归验证列 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M0-4 回归通过置「完成」**：`memory_fact_merged`/`memory_fact_dropped` 实现与断言齐备（含 previousWeight/droppedCount 等 meta），411/411 绿。递延项：`resume_context_missing` 在 index.tsx 内不可单测 → 随 M1-6e 补测（同上）。观察项：当前只覆盖 loadMemory 整体缺失，PLAN 契约中"缺 history/todo/child state"的部分缺失场景未检测 → 建议 M0-6 或 M1-6e 时一并补 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | M1-5 完成：orchestration-golden 基线 25 用例（spawn 治理/审批/通信矩阵/handup·done/协议解析/终态保护/记忆序列），真实组件接线，已接入 `npm test` | Claude (QA) |
 | 2026-07-20 | v1.0.0 | M0-1/M0-2 回归通过置「完成」：typecheck 干净 + 全量 409 用例绿；health-metrics 与 orchestration-golden 已补入 `npm test` 列表。观察项：未设测试 store 的套件跑 parseAgentOutput 会写真实 cwd 的 `.spawn/metrics/`（已 gitignore，不阻塞，M0 出口复核）。基线新发现：文本协议 todo.set 可携带非法 state（如 "doing"）无校验透传 → 归入 M1-1 Zod 范围 | Claude (QA) |
+| 2026-07-20 | v1.0.0 | M0-6 实现完成，状态置为「待回归」：新增 `/metrics [event_type|agentId]` 查询最近 HealthMetric；按 QA 整改补齐 `metricTypeForAlert` 映射单测，让 M0-3 回到「待回归」 | 执行侧 |
+| 2026-07-20 | v1.0.0 | **M0-3 回归通过置「完成」**：`metricTypeForAlert` 已导出，4 分支映射单测齐备（412/412 绿）。`hard_circuit_fired` 递延项维持 M1-6e | Claude (QA) |
+| 2026-07-20 | v1.0.0 | **M0-5 回归通过置「完成」**：`trace_completed/trace_failed` 放进 store.applyEvent（可测层，好设计）且 smoke 已断言 ✓。`agent_done_blocked_by_guard`/`test_failed_but_claimed_done` 在 index.tsx done-guard 闭包内不可单测 → 追加进 M1-6e 递延断言列表 | Claude (QA) |
+| 2026-07-20 | v1.0.0 | **M0-6 回归不通过，退回「进行中」**（功能正确但不满足"快照测试"验证标准）：① `/metrics` handler 是 index.tsx 闭包，无法测——整改：抽出纯函数 `formatMetricsReport(metrics, filter): string`（过滤+汇总+格式化），handler 只留 3 行 glue，补格式快照单测；② **新发现（较重要）**：`trace_*` 进 applyEvent 后，未做指标隔离的测试套件持续污染真实 `.spawn/metrics/`（当前 12 条全是测试 agent 数据）——整改：测试公共 helper 里 `setHealthMetricsStoreForTests(临时目录)`，或默认 store 检测 NODE_TEST 环境降级为 no-op，否则 M3-4 坏例挖掘的数据源不可信；③ 手工验收（TUI 里跑 `/metrics`）与 M0 出口的"跑一次真实任务"合并执行 | Claude (QA) |
+| 2026-07-20 | v1.0.0 | M0-6 整改完成，自动回归通过：抽出 `formatMetricsReport` 并补 3 类格式断言；默认测试 store 在 node:test 下写入系统临时目录，避免污染真实 `.spawn/metrics`；`typecheck` 通过，`npm test` 416/416 通过。剩余：TUI 手工跑 `/metrics` + 真实任务出口验收 | 执行侧 |
