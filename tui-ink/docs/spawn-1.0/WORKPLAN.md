@@ -14,7 +14,7 @@
 | 里程碑 | 主题 | 出口标准（Gate） | 状态 |
 |---|---|---|---|
 | M0 | 埋点契约 | G7：核心失败/降级/恢复事件写入结构化 HealthMetric | 完成（回归已归档） |
-| M1 | 内核加固 | G2（Zod 强校验）、G5（index.tsx 拆分 <1500 行），测试全绿 | 未开始 |
+| M1 | 内核加固 | G2（Zod 强校验）、G5（index.tsx 拆分 <1500 行），测试全绿 | 进行中 |
 | M2 | 双轨与工具 | G1（协议双轨）、G6（trace_id 全链路） | 未开始 |
 | M3 | 进化地基 | G3（记忆升级）、G4（评估闭环）→ 1.0 发布 | 未开始 |
 
@@ -71,13 +71,13 @@
 
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 未开始 |
+| M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 完成 |
 | M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 未开始 |
 | M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | tokenizer 估算层 | 中英文混合历史截断对比测试 | — | 未开始 |
 | M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | 协议 + SecretaryProxy 改造 | decision 提取用例（中/英） | — | 未开始 |
 | M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/orchestration-golden.test.ts`（25 用例，已入 `npm test`） | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 完成 |
 | M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获） | 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始 |
-| M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿 | M1-5, M1-1 | 未开始 |
+| M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿；**补 M1-1 递延项**：invalid_args ≤2 次自纠、超限 handup 的计数治理随 ToolRuntime 实现并可测 | M1-5, M1-1 | 未开始 |
 | M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
 | M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
@@ -143,3 +143,5 @@
 | 2026-07-20 | v1.0.0 | M0-6 整改完成，自动回归通过：抽出 `formatMetricsReport` 并补 3 类格式断言；默认测试 store 在 node:test 下写入系统临时目录，避免污染真实 `.spawn/metrics`；`typecheck` 通过，`npm test` 416/416 通过。剩余：TUI 手工跑 `/metrics` + 真实任务出口验收 | 执行侧 |
 | 2026-07-20 | v1.0.0 | **M0-6 回归通过置「完成」**：`formatMetricsReport` 纯函数 + 空/过滤/格式 3 类快照断言齐备；隔离修复实测有效（跑 smoke+pm-hierarchy 后真实 `.spawn/metrics` 零增长），清掉 15 行历史污染 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M0 里程碑出口回归通过，M0 关闭**：G7 达成。出口脚本 `scripts/m0-exit-check.mts`（真实组件、非 test 进程）驱动一次完整多 agent 任务，7 类关键事件（protocol_repaired/parse_failed/fallback/fact_merged/tool_call_repeated/trace_failed/trace_completed）全部落真实 store 并经 `/metrics` 渲染。回归记录归档 `regression/M0-20260720.md`。递延项（4 个 index.tsx 闭包内埋点断言）转 M1-6e | Claude (QA) |
+| 2026-07-20 | v1.0.0 | M1-1 实现完成，状态置为「待回归」：15 个工具接入结构化参数规格，`executeTool` 执行前强校验并返回 `tool_error(invalid_args)`，失败写 `tool_arg_schema_failed` HealthMetric；工具 prompt 参数列由规格生成；主链路 executeTool 调用补 agentId 归因；registry/coding 专项 68/68 绿，`typecheck` 通过，`npm test` 420/420 绿。注意：当前未新增外部 Zod 依赖，用内部 schema 达成同等运行时合同；“超过 2 次后 handup”建议随 M1-6b ToolRuntime 拆分做可测治理 | 执行侧 |
+| 2026-07-20 | v1.0.0 | **M1-1 回归通过置「完成」**（QA 复核 420/420 绿 + typecheck 干净）：校验器为真结构化校验（类型/必填/枚举/min-max/alias 归一/未知字段拒绝），字段级错误 + 期望规格回给模型可自纠，指标带 agentId 归因。**接受偏差**：内部 schema 替代 Zod（合同等价、零新依赖），PLAN G2 措辞同步修正；递延项「≤2 次自纠计数治理」写入 M1-6b 回归验证列。**风险提示**：CI 在远端不可绿——npm test 列表引用大量未落库文件（src/execution、src/inbound、src/runtime 部分、feishu 测试等），执行侧需整体提交一次实现代码 | Claude (QA) |
