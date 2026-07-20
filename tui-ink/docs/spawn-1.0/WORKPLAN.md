@@ -81,6 +81,7 @@
 | M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
 | M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
+| M1-7 | **BC-001 修复**（用户可感知：不再"催了才干活"）：统一 leader/worker 的 acted 判定（纯 `todo.set` 不算 acted）+ prompt 强化首轮必须带执行动作 | 判定统一 + prompt 修订（见 `badcases/BC-001`） | QA 先交 characterization 测试钉现状；修复后示例任务 `no_progress_nudge` 显著下降；M1-5 快照按预期变化（nudge 分支收敛） | M0-3 | 未开始 |
 
 **出口**：G2、G5 达成；`npm test` + `typecheck` 全绿；回归记录归档。
 拆分按 a→e 分 PR 小步走，每步快照必须不变。
@@ -109,7 +110,8 @@
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
 | M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
-| M3-7 | TUI 输入层修复：Tab 卡住 / cursor 消失 / 审批锁全局输入，纳入 ink-testing-library 回归 | 修复 + 回归用例 | 已知输入 bug 清零且有回归用例 | — | 未开始 |
+| M3-7 | TUI 输入 + 渲染修复（用户可感知：界面不再错位）：① 输入层：Tab 卡住 / cursor 消失 / 审批锁全局输入；② **渲染层：CJK 宽度计算全覆盖**——`ui.tsx` 已有 displayWidth 函数但仍有路径裸用 `.length`/`truncate`，中文重内容溢出换行顶歪两侧分割线；全部宽度计算收口到同一函数 | 修复 + ink-testing-library 回归用例 | 已知输入 bug 清零；中文重内容渲染快照（长中文消息 + 多 agent 满栏）分割线对齐 | — | 未开始 |
+| M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus 等）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示 | 命令层扩充（拆分后落在 TUI glue，薄层） | 命令解析单测（别名/容错/相似提示）；/help 输出快照 | M1-6e | 未开始 |
 
 **出口**：G3、G4 达成；完整演示「线上 bad case → HealthMetric 归档 → QA-TL 分析 → 改 prompt → 门禁 → 回滚」；**1.0 发布**，发布前跑全量回归并归档最终回归记录。
 
@@ -144,4 +146,5 @@
 | 2026-07-20 | v1.0.0 | **M0-6 回归通过置「完成」**：`formatMetricsReport` 纯函数 + 空/过滤/格式 3 类快照断言齐备；隔离修复实测有效（跑 smoke+pm-hierarchy 后真实 `.spawn/metrics` 零增长），清掉 15 行历史污染 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M0 里程碑出口回归通过，M0 关闭**：G7 达成。出口脚本 `scripts/m0-exit-check.mts`（真实组件、非 test 进程）驱动一次完整多 agent 任务，7 类关键事件（protocol_repaired/parse_failed/fallback/fact_merged/tool_call_repeated/trace_failed/trace_completed）全部落真实 store 并经 `/metrics` 渲染。回归记录归档 `regression/M0-20260720.md`。递延项（4 个 index.tsx 闭包内埋点断言）转 M1-6e | Claude (QA) |
 | 2026-07-20 | v1.0.0 | M1-1 实现完成，状态置为「待回归」：15 个工具接入结构化参数规格，`executeTool` 执行前强校验并返回 `tool_error(invalid_args)`，失败写 `tool_arg_schema_failed` HealthMetric；工具 prompt 参数列由规格生成；主链路 executeTool 调用补 agentId 归因；registry/coding 专项 68/68 绿，`typecheck` 通过，`npm test` 420/420 绿。注意：当前未新增外部 Zod 依赖，用内部 schema 达成同等运行时合同；“超过 2 次后 handup”建议随 M1-6b ToolRuntime 拆分做可测治理 | 执行侧 |
+| 2026-07-21 | v1.0.0 | **用户体验反馈登记为任务**（来源：真实使用反馈）：① "催了才干活" → BC-001 归档 + 新增 M1-7（acted 判定统一 + prompt 强化，`no_progress_nudge` 为验收指标）；② 中文重内容分割线错位 → M3-7 扩充渲染层（CJK 宽度收口 + 对齐快照）；③ 指令僵硬 → 新增 M3-8（命令补齐/容错/相似提示/help 分组） | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M1-1 回归通过置「完成」**（QA 复核 420/420 绿 + typecheck 干净）：校验器为真结构化校验（类型/必填/枚举/min-max/alias 归一/未知字段拒绝），字段级错误 + 期望规格回给模型可自纠，指标带 agentId 归因。**接受偏差**：内部 schema 替代 Zod（合同等价、零新依赖），PLAN G2 措辞同步修正；递延项「≤2 次自纠计数治理」写入 M1-6b 回归验证列。**风险提示**：CI 在远端不可绿——npm test 列表引用大量未落库文件（src/execution、src/inbound、src/runtime 部分、feishu 测试等），执行侧需整体提交一次实现代码 | Claude (QA) |
