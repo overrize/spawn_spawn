@@ -5,6 +5,7 @@
 import { EventEmitter } from "node:events";
 import type { TuiEvent, AgentRunState } from "../protocol.js";
 import { getState } from "../store.js";
+import { recordHealthMetric, type HealthMetricEventType } from "../runtime/HealthMetrics.js";
 
 // ── Auto-background 支持 ──────────────────────────────────────────────────────
 export type SpawnState = "foreground" | "background" | "done" | "none";
@@ -356,6 +357,17 @@ export class ProcessManager extends EventEmitter {
   ): void {
     const alert: PMAlert = { severity, code, agent, detail, ts: Date.now(), acked: false };
     this.alerts.push(alert);
+    const metricType = metricTypeForAlert(code);
+    if (metricType) {
+      recordHealthMetric({
+        agent_id: agent,
+        event_type: metricType,
+        severity,
+        reason: detail,
+        ts: alert.ts,
+        meta: { pmAlertCode: code },
+      });
+    }
     // 最多保留 200 条告警
     if (this.alerts.length > 200) this.alerts = this.alerts.slice(-200);
     this.emit("event", {
@@ -436,5 +448,18 @@ export class ProcessManager extends EventEmitter {
       });
     }
     return this.stats.get(agentId)!;
+  }
+}
+
+export function metricTypeForAlert(code: string): HealthMetricEventType | null {
+  switch (code) {
+    case "loop_suspected":
+      return "tool_call_repeated";
+    case "no_progress":
+      return "no_progress_nudge";
+    case "dispatch_timeout":
+      return "dispatch_timeout";
+    default:
+      return null;
   }
 }

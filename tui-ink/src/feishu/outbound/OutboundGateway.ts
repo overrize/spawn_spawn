@@ -53,7 +53,7 @@ export class OutboundGateway {
     if (!clean.trim()) return;
 
     // 5. Dispatcher (per-fragment)
-    this.getAggregator(ctx.pmId)?.onChunk(clean, format);
+    this.getAggregator(ctx.pmId)?.onChunk(clean, format, { agentId: msg.agentId });
   }
 
   /**
@@ -80,7 +80,7 @@ export class OutboundGateway {
             );
             // Artifacts are always documents; let FormatDecider confirm.
             const fmt = decideFormat(content, "document");
-            agg.onChunk(sanitize(content, fmt), fmt);
+            agg.onChunk(sanitize(content, fmt), fmt, { agentId: pmId });
           } catch (err) {
             process.stderr.write(
               `[outbound] failed to read artifact "${filePath}": ${(err as Error).message}\n`,

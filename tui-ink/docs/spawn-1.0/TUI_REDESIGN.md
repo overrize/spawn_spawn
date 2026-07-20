@@ -1,6 +1,6 @@
 # TUI 重构设计规格（单主视图）
 
-> 状态：v1 已采纳（2026-07-21，用户提案 + QA 评审）· 实现排期：M1-6e 之后（M3-7）
+> 状态：v1 冻结待回归（2026-07-21，用户提案 + QA 评审）· 实现排期：M1-6e 之后（M3-7）
 > 核心原则（定死）：**主视图永远只有一个；Plan 是输入栏上方的可展开层；状态栏永远可见。**
 
 ## 为什么重构而不是修
@@ -49,12 +49,12 @@ AgentsHome ──Enter(选中agent)──► AgentChat ──Ctrl+L──► Log
 | Tab / Shift+Tab | 下一个 / 上一个 running agent |
 | Ctrl+T | plan 收起/半展/全展循环 |
 | Ctrl+L | chat / logs 切换 |
-| `[` `]` | 主视图滚动（旧/新）【默认方案，待确认】 |
+| `[` `]` | 主视图滚动；Logs 新输入自动断开追尾，`]` 到底恢复 live |
 | / | slash command |
 | y / n | **仅审批浮层内生效** |
 | Ctrl+C | 退出 |
 
-## 设计缺口的默认方案（QA 评审补充，待用户确认，不阻塞开工）
+## 设计缺口的冻结方案
 
 1. **审批浮层**：pending approval 出现时，在 Input 上方插入高优先级浮层（顶掉 Plan 层），
    显示 agent/命令/理由，y/n 只在浮层内响应；浮层存在时状态栏显示 `⚠ 1 pending approval`。
@@ -64,6 +64,143 @@ AgentsHome ──Enter(选中agent)──► AgentChat ──Ctrl+L──► Log
 3. **旧功能键迁移**：P/F/C 取消，迁 slash：`/pause` `/fork` `/info`（并入 M3-8 命令扩充）；
    y/n 全局响应取消（只在浮层）。
 4. **滚动**：沿用 `[` `]`；Logs 视图新输入自动断开追尾，`]` 到底部恢复 live。
+
+## ASCII 设计稿
+
+### Agents Home（默认态）
+
+```text
+┌─ Spawn ───────────────────────────────────────────────────────────────────────────────┐
+│ Goal  refactor model/provider config                            kimi-k2 · web: on    │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Agents                                                                                │
+│                                                                                       │
+│  ● PM                         running   02:14   planning config split                 │
+│  ├─ ● TL-1                    running   01:32   provider/runtime design               │
+│  │  ├─ ○ W-1                  done      00:48   inspect config.ts                     │
+│  │  └─ ● W-2                  running   00:59   update tests                          │
+│  └─ ○ QA                      idle      --:--   waiting for regression                │
+│                                                                                       │
+│                                                                                       │
+│                                                                                       │
+├─ Progress ────────────────────────────────────────────────────────────────────────────┤
+│ [2/5] current: implement provider catalog resolver                  Ctrl+T plan       │
+├─ Input ───────────────────────────────────────────────────────────────────────────────┤
+│ >                                                                                     │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Running PM · TL-1 · W-2      Focus Agents      Tab next active      Esc home          │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Agent Chat
+
+```text
+┌─ Spawn / TL-1 ────────────────────────────────────────────────────────────────────────┐
+│ Goal  refactor model/provider config                            TL-1 · running       │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ PM                                                                                    │
+│ Split model catalog from role assignment config. Roles should reference model keys.   │
+│                                                                                       │
+│ TL-1                                                                                  │
+│ I found config.ts still couples model id and baseUrl inside role config.              │
+│ I am adding a provider catalog resolver and keeping role config model-ref only.        │
+│                                                                                       │
+│ W-2                                                                                   │
+│ Adding tests for missing modelRef and provider lookup fallback.                       │
+│                                                                                       │
+├─ Progress ────────────────────────────────────────────────────────────────────────────┤
+│ [2/5] current: implement provider catalog resolver                  Ctrl+T plan       │
+├─ Input ───────────────────────────────────────────────────────────────────────────────┤
+│ > ask TL-1 to check web search config too                                             │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Running PM · TL-1 · W-2      Focus TL-1      Tab next active      Esc agents          │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Plan 半展（Ctrl+T 一次）
+
+```text
+┌─ Spawn / TL-1 ────────────────────────────────────────────────────────────────────────┐
+│ ...                                                                                   │
+│ TL-1                                                                                  │
+│ I am adding a provider catalog resolver now.                                          │
+│                                                                                       │
+├─ Plan ────────────────────────────────────────────────────────────────────────────────┤
+│ [2/5] → implement provider catalog resolver                                           │
+│ next: update config.example.json · run typecheck and tests                            │
+├─ Input ───────────────────────────────────────────────────────────────────────────────┤
+│ >                                                                                     │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Running PM · TL-1 · W-2      Ctrl+T expand plan      Esc agents                       │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Plan 全展（Ctrl+T 两次，向上覆盖主视图底部）
+
+```text
+┌─ Spawn / TL-1 ────────────────────────────────────────────────────────────────────────┐
+│ Goal  refactor model/provider config                            TL-1 · running       │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ PM                                                                                    │
+│ Split model catalog from role assignment config. Roles should reference model keys.   │
+│                                                                                       │
+│ TL-1                                                                                  │
+│ I found config.ts still couples model id and baseUrl inside role config.              │
+│                                                                                       │
+├─ Plan ────────────────────────────────────────────────────────────────────────────────┤
+│ [2/5] ■■■■■■■■□□□□                                                                    │
+│                                                                                       │
+│  ✓ inspect current config                                                             │
+│  ✓ identify model/baseUrl coupling                                                    │
+│  → implement provider catalog resolver                                                │
+│  · update config.example.json                                                         │
+│  · run typecheck and tests                                                            │
+│                                                                                       │
+│ ↑/↓ select   Enter details   Ctrl+T collapse                                          │
+├─ Input ───────────────────────────────────────────────────────────────────────────────┤
+│ > ask TL-1 to check web search config too                                             │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Running PM · TL-1 · W-2      Focus Plan      Tab next active      Esc agents          │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Logs
+
+```text
+┌─ Spawn / Logs ────────────────────────────────────────────────────────────────────────┐
+│ Goal  refactor model/provider config                              events · live      │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ 12:01:08  PM      spawn TL-1        provider/runtime design                           │
+│ 12:01:11  TL-1    spawn W-1         inspect config.ts                                 │
+│ 12:01:12  TL-1    spawn W-2         update tests                                      │
+│ 12:01:19  W-1     done              found role config coupling                        │
+│ 12:01:33  W-2     tool.call         Read src/config.ts                                │
+│ 12:01:41  W-2     metric            token.usage prompt=12.1k completion=880           │
+│                                                                                       │
+├─ Progress ────────────────────────────────────────────────────────────────────────────┤
+│ [2/5] current: implement provider catalog resolver                  Ctrl+T plan       │
+├─ Input ───────────────────────────────────────────────────────────────────────────────┤
+│ >                                                                                     │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Running PM · TL-1 · W-2      Ctrl+L chat/logs      Esc agents                         │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Approval 浮层（顶掉 Plan）
+
+```text
+┌─ Spawn / TL-1 ────────────────────────────────────────────────────────────────────────┐
+│ ...                                                                                   │
+├─ Approval ────────────────────────────────────────────────────────────────────────────┤
+│ W-2 requests: Edit src/config.ts                                                      │
+│ reason: update provider catalog resolver                                              │
+│ y approve   n deny                                                                    │
+├─ Input ───────────────────────────────────────────────────────────────────────────────┤
+│ >                                                                                     │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ ⚠ 1 pending approval      Running PM · TL-1 · W-2      y/n approval only              │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ## 实现约束
 

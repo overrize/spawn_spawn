@@ -5,6 +5,8 @@ import { useEffect, useState } from "react";
 import type {
   AgentInfo, Message, TodoItem, TuiEvent, Session, LogLevel,
 } from "./protocol.js";
+import { AgentOSJournalBridge } from "./runtime/AgentOSJournalBridge.js";
+import { recordHealthMetric } from "./runtime/HealthMetrics.js";
 
 interface TokenBucket { prompt: number; completion: number }
 
@@ -32,6 +34,12 @@ interface State {
   tokenBudget: number;  // 0 = unlimited
   // Human rating request — set after agent.done, cleared after user rates or timeout
   pendingRating: { agentId: string; sessionHash: string } | null;
+  feishuConnection: {
+    enabled: boolean;
+    connected: boolean;
+    status: string;
+    updatedAt: number | null;
+  };
 }
 
 const state: State = {
@@ -56,9 +64,16 @@ const state: State = {
   sessionTokens: { prompt: 0, completion: 0 },
   tokenBudget: 0,
   pendingRating: null,
+  feishuConnection: {
+    enabled: false,
+    connected: false,
+    status: "未连接",
+    updatedAt: null,
+  },
 };
 
 const listeners = new Set<() => void>();
+const agentOSJournalBridge = new AgentOSJournalBridge();
 let _notifyPending = false;
 const notify = () => {
   if (_notifyPending) return;
@@ -103,6 +118,32 @@ export function ensureAgent(a: AgentInfo) {
 
 export function selectAgent(id: string) {
   if (state.agents.has(id)) { state.selectedAgent = id; state.scrollOffset = 0; notify(); }
+}
+
+function visibleAgentRows(): Array<string | "divider"> {
+  const nonHidden = Array.from(state.agents.values()).filter((a) => !a.hidden);
+  const activeAgents = nonHidden.filter((a) => a.state !== "done" && a.state !== "err");
+  const doneAgents = nonHidden.filter((a) => a.state === "done" || a.state === "err");
+  return [
+    ...activeAgents.map((a) => a.id),
+    ...(doneAgents.length > 0 ? ["divider" as const, ...doneAgents.map((a) => a.id)] : []),
+  ];
+}
+
+export function selectAgentVisible(id: string, maxVisible: number): void {
+  if (!state.agents.has(id)) return;
+  state.selectedAgent = id;
+  state.scrollOffset = 0;
+
+  const rows = visibleAgentRows();
+  const idx = rows.indexOf(id);
+  if (idx >= 0) {
+    const lastVisible = state.agentPaneScroll + Math.max(1, maxVisible) - 1;
+    if (idx < state.agentPaneScroll) state.agentPaneScroll = idx;
+    else if (idx > lastVisible) state.agentPaneScroll = idx - Math.max(1, maxVisible) + 1;
+    state.agentPaneScroll = Math.max(0, Math.min(state.agentPaneScroll, Math.max(0, rows.length - maxVisible)));
+  }
+  notify();
 }
 
 export function userMessage(toAgent: string, text: string) {
@@ -178,6 +219,15 @@ export function setTokenBudget(n: number): void {
   notify();
 }
 
+export function setFeishuConnection(patch: Partial<State["feishuConnection"]>): void {
+  state.feishuConnection = {
+    ...state.feishuConnection,
+    ...patch,
+    updatedAt: Date.now(),
+  };
+  notify();
+}
+
 /** Returns { prompt, completion, total } for the current session. */
 export function getSessionTokens(): { prompt: number; completion: number; total: number } {
   return {
@@ -227,6 +277,14 @@ export function updateAgentInfo(id: string, patch: Partial<AgentInfo>): void {
 }
 
 export function applyEvent(e: TuiEvent) {
+  try {
+    agentOSJournalBridge.observe(e, {
+      getAgent: (agentId) => state.agents.get(agentId),
+    });
+  } catch (err) {
+    process.stderr.write(`[AgentOSJournalBridge] observe failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
   switch (e.type) {
     case "agent.state": {
       const a = state.agents.get(e.agent);
@@ -319,6 +377,16 @@ export function applyEvent(e: TuiEvent) {
     case "agent.done": {
       const a = state.agents.get(e.agent);
       if (a) a.state = e.success ? "done" : "err";
+      recordHealthMetric({
+        agent_id: e.agent,
+        event_type: e.success ? "trace_completed" : "trace_failed",
+        severity: e.success ? "info" : "error",
+        reason: e.reason ?? (e.success ? "agent_done_success" : "agent_done_failed"),
+        meta: {
+          parent: a?.parent,
+          goal: a?.goal,
+        },
+      });
       state.stepByAgent.set(e.agent, e.reason ?? (e.success ? "done" : "failed"));
       state.pendingInputAgents.delete(e.agent);
       // Switch back to parent so the user sees PM's follow-up reply
@@ -555,4 +623,10 @@ export function _resetForTest(): void {
   state.sessionTokens = { prompt: 0, completion: 0 };
   state.tokenBudget = 0;
   state.pendingRating = null;
+  state.feishuConnection = {
+    enabled: false,
+    connected: false,
+    status: "未连接",
+    updatedAt: null,
+  };
 }

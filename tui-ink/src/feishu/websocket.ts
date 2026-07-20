@@ -5,6 +5,8 @@
 import WebSocket from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { feishuLog } from './debug.js';
+import { normalizeFeishuMessage } from '../inbound/feishu.js';
+import { BoundedMessageDeduper } from './dedupe.js';
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BOOTSTRAP_URL = 'https://open.feishu.cn/callback/ws/endpoint';
@@ -122,6 +124,8 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
 
   // Feishu uses at-least-once delivery — deduplicate by event_id
   const seenEventIds = new Set<string>();
+  // event_id can change for a retry; message_id is the stable user-message identity.
+  const seenMessageIds = new BoundedMessageDeduper(1000);
 
   let reconnectAttempt = 0;
 
@@ -191,31 +195,19 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
 
         const msgType = msgEvent.message?.message_type ?? 'unknown';
         const contentRaw = msgEvent.message?.content ?? '';
-        let text = '';
-        try {
-          const contentObj = JSON.parse(contentRaw || '{}') as Record<string, unknown>;
-          text = (contentObj['text'] as string) || '';
-          // Feishu 'post' (rich text): extract from nested zh_cn/en_us structure
-          if (!text && (msgType === 'post' || contentObj['zh_cn'] || contentObj['en_us'])) {
-            const postBody = (contentObj['zh_cn'] ?? contentObj['en_us']) as
-              { title?: string; content?: Array<Array<{ tag: string; text?: string }>> } | undefined;
-            if (postBody) {
-              const parts: string[] = [];
-              if (postBody.title) parts.push(postBody.title);
-              for (const row of postBody.content ?? []) {
-                const rowText = row.filter((e) => e.tag === 'text').map((e) => e.text ?? '').join('');
-                if (rowText) parts.push(rowText);
-              }
-              text = parts.join('\n').trim();
-            }
-          }
-        } catch {
-          text = contentRaw;
-        }
-
         const chatId = msgEvent.message?.chat_id || openId;
         const chatType = msgEvent.message?.chat_type || 'p2p';
         const messageId = msgEvent.message?.message_id ?? '';
+        const inbound = normalizeFeishuMessage({
+          openId,
+          contentRaw,
+          chatId,
+          chatType,
+          messageId,
+          messageType: msgType,
+          raw: frame,
+        });
+        const text = inbound?.text ?? '';
 
         // Always log the extracted text so we can confirm what was parsed from the message.
         log(`[recv] text="${text.slice(0, 200)}" msg_type=${msgType} chat_type=${chatType} msgId=${messageId.slice(-8)}`);
@@ -229,6 +221,11 @@ export async function startFeishuWebSocket(opts: FeishuWsOptions): Promise<void>
         }
 
         // Dedup after successful text extraction so retries of empty messages aren't blocked.
+        // Use message_id first because Feishu retries can arrive with a different event_id.
+        if (messageId && seenMessageIds.checkAndAdd(messageId)) {
+          log(`dup message_id ${messageId.slice(-8)}, skipped`);
+          return;
+        }
         if (eventId) {
           if (seenEventIds.has(eventId)) { log(`dup event ${eventId.slice(-8)}, skipped`); return; }
           seenEventIds.add(eventId);

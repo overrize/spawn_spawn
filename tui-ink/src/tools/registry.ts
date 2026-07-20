@@ -6,13 +6,19 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as https from "node:https";
 import * as http from "node:http";
+import * as os from "node:os";
 import { execSync } from "node:child_process";
+// playwright 在运行时通过动态 import() 加载，以允许未安装时不阻塞编译
+import { WorkspaceBoundary } from "../execution/WorkspaceBoundary.js";
+import { loadConfig, type WebSearchProviderConfig } from "../config.js";
+import { recordHealthMetric } from "../runtime/HealthMetrics.js";
 
 // ── 类型 ──────────────────────────────────────────────────────────────────────
 
 export interface ToolResult {
   ok: boolean;
   output: string;
+  code?: "invalid_args" | string;
 }
 
 export type AgentRole = "Leader" | "Worker";
@@ -26,6 +32,29 @@ export interface ToolDef {
   execute(args: Record<string, unknown>): Promise<ToolResult>;
 }
 
+type ToolArgType = "string" | "int" | "number" | "boolean" | "enum";
+
+interface ToolArgField {
+  readonly type: ToolArgType;
+  readonly required?: boolean;
+  readonly aliases?: readonly string[];
+  readonly values?: readonly string[];
+  readonly default?: unknown;
+  readonly min?: number;
+  readonly max?: number;
+  readonly allowEmpty?: boolean;
+  readonly description?: string;
+}
+
+type ToolArgSpec = Record<string, ToolArgField>;
+
+function resolveToolPath(inputPath: string): ToolResult & { path?: string } {
+  const boundary = new WorkspaceBoundary(process.cwd(), [os.tmpdir()]);
+  const resolved = boundary.resolveInside(inputPath);
+  if (!resolved.ok) return err(`Path rejected: ${resolved.reason} (${resolved.path})`);
+  return { ok: true, output: "", path: resolved.path };
+}
+
 // ── 工具实现 ──────────────────────────────────────────────────────────────────
 
 const Read: ToolDef = {
@@ -35,8 +64,11 @@ const Read: ToolDef = {
   needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
-    const p = String(a.file_path ?? a.path ?? "");
-    if (!p) return err("missing path");
+    const inputPath = String(a.file_path ?? a.path ?? "");
+    if (!inputPath) return err("missing path");
+    const rp = resolveToolPath(inputPath);
+    if (!rp.ok || !rp.path) return rp;
+    const p = rp.path;
     const raw = fs.readFileSync(p, "utf8");
     const lines = raw.split("\n");
     const start = Math.max(0, typeof a.offset === "number" ? a.offset : 0);
@@ -55,10 +87,13 @@ const Write: ToolDef = {
   needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
-    const p = String(a.file_path ?? a.path ?? "");
+    const inputPath = String(a.file_path ?? a.path ?? "");
     const content = String(a.content ?? "");
-    if (!p) return err("missing path");
-    fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
+    if (!inputPath) return err("missing path");
+    const rp = resolveToolPath(inputPath);
+    if (!rp.ok || !rp.path) return rp;
+    const p = rp.path;
+    fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, content, "utf8");
     return ok(`Written ${content.length} chars to ${p}`);
   },
@@ -71,14 +106,17 @@ const Edit: ToolDef = {
   needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
-    const p = String(a.file_path ?? a.path ?? "");
+    const inputPath = String(a.file_path ?? a.path ?? "");
     const oldStr = String(a.old_string ?? "");
     const newStr = String(a.new_string ?? "");
-    if (!p) return err("missing path");
+    if (!inputPath) return err("missing path");
+    const rp = resolveToolPath(inputPath);
+    if (!rp.ok || !rp.path) return rp;
+    const p = rp.path;
     // Empty old_string → create new file (only if it doesn't exist)
     if (!oldStr) {
       if (fs.existsSync(p)) return err("old_string is empty but file exists; use Write to overwrite");
-      fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
+      fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, newStr, "utf8");
       return ok(`Created ${p} (${newStr.length} chars)`);
     }
@@ -160,7 +198,9 @@ const Grep: ToolDef = {
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
     const pat  = String(a.pattern ?? "");
-    const dir  = String(a.path ?? ".");
+    const rp = resolveToolPath(String(a.path ?? "."));
+    if (!rp.ok || !rp.path) return rp;
+    const dir = rp.path;
     const glob = a.glob ? `--glob ${JSON.stringify(String(a.glob))}` : "";
     const ci   = a.case_insensitive ? "-i" : "";
     const ctx  = typeof a.context === "number" ? `-C ${a.context}` : "";
@@ -182,7 +222,9 @@ const Glob: ToolDef = {
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
     const pat  = String(a.pattern ?? "**/*");
-    const base = String(a.path ?? ".");
+    const rp = resolveToolPath(String(a.path ?? "."));
+    if (!rp.ok || !rp.path) return rp;
+    const base = rp.path;
     try {
       const out = String(execSync(
         `rg --files --glob ${JSON.stringify(pat)} ${JSON.stringify(base)}`,
@@ -203,7 +245,9 @@ const LS: ToolDef = {
   needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
-    const dir = String(a.path ?? ".");
+    const rp = resolveToolPath(String(a.path ?? "."));
+    if (!rp.ok || !rp.path) return rp;
+    const dir = rp.path;
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     const lines = entries.map((e) => `${e.isDirectory() ? "d" : "f"} ${e.name}`);
     return ok(lines.join("\n") || "(empty)");
@@ -285,24 +329,40 @@ const WebFetch: ToolDef = {
 
 const WebSearch: ToolDef = {
   name: "WebSearch",
-  description: "互联网搜索，返回标题+URL+摘要列表（需设置 BRAVE_SEARCH_API_KEY 或 SERPER_API_KEY）",
+  description: "互联网搜索，返回标题+URL+摘要列表（配置 web.search provider，兼容 BRAVE_SEARCH_API_KEY 或 SERPER_API_KEY）",
   argsSchema: "query(str), count?(int default:5)",
   needsApproval: false,
   roles: new Set(["Leader", "Worker"]),
   async execute(a) {
     const query = String(a.query ?? "");
     if (!query) return err("missing query");
-    const count = Math.min(typeof a.count === "number" ? a.count : 5, 10);
+    const appCfg = loadConfig();
+    const configuredMax = appCfg.web.search.maxResults ?? 5;
+    const count = Math.min(typeof a.count === "number" ? a.count : configuredMax, 10);
+    const timeoutMs = Math.max(1, appCfg.web.search.timeoutSeconds ?? 10) * 1000;
 
-    const braveKey = process.env.BRAVE_SEARCH_API_KEY;
-    const serperKey = process.env.SERPER_API_KEY;
+    let provider: WebSearchProviderConfig | undefined;
+    if (appCfg.web.search.enabled) {
+      provider = appCfg.web.providers[appCfg.web.search.provider];
+    }
+    if (!provider && process.env.BRAVE_SEARCH_API_KEY) {
+      provider = { type: "brave", apiKey: process.env.BRAVE_SEARCH_API_KEY };
+    }
+    if (!provider && process.env.SERPER_API_KEY) {
+      provider = {
+        type: "serper",
+        apiKey: process.env.SERPER_API_KEY,
+        ...(process.env.SERPER_HL ? { hl: process.env.SERPER_HL } : {}),
+        ...(process.env.SERPER_GL ? { gl: process.env.SERPER_GL } : {}),
+      };
+    }
 
-    if (braveKey) {
+    if (provider?.type === "brave") {
       try {
         const json = await new Promise<string>((resolve, reject) => {
           const req = https.get(
             `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`,
-            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey } },
+            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": provider.apiKey } },
             (res) => {
               const chunks: Buffer[] = [];
               res.on("data", (c: Buffer) => chunks.push(c));
@@ -310,7 +370,7 @@ const WebSearch: ToolDef = {
               res.on("error", reject);
             },
           );
-          req.setTimeout(10_000, () => { req.destroy(); reject(new Error("timeout")); });
+          req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
           req.on("error", reject);
         });
         const data = JSON.parse(json);
@@ -324,13 +384,19 @@ const WebSearch: ToolDef = {
       }
     }
 
-    if (serperKey) {
+    if (provider?.type === "serper") {
       try {
         const json = await new Promise<string>((resolve, reject) => {
-          const body = JSON.stringify({ q: query, num: count });
+          const body = JSON.stringify({
+            q: query,
+            num: count,
+            ...(provider.hl ? { hl: provider.hl } : {}),
+            ...(provider.gl ? { gl: provider.gl } : {}),
+          });
+          const endpoint = new URL(provider.baseUrl ?? "https://google.serper.dev/search");
           const req = https.request(
-            { hostname: "google.serper.dev", path: "/search", method: "POST",
-              headers: { "X-API-KEY": serperKey, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+            { hostname: endpoint.hostname, path: endpoint.pathname + endpoint.search, method: "POST",
+              headers: { "X-API-KEY": provider.apiKey, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
             (res) => {
               const chunks: Buffer[] = [];
               res.on("data", (c: Buffer) => chunks.push(c));
@@ -338,7 +404,7 @@ const WebSearch: ToolDef = {
               res.on("error", reject);
             },
           );
-          req.setTimeout(10_000, () => { req.destroy(); reject(new Error("timeout")); });
+          req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("timeout")); });
           req.on("error", reject);
           req.write(body);
           req.end();
@@ -354,7 +420,7 @@ const WebSearch: ToolDef = {
       }
     }
 
-    return err("WebSearch requires BRAVE_SEARCH_API_KEY or SERPER_API_KEY in environment. Set one in .env file.");
+    return err("WebSearch requires config.web.providers entry or BRAVE_SEARCH_API_KEY/SERPER_API_KEY in environment. Use /web connect serper <apiKey>.");
   },
 };
 
@@ -367,13 +433,26 @@ function decodeBuffer(buf: Buffer | string): string {
 
 /** Detect the project's test command and framework from the working directory. */
 export function detectTestCommand(dir: string): { cmd: string; framework: string } | null {
+  if (
+    fs.existsSync(path.join(dir, "bun.lock")) ||
+    fs.existsSync(path.join(dir, "bun.lockb")) ||
+    fs.existsSync(path.join(dir, "bunfig.toml"))
+  ) {
+    return { cmd: "bun test", framework: "bun" };
+  }
+
   // Node.js: package.json scripts.test
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
       scripts?: Record<string, string>;
+      packageManager?: string;
     };
+    if (pkg.packageManager?.startsWith("bun@")) {
+      return { cmd: "bun test", framework: "bun" };
+    }
     const testScript = pkg.scripts?.test;
     if (testScript && !testScript.startsWith("echo ")) {
+      if (/\bbun\s+test\b/.test(testScript)) return { cmd: "bun test", framework: "bun" };
       return { cmd: "npm test", framework: "node" };
     }
   } catch { /* no package.json */ }
@@ -442,6 +521,12 @@ export function parseTestCounts(output: string, framework: string): TestCounts {
           r.failed = num(/\|\s+(\d+)\s+failed/);
         }
       }
+      break;
+    case "bun":
+      // Bun: " 5 pass\n 1 fail\n Ran 6 tests"
+      r.passed = num(/^\s*(\d+)\s+pass(?:es|ed)?\b/im);
+      r.failed = num(/^\s*(\d+)\s+fail(?:s|ed)?\b/im);
+      r.skipped = num(/^\s*(\d+)\s+skip(?:s|ped)?\b/im);
       break;
 
   }
@@ -660,16 +745,125 @@ export function rgNotFoundResult(e: unknown, tool: "Glob" | "Grep"): ToolResult 
   return err(`ripgrep (rg) not found — install it or ${hint}`);
 }
 
+const BrowserControl: ToolDef = {
+  name: "BrowserControl",
+  description: "基于 Playwright 控制本地浏览器，可导航 URL、截图、提取文本",
+  argsSchema: "url(str, 页面URL), action(enum:'navigate'|'screenshot'|'text'), wait_until?(str default:'load'), timeout?(ms default:30000)",
+  needsApproval: true,
+  roles: new Set(["Leader", "Worker"]),
+  async execute(a) {
+    const url = String(a.url ?? "");
+    const action = String(a.action ?? "navigate");
+    const waitUntil = String(a.wait_until ?? "load");
+    const timeout = typeof a.timeout === "number" ? a.timeout : 30000;
+    if (!url && action !== "screenshot") return err("missing url");
+    if (!["navigate", "screenshot", "text"].includes(action)) return err(`unknown action: ${action}`);
+    let browser;
+    try {
+      const { chromium } = await import("playwright");
+      browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      if (action === "navigate") {
+        await page.goto(url, { waitUntil: waitUntil as any, timeout });
+        return ok(`Navigated to ${url}`);
+      }
+      if (url) await page.goto(url, { waitUntil: waitUntil as any, timeout });
+      if (action === "screenshot") {
+        const buf = await page.screenshot({ fullPage: true });
+        const b64 = buf.toString("base64");
+        return ok(`data:image/png;base64,${b64}`);
+      }
+      if (action === "text") {
+        const text = await page.innerText("body");
+        return ok(text.slice(0, 50000));
+      }
+      return err("unreachable");
+    } catch (e: any) {
+      return err(`BrowserControl failed: ${e.message ?? e}`);
+    } finally {
+      if (browser) await browser.close();
+    }
+  },
+};
+
 // ── 注册表（Map 保证 O(1) 查找）─────────────────────────────────────────────
 
 const ALL_TOOLS: ToolDef[] = [
   Read, Write, Edit, Bash, Grep, Glob, LS, Think, WebFetch, WebSearch,
-  RunTests, TypeCheck, CodeMap, FindReferences,
+  RunTests, TypeCheck, CodeMap, FindReferences, BrowserControl,
 ];
 
 export const TOOL_REGISTRY = new Map<string, ToolDef>(
   ALL_TOOLS.map((t) => [t.name, t]),
 );
+
+export const TOOL_ARG_SPECS: ReadonlyMap<string, ToolArgSpec> = new Map<string, ToolArgSpec>([
+  ["Read", {
+    path: { type: "string", aliases: ["file_path"] },
+    offset: { type: "int", required: false, min: 0 },
+    limit: { type: "int", required: false, min: 1, max: 10_000, default: 200 },
+  }],
+  ["Write", {
+    path: { type: "string", aliases: ["file_path"] },
+    content: { type: "string", allowEmpty: true },
+  }],
+  ["Edit", {
+    path: { type: "string", aliases: ["file_path"] },
+    old_string: { type: "string", allowEmpty: true },
+    new_string: { type: "string", allowEmpty: true },
+  }],
+  ["Bash", {
+    command: { type: "string", aliases: ["cmd"] },
+    timeout: { type: "int", required: false, min: 1, max: 300_000, default: 60_000 },
+  }],
+  ["Grep", {
+    pattern: { type: "string" },
+    path: { type: "string", required: false, default: "." },
+    glob: { type: "string", required: false },
+    case_insensitive: { type: "boolean", required: false },
+    context: { type: "int", required: false, min: 0, max: 50 },
+  }],
+  ["Glob", {
+    pattern: { type: "string", required: false, default: "**/*" },
+    path: { type: "string", required: false, default: "." },
+  }],
+  ["LS", {
+    path: { type: "string", required: false, default: "." },
+  }],
+  ["Think", {
+    thought: { type: "string" },
+  }],
+  ["WebFetch", {
+    url: { type: "string" },
+    max_chars: { type: "int", required: false, min: 1, max: 20_000, default: 6_000 },
+  }],
+  ["WebSearch", {
+    query: { type: "string" },
+    count: { type: "int", required: false, min: 1, max: 10, default: 5 },
+  }],
+  ["RunTests", {
+    project_dir: { type: "string", required: false, aliases: ["dir"], default: "." },
+  }],
+  ["TypeCheck", {
+    project_dir: { type: "string", required: false, aliases: ["dir"], default: "." },
+  }],
+  ["CodeMap", {
+    dir: { type: "string", required: false, default: "." },
+    depth: { type: "int", required: false, min: 1, max: 4, default: 2 },
+  }],
+  ["FindReferences", {
+    symbol: { type: "string" },
+    dir: { type: "string", required: false, default: "." },
+    glob: { type: "string", required: false },
+  }],
+  ["BrowserControl", {
+    url: { type: "string", required: false },
+    action: { type: "enum", required: false, values: ["navigate", "screenshot", "text"], default: "navigate" },
+    wait_until: { type: "string", required: false, default: "load" },
+    timeout: { type: "int", required: false, min: 1, max: 120_000, default: 30_000 },
+  }],
+]);
 
 // ── 公开 API ──────────────────────────────────────────────────────────────────
 
@@ -680,8 +874,12 @@ export function getToolsForRole(role: AgentRole): ToolDef[] {
 
 const MAX_TOOL_OUTPUT = 12_000; // chars; keep single result small to control context growth
 
+interface ExecuteToolOptions {
+  agentId?: string;
+}
+
 /** 执行工具 — 替换原 index.tsx 里的 switch-case */
-export async function executeTool(name: string, args: unknown): Promise<ToolResult> {
+export async function executeTool(name: string, args: unknown, options: ExecuteToolOptions = {}): Promise<ToolResult> {
   const tool = TOOL_REGISTRY.get(name);
   if (!tool) {
     return {
@@ -689,8 +887,32 @@ export async function executeTool(name: string, args: unknown): Promise<ToolResu
       output: `Unknown tool "${name}". Available: ${ALL_TOOLS.map((t) => t.name).join(", ")}`,
     };
   }
+  const validated = validateToolArgs(name, args);
+  if (!validated.ok) {
+    recordHealthMetric({
+      agent_id: options.agentId ?? "tool-registry",
+      event_type: "tool_arg_schema_failed",
+      severity: "warn",
+      reason: `${name}: ${validated.errors.join("; ")}`,
+      meta: {
+        tool: name,
+        errors: validated.errors,
+        args_preview: previewArgs(args),
+      },
+    });
+    return {
+      ok: false,
+      code: "invalid_args",
+      output: [
+        `tool_error(invalid_args): ${name} arguments failed schema validation`,
+        ...validated.errors.map((error) => `- ${error}`),
+        `Expected: ${formatArgSpec(TOOL_ARG_SPECS.get(name) ?? {}, tool.argsSchema)}`,
+        "Fix the JSON arguments and retry. After two invalid attempts, hand up with the blocker instead of looping.",
+      ].join("\n"),
+    };
+  }
   try {
-    const result = await tool.execute((args ?? {}) as Record<string, unknown>);
+    const result = await tool.execute(validated.args);
     return { ...result, output: middleTruncate(result.output, MAX_TOOL_OUTPUT) };
   } catch (e: any) {
     return { ok: false, output: `Error in ${name}: ${e.message?.slice(0, 500) ?? "unknown"}` };
@@ -719,7 +941,7 @@ export function toolNeedsApproval(name: string, args?: unknown): boolean {
 export function buildToolSchemaBlock(role: AgentRole): string {
   const tools = getToolsForRole(role);
   const rows = tools.map((t) =>
-    `| ${t.name.padEnd(5)} | ${t.argsSchema.padEnd(52)} | ${t.needsApproval ? "**true** " : "false    "} | ${t.description} |`
+    `| ${t.name.padEnd(5)} | ${formatArgSpec(TOOL_ARG_SPECS.get(t.name) ?? {}, t.argsSchema).padEnd(52)} | ${t.needsApproval ? "**true** " : "false    "} | ${t.description} |`
   );
   const header = [
     "| 工具  | 参数                                                 | needs_approval | 说明 |",
@@ -753,6 +975,133 @@ export function buildToolSchemaBlock(role: AgentRole): string {
 function ok(output: string): ToolResult  { return { ok: true,  output }; }
 function err(output: string): ToolResult { return { ok: false, output }; }
 
+type ValidationResult =
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; errors: string[] };
+
+export function validateToolArgs(name: string, args: unknown): ValidationResult {
+  const spec = TOOL_ARG_SPECS.get(name);
+  if (!spec) {
+    return { ok: true, args: isPlainRecord(args) ? args : {} };
+  }
+  if (!isPlainRecord(args)) {
+    return { ok: false, errors: ["args must be a JSON object"] };
+  }
+
+  const errors: string[] = [];
+  const normalized: Record<string, unknown> = {};
+  const allowed = new Set<string>();
+  for (const [field, rule] of Object.entries(spec)) {
+    allowed.add(field);
+    for (const alias of rule.aliases ?? []) allowed.add(alias);
+  }
+
+  for (const key of Object.keys(args)) {
+    if (!allowed.has(key)) errors.push(`unknown field "${key}"`);
+  }
+
+  for (const [field, rule] of Object.entries(spec)) {
+    const found = readField(args, field, rule.aliases);
+    if (!found.exists) {
+      if (rule.required !== false) {
+        errors.push(`missing required field "${field}"`);
+      }
+      continue;
+    }
+
+    const value = found.value;
+    if (value === undefined || value === null) {
+      if (rule.required === false) continue;
+      errors.push(`field "${field}" is required`);
+      continue;
+    }
+    const checked = validateValue(field, value, rule);
+    if (checked.ok) normalized[field] = checked.value;
+    else errors.push(checked.error);
+  }
+
+  return errors.length ? { ok: false, errors } : { ok: true, args: normalized };
+}
+
+function validateValue(
+  field: string,
+  value: unknown,
+  rule: ToolArgField,
+): { ok: true; value: unknown } | { ok: false; error: string } {
+  if (rule.type === "string") {
+    if (typeof value !== "string") return { ok: false, error: `field "${field}" must be string` };
+    if (!rule.allowEmpty && value.trim() === "") return { ok: false, error: `field "${field}" must be non-empty string` };
+    return { ok: true, value };
+  }
+  if (rule.type === "boolean") {
+    if (typeof value !== "boolean") return { ok: false, error: `field "${field}" must be boolean` };
+    return { ok: true, value };
+  }
+  if (rule.type === "int") {
+    if (typeof value !== "number" || !Number.isInteger(value)) return { ok: false, error: `field "${field}" must be integer` };
+    return validateNumberRange(field, value, rule);
+  }
+  if (rule.type === "number") {
+    if (typeof value !== "number" || !Number.isFinite(value)) return { ok: false, error: `field "${field}" must be number` };
+    return validateNumberRange(field, value, rule);
+  }
+  if (rule.type === "enum") {
+    if (typeof value !== "string") return { ok: false, error: `field "${field}" must be string enum` };
+    if (!rule.values?.includes(value)) {
+      return { ok: false, error: `field "${field}" must be one of: ${(rule.values ?? []).join(", ")}` };
+    }
+    return { ok: true, value };
+  }
+  return { ok: false, error: `field "${field}" has unsupported schema type` };
+}
+
+function validateNumberRange(
+  field: string,
+  value: number,
+  rule: ToolArgField,
+): { ok: true; value: number } | { ok: false; error: string } {
+  if (rule.min !== undefined && value < rule.min) return { ok: false, error: `field "${field}" must be >= ${rule.min}` };
+  if (rule.max !== undefined && value > rule.max) return { ok: false, error: `field "${field}" must be <= ${rule.max}` };
+  return { ok: true, value };
+}
+
+function readField(
+  args: Record<string, unknown>,
+  field: string,
+  aliases: readonly string[] = [],
+): { exists: true; value: unknown } | { exists: false } {
+  if (Object.prototype.hasOwnProperty.call(args, field)) return { exists: true, value: args[field] };
+  for (const alias of aliases) {
+    if (Object.prototype.hasOwnProperty.call(args, alias)) return { exists: true, value: args[alias] };
+  }
+  return { exists: false };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatArgSpec(spec: ToolArgSpec, fallback: string): string {
+  const entries = Object.entries(spec);
+  if (!entries.length) return fallback;
+  return entries.map(([name, rule]) => {
+    const optional = rule.required === false ? "?" : "";
+    const type = rule.type === "enum"
+      ? `enum:${(rule.values ?? []).map((v) => `'${v}'`).join("|")}`
+      : rule.type;
+    const suffix = rule.default !== undefined ? ` default:${String(rule.default)}` : "";
+    return `${name}${optional}(${type}${suffix})`;
+  }).join(", ");
+}
+
+function previewArgs(args: unknown): string {
+  try {
+    return JSON.stringify(args)?.slice(0, 500) ?? "";
+  } catch {
+    return String(args).slice(0, 500);
+  }
+}
+
 function middleTruncate(s: string, max = 20_000): string {
   if (s.length <= max) return s;
   const head = Math.floor(max / 2);
@@ -763,5 +1112,3 @@ function middleTruncate(s: string, max = 20_000): string {
     + `\n\n[... ${skipped.length} chars / ~${skippedLines} lines truncated ...]\n\n`
     + s.slice(-tail);
 }
-
-// FIXME: old block not found

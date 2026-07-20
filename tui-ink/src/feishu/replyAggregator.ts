@@ -23,20 +23,22 @@ export class FeishuReplyAggregator {
   private sending = false;
   private flushTimer?: NodeJS.Timeout;
   private currentFormat: "text" | "document" = "text";
+  private responderAgentId?: string;
 
   constructor(
     /** Called when format="text" — sends a text bubble. */
-    private readonly sendBubble: (text: string) => Promise<void>,
+    private readonly sendBubble: (text: string, meta?: { agentId?: string }) => Promise<void>,
     /** Called when format="document" — routes to card renderer. */
-    private readonly sendCard: (text: string) => Promise<void>,
+    private readonly sendCard: (text: string, meta?: { agentId?: string }) => Promise<void>,
     private readonly opts: { idleFlushMs?: number } = {},
   ) {}
 
   /** Called for each PM message.to=user fragment this turn. */
-  onChunk(text: string, format?: "text" | "document"): void {
+  onChunk(text: string, format?: "text" | "document", meta?: { agentId?: string }): void {
     if (!text) return;
     // Once a turn is marked document it stays document (cannot downgrade mid-turn).
     if (format === "document") this.currentFormat = "document";
+    if (meta?.agentId) this.responderAgentId = meta.agentId;
     this.buffer.push(text);
     // Debounce fallback: flush automatically after idleFlushMs of silence.
     clearTimeout(this.flushTimer);
@@ -61,12 +63,14 @@ export class FeishuReplyAggregator {
     // regardless of format tag (guards against PM forgetting to mark long reports).
     const format: "text" | "document" =
       this.currentFormat === "document" || text.length > 800 ? "document" : "text";
+    const meta = { agentId: this.responderAgentId };
     this.buffer = [];
     this.currentFormat = "text"; // reset for next turn
+    this.responderAgentId = undefined;
     try {
       if (text) {
-        if (format === "document") await this.sendCard(text);
-        else await this.sendBubble(text);
+        if (format === "document") await this.sendCard(text, meta);
+        else await this.sendBubble(text, meta);
       }
     } catch (err) {
       feishuLog(
@@ -84,5 +88,6 @@ export class FeishuReplyAggregator {
     this.buffer = [];
     this.sending = false;
     this.currentFormat = "text";
+    this.responderAgentId = undefined;
   }
 }

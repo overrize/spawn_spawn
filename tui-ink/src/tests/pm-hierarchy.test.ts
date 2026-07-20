@@ -19,9 +19,10 @@ import * as os from "node:os";
 
 import { applyEvent, getState, ensureAgent, updateAgentInfo, _resetForTest } from "../store.js";
 import type { TuiEvent } from "../protocol.js";
-import { ProcessManager } from "../pm/ProcessManager.js";
-import { SecretaryProxy } from "../memory/SecretaryProxy.js";
+import { ProcessManager, metricTypeForAlert } from "../pm/ProcessManager.js";
+import { factSimilarity, factTokens, SecretaryProxy } from "../memory/SecretaryProxy.js";
 import { createMemory, loadMemory, loadMemoryByHash } from "../memory/MemoryStore.js";
+import { HealthMetricsStore, setHealthMetricsStoreForTests } from "../runtime/HealthMetrics.js";
 
 // ── 临时 memory 目录 ─────────────────────────────────────────────────────────
 
@@ -192,6 +193,45 @@ describe("ProcessManager — setFanout", () => {
     pm.setFanout(17);
     assert.equal(pm.getMaxFanout(), 16, "最大值裁剪为 16");
     pm.destroy();
+  });
+});
+
+describe("ProcessManager — health metrics", () => {
+  it("maps pm.alert codes to HealthMetric event types", () => {
+    assert.equal(metricTypeForAlert("loop_suspected"), "tool_call_repeated");
+    assert.equal(metricTypeForAlert("no_progress"), "no_progress_nudge");
+    assert.equal(metricTypeForAlert("dispatch_timeout"), "dispatch_timeout");
+    assert.equal(metricTypeForAlert("illegal_message"), null);
+  });
+
+  it("repeated tool calls emit tool_call_repeated HealthMetric", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pm-health-metrics-"));
+    const store = new HealthMetricsStore(dir);
+    setHealthMetricsStoreForTests(store);
+    const pm = new ProcessManager();
+
+    try {
+      for (let i = 0; i < 10; i++) {
+        pm.observe({
+          v: 1,
+          type: "tool.call",
+          agent: "worker-loop",
+          id: `tc-${i}`,
+          name: "Read",
+          args: { path: "src/index.tsx" },
+          needs_approval: false,
+        });
+      }
+
+      const metrics = store.readMetrics();
+      assert.equal(metrics.length, 1);
+      assert.equal(metrics[0]!.event_type, "tool_call_repeated");
+      assert.equal(metrics[0]!.agent_id, "worker-loop");
+      assert.equal(metrics[0]!.meta?.pmAlertCode, "loop_suspected");
+    } finally {
+      pm.destroy();
+      setHealthMetricsStoreForTests(null);
+    }
   });
 });
 
@@ -382,6 +422,161 @@ describe("SecretaryProxy — ingestChildMemory（PM-Secretary 聚合）", () => 
     const loaded = loadMemory("pm-destroyed")!;
     assert.equal(loaded.working_set.facts.length, 0,
       "destroyed 的 SecretaryProxy 不应写入 facts");
+  });
+});
+
+describe("SecretaryProxy — health metrics", () => {
+  it("factSimilarity handles CJK near-duplicates and keeps unrelated Chinese facts apart", () => {
+    assert.ok(
+      factTokens("配置文件在 src/config.ts，需要保留 baseUrl").has("配置"),
+      "CJK tokenizer should emit character n-grams",
+    );
+    assert.ok(
+      factSimilarity("配置文件在 src/config.ts，需要保留 baseUrl", "src/config.ts 的配置文件必须保留 baseUrl") >= 0.72,
+      "near-duplicate Chinese facts should be similar",
+    );
+    assert.ok(
+      factSimilarity("配置文件在 src/config.ts，需要保留 baseUrl", "飞书消息需要按 open_id 做会话隔离") < 0.72,
+      "unrelated Chinese facts should not merge",
+    );
+    assert.ok(
+      factSimilarity("registry exposes twelve tools for agents", "the registry exposes twelve tools for agents today") >= 0.72,
+      "English near-duplicate facts should still merge",
+    );
+  });
+
+  it("CJK duplicate fact corpus reaches at least 90% recall at merge threshold", () => {
+    const pairs: Array<[string, string]> = [
+      ["配置文件在 src/config.ts，需要保留 baseUrl", "src/config.ts 的配置文件必须保留 baseUrl"],
+      ["飞书消息按 open_id 建立 PM 会话", "飞书消息需要按 open_id 建立 PM 会话"],
+      ["测试失败时不能直接 agent.done(success:true)", "测试失败后不能直接 agent.done success"],
+      ["WebSearch 默认供应商配置在 config.web.search.provider", "WebSearch 默认 provider 配置在 config.web.search.provider"],
+      ["ProcessManager 对重复工具调用发 loop_suspected", "ProcessManager 会对重复工具调用触发 loop_suspected"],
+      ["resume 缺失 memory 时写 resume_context_missing 指标", "resume memory 缺失时会写 resume_context_missing 指标"],
+      ["Worker 不能直接 message.to=user", "Worker 不可以直接 message.to=user"],
+      ["HealthMetric 写入 .spawn/metrics/health-metrics.jsonl", "HealthMetric 默认写入 .spawn/metrics/health-metrics.jsonl"],
+      ["工具参数错误会返回 tool_error invalid_args", "工具参数错误时返回 tool_error invalid_args"],
+      ["SecretaryProxy 会把相似 fact 合并并增加 weight", "SecretaryProxy 会合并相似 fact 并增加 weight"],
+    ];
+    const hits = pairs.filter(([a, b]) => factSimilarity(a, b) >= 0.72);
+    assert.ok(hits.length >= 9, `expected >=9/10 CJK duplicate recall, got ${hits.length}/10`);
+  });
+
+  it("Chinese near-duplicate facts merge through SecretaryProxy", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secretary-health-cjk-merge-"));
+    const store = new HealthMetricsStore(dir);
+    setHealthMetricsStoreForTests(store);
+    const mem = createMemory({
+      agentId: "w-cjk-merge",
+      agentType: "WORKER",
+      parentChain: ["pm", "tl"],
+      depth: 2,
+      model: "m",
+      roleName: "Worker",
+    });
+    const sec = new SecretaryProxy(mem);
+
+    try {
+      sec.observe({ v: 1, type: "tool.result", agent: "w-cjk-merge", id: "tc-1", ok: true, output: "配置文件在 src/config.ts，需要保留 baseUrl" });
+      sec.observe({ v: 1, type: "tool.result", agent: "w-cjk-merge", id: "tc-2", ok: true, output: "src/config.ts 的配置文件必须保留 baseUrl" });
+
+      const facts = sec.getMemory().working_set.facts;
+      assert.equal(facts.length, 1);
+      assert.equal(facts[0]!.weight, 2);
+      assert.equal(store.readMetrics()[0]?.event_type, "memory_fact_merged");
+    } finally {
+      sec.destroy();
+      setHealthMetricsStoreForTests(null);
+    }
+  });
+
+  it("unrelated Chinese facts stay separate", () => {
+    const mem = createMemory({
+      agentId: "w-cjk-distinct",
+      agentType: "WORKER",
+      parentChain: ["pm", "tl"],
+      depth: 2,
+      model: "m",
+      roleName: "Worker",
+    });
+    const sec = new SecretaryProxy(mem);
+
+    try {
+      sec.observe({ v: 1, type: "tool.result", agent: "w-cjk-distinct", id: "tc-1", ok: true, output: "配置文件在 src/config.ts，需要保留 baseUrl" });
+      sec.observe({ v: 1, type: "tool.result", agent: "w-cjk-distinct", id: "tc-2", ok: true, output: "飞书消息需要按 open_id 做会话隔离" });
+
+      assert.equal(sec.getMemory().working_set.facts.length, 2);
+    } finally {
+      sec.destroy();
+    }
+  });
+
+  it("similar facts emit memory_fact_merged HealthMetric", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secretary-health-merge-"));
+    const store = new HealthMetricsStore(dir);
+    setHealthMetricsStoreForTests(store);
+    const mem = createMemory({
+      agentId: "w-merge-metric",
+      agentType: "WORKER",
+      parentChain: ["pm", "tl"],
+      depth: 2,
+      model: "m",
+      roleName: "Worker",
+    });
+    const sec = new SecretaryProxy(mem);
+
+    try {
+      sec.observe({ v: 1, type: "tool.result", agent: "w-merge-metric", id: "tc-1", ok: true, output: "same fact value" });
+      sec.observe({ v: 1, type: "tool.result", agent: "w-merge-metric", id: "tc-2", ok: true, output: "same fact value" });
+
+      const metrics = store.readMetrics();
+      assert.equal(metrics.length, 1);
+      assert.equal(metrics[0]!.event_type, "memory_fact_merged");
+      assert.equal(metrics[0]!.agent_id, "w-merge-metric");
+      assert.equal(metrics[0]!.meta?.src, "tool:tc-2");
+    } finally {
+      sec.destroy();
+      setHealthMetricsStoreForTests(null);
+    }
+  });
+
+  it("fact GC emits memory_fact_dropped HealthMetric", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secretary-health-drop-"));
+    const store = new HealthMetricsStore(dir);
+    setHealthMetricsStoreForTests(store);
+    const mem = createMemory({
+      agentId: "w-drop-metric",
+      agentType: "WORKER",
+      parentChain: ["pm", "tl"],
+      depth: 2,
+      model: "m",
+      roleName: "Worker",
+    });
+    const oldTs = Date.now() - 31 * 24 * 60 * 60 * 1000;
+    for (let i = 0; i < 51; i++) {
+      mem.working_set.facts.push({
+        id: `old-${i}`,
+        text: `old fact ${i}`,
+        src: "test",
+        ts: oldTs,
+        weight: 1,
+      });
+    }
+    const sec = new SecretaryProxy(mem);
+
+    try {
+      sec.observe({ v: 1, type: "tool.result", agent: "w-drop-metric", id: "tc-new", ok: true, output: "fresh unique fact" });
+
+      const metrics = store.readMetrics();
+      assert.equal(metrics.length, 1);
+      assert.equal(metrics[0]!.event_type, "memory_fact_dropped");
+      assert.equal(metrics[0]!.agent_id, "w-drop-metric");
+      assert.equal(metrics[0]!.meta?.beforeCount, 52);
+      assert.equal(metrics[0]!.meta?.afterCount, 50);
+    } finally {
+      sec.destroy();
+      setHealthMetricsStoreForTests(null);
+    }
   });
 });
 

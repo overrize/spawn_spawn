@@ -19,6 +19,21 @@ function shadowAppend(line: string) {
 const USE_LOG_CONTEXT = !!process.env.USE_LOG_CONTEXT;
 const SHADOW_MODE     = process.env.SHADOW_MODE !== "false"; // default true when USE_LOG_CONTEXT is on
 
+type ChatHistoryMessage = { role: "user" | "assistant"; content: string };
+
+function sanitizeHistoryMessages(
+  messages: ChatHistoryMessage[],
+  agentId: string,
+  source: string,
+): ChatHistoryMessage[] {
+  const kept = messages.filter((m) => typeof m.content === "string" && m.content.trim() !== "");
+  const dropped = messages.length - kept.length;
+  if (dropped > 0) {
+    process.stderr.write(`[${agentId}] dropped ${dropped} empty history message(s) from ${source}\n`);
+  }
+  return kept;
+}
+
 if (USE_LOG_CONTEXT) {
   logShadowStart(SHADOW_MODE);
 }
@@ -82,11 +97,15 @@ export class HttpConvAgent extends EventEmitter {
     }
     // Fork snapshot: directly inject history, skip file-based resume.
     if (cfg.initialMessages?.length) {
-      this.messages = cfg.initialMessages.slice();
+      this.messages = sanitizeHistoryMessages(cfg.initialMessages.slice(), cfg.id, "initialMessages");
     } else if (cfg.resumeFrom) {
       const RESUME_CHAR_BUDGET = 60_000; // ≈ 15K tokens — leaves room for system prompt + new response
       const raw = loadMessages(cfg.resumeFrom);
-      const all = raw.map((m) => ({ role: m.role, content: m.content }));
+      const all = sanitizeHistoryMessages(
+        raw.map((m) => ({ role: m.role, content: m.content })),
+        cfg.id,
+        `resume:${cfg.resumeFrom}`,
+      );
       const total = all.reduce((s, m) => s + m.content.length, 0);
       process.stderr.write(`[${cfg.id}] resume: loaded ${all.length} msgs (${total} chars) from "${cfg.resumeFrom}"\n`);
       if (total <= RESUME_CHAR_BUDGET) {
@@ -153,7 +172,7 @@ export class HttpConvAgent extends EventEmitter {
 
   /** Returns a defensive copy of the in-memory message history. */
   getMessages(): Array<{ role: "user" | "assistant"; content: string }> {
-    return this.messages.slice();
+    return sanitizeHistoryMessages(this.messages, this.cfg.id, "getMessages").slice();
   }
 
   /**
@@ -162,7 +181,7 @@ export class HttpConvAgent extends EventEmitter {
    * base PM turns can reference them.
    */
   appendHistory(entries: Array<{ role: "user" | "assistant"; content: string }>): void {
-    this.messages.push(...entries);
+    this.messages.push(...sanitizeHistoryMessages(entries, this.cfg.id, "appendHistory"));
   }
 
   /**
@@ -174,9 +193,10 @@ export class HttpConvAgent extends EventEmitter {
     messages: Array<{ role: "user" | "assistant"; content: string }>,
     maxChars: number,
   ): Array<{ role: "user" | "assistant"; content: string }> {
-    let total = messages.reduce((s, m) => s + m.content.length, 0);
-    if (total <= maxChars) return messages.slice();
-    const result = [...messages];
+    const cleanMessages = messages.filter((m) => typeof m.content === "string" && m.content.trim() !== "");
+    let total = cleanMessages.reduce((s, m) => s + m.content.length, 0);
+    if (total <= maxChars) return cleanMessages.slice();
+    const result = [...cleanMessages];
     let i = 1; // keep index 0 (initial context)
     while (total > maxChars && i < result.length - 4) {
       total -= result[i]!.content.length;
@@ -234,6 +254,12 @@ export class HttpConvAgent extends EventEmitter {
     if (this._busy) { this._queue.push(text); return; }
     this._busy = true;
     this._abort = new AbortController();
+    if (!text.trim()) {
+      process.stderr.write(`[${this.cfg.id}] ignored empty user message\n`);
+      this._busy = false;
+      this._abort = null;
+      return;
+    }
     this.messages.push({ role: "user", content: text });
     // S2: notify SecretaryProxy for message persistence
     this.emit("_raw_message", { role: "user", content: text });
@@ -332,9 +358,13 @@ export class HttpConvAgent extends EventEmitter {
       }
       if (lastErr) throw lastErr;
 
-      this.messages.push({ role: "assistant", content: fullText });
-      // S2: notify SecretaryProxy for message persistence
-      this.emit("_raw_message", { role: "assistant", content: fullText });
+      if (fullText.trim()) {
+        this.messages.push({ role: "assistant", content: fullText });
+        // S2: notify SecretaryProxy for message persistence
+        this.emit("_raw_message", { role: "assistant", content: fullText });
+      } else {
+        process.stderr.write(`[${this.cfg.id}] empty assistant response not persisted\n`);
+      }
 
       if (LOG) process.stderr.write(`[${this.cfg.id}] raw response:\n${fullText}\n---\n`);
 
@@ -396,7 +426,7 @@ export class HttpConvAgent extends EventEmitter {
   // the most recent messages. Drops the oldest middle messages first.
   private _trimmedHistory(): typeof this.messages {
     const MAX_CHARS = 80_000;
-    const msgs = this.messages;
+    const msgs = sanitizeHistoryMessages(this.messages, this.cfg.id, "request");
     let total = msgs.reduce((s, m) => s + m.content.length, 0);
     if (total <= MAX_CHARS) return msgs;
     // Always keep index 0 (initial user task) and never drop the last 4 messages.
@@ -494,7 +524,7 @@ export class HttpConvAgent extends EventEmitter {
     const sysMsg = this.cfg.systemPrompt
       ? [{ role: "system" as const, content: this.cfg.systemPrompt }]
       : [];
-    const body = JSON.stringify({
+    const requestBody: Record<string, unknown> = {
       model: pc.model,
       max_tokens: pc.maxTokens ?? resolveMaxTokens(this.cfg.role, this.cfg.depth),
       messages: [
@@ -503,7 +533,9 @@ export class HttpConvAgent extends EventEmitter {
       ],
       stream: true,
       stream_options: { include_usage: true },
-    });
+    };
+    if (pc.reasoningEffort) requestBody.reasoning_effort = pc.reasoningEffort;
+    const body = JSON.stringify(requestBody);
 
     const t0 = Date.now();
     const stream = await this._doStream(

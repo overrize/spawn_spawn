@@ -1,24 +1,49 @@
 {
-  "agents": {
-    "leader": {
-      "provider": "openai",
-      "baseUrl": "https://api.deepseek.com",
-      "model": "deepseek-chat",
+  "models": {
+    "claude": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
       "apiKey": "sk-YOUR_KEY_HERE"
     },
-    "secretary": {
+    "kimi": {
       "provider": "openai",
-      "baseUrl": "https://api.deepseek.com",
-      "model": "deepseek-chat",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "model": "kimi-k2.6",
       "apiKey": "sk-YOUR_KEY_HERE"
     },
-    "worker": {
+    "deepseek": {
       "provider": "openai",
       "baseUrl": "https://api.deepseek.com",
       "model": "deepseek-chat",
       "apiKey": "sk-YOUR_KEY_HERE"
     }
   },
-  "palette": "paper",
-  "layout": "v1"
+  "agents": {
+    "leader": { "model": "claude" },
+    "worker": { "model": "kimi", "maxTokens": 4096 },
+    "secretary": { "model": "deepseek", "maxTokens": 2048 }
+  },
+  "web": {
+    "search": {
+      "enabled": true,
+      "provider": "serper",
+      "maxResults": 5,
+      "timeoutSeconds": 10
+    },
+    "providers": {
+      "serper": {
+        "type": "serper",
+        "apiKey": "SERPER_KEY_HERE",
+        "hl": "zh-cn"
+      },
+      "brave": {
+        "type": "brave",
+        "apiKey": "BRAVE_KEY_HERE"
+      }
+    }
+  },
+  "server": {
+    "port": 3001,
+    "enabled": true
+  }
 }

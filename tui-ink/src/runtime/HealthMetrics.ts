@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export type HealthMetricRole = "PM" | "Leader" | "Worker" | "Secretary" | "System";
@@ -138,7 +139,7 @@ export class HealthMetricsStore {
 let defaultStore: HealthMetricsStore | null = null;
 
 export function getHealthMetricsStore(): HealthMetricsStore {
-  defaultStore ??= new HealthMetricsStore();
+  defaultStore ??= new HealthMetricsStore(defaultMetricsDir());
   return defaultStore;
 }
 
@@ -155,6 +156,52 @@ export function recordHealthMetric(input: HealthMetricInput): HealthMetric | nul
     process.stderr.write(`[HealthMetrics] append failed: ${err instanceof Error ? err.message : String(err)}\n`);
     return null;
   }
+}
+
+export function formatMetricsReport(metrics: HealthMetric[], filter?: string): string {
+  const normalizedFilter = filter?.trim();
+  const filtered = normalizedFilter
+    ? metrics.filter((metric) => metric.event_type === normalizedFilter || metric.agent_id === normalizedFilter)
+    : metrics;
+  const recent = filtered.slice(-20).reverse();
+  if (recent.length === 0) {
+    return normalizedFilter ? `暂无匹配 HealthMetric: ${normalizedFilter}` : "暂无 HealthMetric";
+  }
+
+  const counts = new Map<string, number>();
+  for (const metric of filtered) {
+    counts.set(metric.event_type, (counts.get(metric.event_type) ?? 0) + 1);
+  }
+  const summary = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 8)
+    .map(([type, count]) => `${type}:${count}`)
+    .join("  ");
+  const lines = [
+    `── metrics${normalizedFilter ? ` (${normalizedFilter})` : ""}: ${filtered.length} total ──`,
+    summary ? `summary: ${summary}` : "summary: (empty)",
+    "",
+    ...recent.map((metric) => {
+      const when = new Date(metric.ts).toISOString();
+      const reason = metric.reason.replace(/\s+/g, " ").slice(0, 120);
+      return `[${when}] ${metric.severity} ${metric.event_type} @${metric.agent_id} - ${reason}`;
+    }),
+  ];
+  return lines.join("\n");
+}
+
+function defaultMetricsDir(): string | undefined {
+  if (!isNodeTestProcess()) return undefined;
+  return path.join(os.tmpdir(), `spawn-health-metrics-test-${process.pid}`);
+}
+
+function isNodeTestProcess(): boolean {
+  return Boolean(process.env.NODE_TEST_CONTEXT) ||
+    process.argv.some((arg) =>
+      arg === "--test" ||
+      arg.includes("src/tests/") ||
+      arg.includes("src\\tests\\"),
+    );
 }
 
 export function makeHealthMetric(input: HealthMetricInput): HealthMetric {

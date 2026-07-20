@@ -15,7 +15,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { render, useApp, useInput, useStdin, Box, Text } from "ink";
-import { PassThrough } from "node:stream";
+import { Transform } from "node:stream";
 import { execSync, spawnSync, spawn as nodeSpawn } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -24,8 +24,9 @@ import * as crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { HttpConvAgent } from "./adapters/httpAgent.js";
+import { startHttpServer } from "./server/httpServer.js";
 import {
-  TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar, EffortBar,
+  TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar, EffortBar, ModelBar,
   EFFORT_LEVELS, type Effort,
   DagView, VDivider, PaletteContext, PALETTES,
 } from "./ui.js";
@@ -35,10 +36,22 @@ import {
   resumeAgent, updateAgentInfo, clearDoneAgents, markPendingInput, pruneAgents, setTokenBudget,
   selectAgentVisible,
   setPendingRating, clearPendingRating,
+  setFeishuConnection,
 } from "./store.js";
 import type { TuiEvent, LogLevel } from "./protocol.js";
-import { loadConfig, savePalette, saveLayout, saveAgentConfig, PROVIDER_PRESETS } from "./config.js";
-import type { PaletteName, ProviderConfig } from "./config.js";
+import {
+  loadConfig,
+  savePalette,
+  saveLayout,
+  getAgentProviderConfig,
+  isAgentConfigRole,
+  resolveModelConfigInput,
+  saveAgentModel,
+  saveModelConfig,
+  saveWebSearchProvider,
+  saveWebSearchSelection,
+} from "./config.js";
+import type { PaletteName, AgentConfigRole, WebSearchProviderType } from "./config.js";
 import { SecretaryProxy } from "./memory/SecretaryProxy.js";
 import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, deleteAgentMemory, topFactsByWeight, loadSessions } from "./memory/MemoryStore.js";
 import { ProcessManager } from "./pm/ProcessManager.js";
@@ -63,7 +76,9 @@ import { OutboundGateway } from "./feishu/outbound/OutboundGateway.js";
 import { TaskScheduler } from "./runtime/TaskScheduler.js";
 import { ConversationRuntime } from "./runtime/ConversationRuntime.js";
 import { TurnController } from "./runtime/TurnController.js";
-import { classifyFollowup } from "./runtime/FollowupRouter.js";
+import { classifyFollowup, isStatusQuery } from "./runtime/FollowupRouter.js";
+import { getCursorAnchorSequence } from "./runtime/CursorAnchor.js";
+import { formatMetricsReport, getHealthMetricsStore, recordHealthMetric } from "./runtime/HealthMetrics.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -95,6 +110,17 @@ function buildSystemPrompt(
     const mem = loadMemory(resumedMemoryId);
     if (!mem) {
       process.stderr.write(`[resume] WARN: loadMemory("${resumedMemoryId}") returned null — no context injected\n`);
+      recordHealthMetric({
+        agent_id: agentId,
+        event_type: "resume_context_missing",
+        severity: "warn",
+        reason: `loadMemory("${resumedMemoryId}") returned null`,
+        meta: {
+          resumedMemoryId,
+          role,
+          goal: goal?.slice(0, 300),
+        },
+      });
     }
     if (mem) {
       const budgetKb = mem.dispatch?.memory_quota_kb ?? 60;
@@ -128,6 +154,9 @@ function buildSystemPrompt(
   }
 
   const cfg = loadConfig();
+  const leaderCfg = getAgentProviderConfig(cfg, "leader");
+  const workerCfg = getAgentProviderConfig(cfg, "worker");
+  const secretaryCfg = getAgentProviderConfig(cfg, "secretary");
   return tpl
     .replace(/\{\{AGENT_ID\}\}/g, agentId)
     .replace(/\{\{ROLE\}\}/g, role)
@@ -136,9 +165,9 @@ function buildSystemPrompt(
     .replace(/\{\{PARENT_ID\}\}/g, "—")
     .replace(/\{\{CWD\}\}/g, process.cwd())
     .replace(/\{\{AGENT_LIST\}\}/g, Array.from(agents.keys()).join(", ") || "(仅你自己)")
-    .replace(/\{\{WORKER_MODEL\}\}/g, cfg.agents.worker.model)
-    .replace(/\{\{LEADER_MODEL\}\}/g, cfg.agents.leader.model)
-    .replace(/\{\{SECRETARY_MODEL\}\}/g, cfg.agents.secretary.model);
+    .replace(/\{\{WORKER_MODEL\}\}/g, workerCfg.model)
+    .replace(/\{\{LEADER_MODEL\}\}/g, leaderCfg.model)
+    .replace(/\{\{SECRETARY_MODEL\}\}/g, secretaryCfg.model);
 }
 function readIfExists(p: string): string {
   try { return fs.readFileSync(p, "utf8"); } catch { return `(missing: ${p})`; }
@@ -148,6 +177,10 @@ function readIfExists(p: string): string {
 const agents = new Map<string, HttpConvAgent>();
 const secretaries = new Map<string, SecretaryProxy>(); // agentId → Secretary
 const pm = new ProcessManager();
+// Start HTTP REST API server (configurable via .env or default port 3001)
+const serverPort = parseInt(process.env.SERVER_PORT ?? "3001", 10);
+const serverEnabled = process.env.SERVER_ENABLED !== "false";
+startHttpServer({ port: serverPort, enabled: serverEnabled });
 const scheduledTasks = new TaskScheduler();
 // Feishu: open_id → pmId (e.g. "feishu-a1b2c3d4")
 const feishuSessions = new Map<string, string>();
@@ -306,16 +339,25 @@ function killAgent(id: string, _reason = "interrupted"): void {
   // which returns the agent to ready state so the user can resend immediately.
 }
 
+function replaceAgentForResume(id: string): void {
+  agents.get(id)?.kill?.();
+  agents.delete(id);
+  globalBus.unregisterAgent(id);
+  secretaries.get(id)?.destroy();
+  secretaries.delete(id);
+  killedAgents.delete(id);
+}
+
 // ── 飞书桥接 ───────────────────────────────────────────────────────────────
 // Starts the Feishu WebSocket and routes messages to per-user PM sessions.
 // Safe to call from both useEffect (auto-startup) and /feishu command (runtime).
 function connectFeishu(appId: string, appSecret: string): void {
   if (feishuConnected) {
-    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-      text: "⚡ 飞书 WebSocket 已在运行中，无需重复连接。" } as TuiEvent);
+    setFeishuConnection({ enabled: true, connected: true, status: "已连接" });
     return;
   }
   feishuConnected = true;
+  setFeishuConnection({ enabled: true, connected: false, status: "连接中" });
   process.env.FEISHU_APP_ID = appId;
   process.env.FEISHU_APP_SECRET = appSecret;
   const tokenManager = new TokenManager();
@@ -326,6 +368,7 @@ function connectFeishu(appId: string, appSecret: string): void {
   feishuBridge.subscribe(createCardRenderer(tokenManager));
 
   const cfg = loadConfig();
+  const leaderProviderCfg = getAgentProviderConfig(cfg, "leader");
   const conversationRuntimeShadow = new ConversationRuntime({
     maxConcurrent: FEISHU_MAX_CONCURRENT,
     autoDrainOnComplete: false,
@@ -368,6 +411,31 @@ function connectFeishu(appId: string, appSecret: string): void {
         .then((rid) => { task.reactionId = rid; })
         .catch(() => {});
     }
+  };
+
+  const buildBusyStatusReply = (openIdLocal: string, pmId: string): string => {
+    const state = getState();
+    const base = state.agents.get(pmId);
+    const queueLen = feishuMsgQueue.get(pmId)?.length ?? 0;
+    const overflowLen = feishuPendingQueue.get(openIdLocal)?.length ?? 0;
+    const forkIds = Array.from(feishuForks.get(openIdLocal) ?? []);
+    const descendants = Array.from(state.agents.values())
+      .filter((agent) => agent.parent === pmId || forkIds.includes(agent.id))
+      .filter((agent) => agent.state === "run" || agent.state === "idle")
+      .slice(0, 4);
+    const activeText = descendants.length > 0
+      ? descendants.map((agent) => `${agent.id}(${agent.state}${agent.sub ? `: ${agent.sub}` : ""})`).join(" / ")
+      : "暂无子任务";
+    const taskId = pmCurrentTask.get(pmId);
+    const lines = [
+      "当前还在处理上一轮任务，我先给你状态，不把这条插进业务队列。",
+      `base: ${base?.name ?? pmId} ${base?.state ?? "unknown"}${base?.sub ? ` - ${base.sub}` : ""}`,
+      `活跃子任务: ${activeText}`,
+      `base 追问队列: ${queueLen} 条；并发溢出队列: ${overflowLen} 条；并发 fork: ${forkIds.length} 个`,
+    ];
+    if (taskId) lines.push(`当前任务 ID: ${taskId}`);
+    lines.push("建议：要开新工作请用「新任务 ...」；要追问上一轮可继续短句。");
+    return lines.join("\n");
   };
 
   // createAggregator: one aggregator per PM session.
@@ -573,7 +641,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       role: "Leader",
       state: "idle",
       sub: "并发任务",
-      model: cfg.agents.leader.model,
+      model: leaderProviderCfg.model,
     });
 
     feishuBridge.emit({ type: 'task_spawned', taskId: task.taskId, agentPath: 'PM', title: '🔀 PM fork' });
@@ -669,7 +737,7 @@ function connectFeishu(appId: string, appSecret: string): void {
       feishuReplyTarget.set(pmId, rt);
       startTask(pmId, rt, anchorMsgId);
       ensureAgent({ id: pmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
-        sub: "飞书会话", model: cfg.agents.leader.model });
+        sub: "飞书会话", model: leaderProviderCfg.model });
       feishuAggregators.set(pmId, createAggregator(pmId));
       userMessage(pmId, text);
       feishuLog(`[feishu-pm-inject] new session → PM ${pmId} firstMessage="${text.slice(0, 120)}" (len=${text.length})`);
@@ -709,6 +777,20 @@ function connectFeishu(appId: string, appSecret: string): void {
       );
       if (a instanceof HttpConvAgent) {
         if (feishuBusy.has(existingPmId)) {
+          if (isStatusQuery(text)) {
+            const statusText = buildBusyStatusReply(openId, existingPmId);
+            feishuLog(
+              `[FeishuStatus] immediate busy status for ${existingPmId}` +
+              ` text="${text.slice(0, 80)}"`,
+            );
+            if (anchorMsgId) {
+              replyToMessageWithText(anchorMsgId, statusText, tokenManager).catch((err) => {
+                feishuLog(`[FeishuStatus] reply failed: ${err instanceof Error ? err.message : String(err)}`);
+              });
+            }
+            return;
+          }
+
           // Keep obvious follow-ups on the same PM history. Independent messages
           // can still fork for full-duplex concurrency.
           const followup = classifyFollowup(text);
@@ -766,7 +848,7 @@ function connectFeishu(appId: string, appSecret: string): void {
           feishuReplyTarget.set(newPmId, rt);
           startTask(newPmId, rt, anchorMsgId);
           ensureAgent({ id: newPmId, name: `飞书:${openId.slice(-4)}`, role: "Leader", state: "idle",
-            sub: "飞书会话", model: cfg.agents.leader.model });
+            sub: "飞书会话", model: leaderProviderCfg.model });
           feishuAggregators.set(newPmId, createAggregator(newPmId));
           userMessage(newPmId, text);
           startLeaderAgent({ id: newPmId, firstMessage: text, promptFile: "pm",
@@ -807,8 +889,17 @@ function connectFeishu(appId: string, appSecret: string): void {
     appId,
     appSecret,
     onStatus: (msg: string) => {
-      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-        text: `[飞书WS] ${msg}` } as TuiEvent);
+      const connected = msg.includes("connected");
+      const disconnected =
+        msg.includes("closed") ||
+        msg.includes("error:") ||
+        msg.includes("bootstrap failed") ||
+        msg.includes("max reconnect attempts reached");
+      setFeishuConnection({
+        enabled: true,
+        connected: connected ? true : disconnected ? false : getState().feishuConnection.connected,
+        status: msg,
+      });
     },
     onMessage: (openId: string, text: string, chatId: string, chatType: string, messageId: string) => {
       feishuLog(
@@ -829,8 +920,11 @@ function connectFeishu(appId: string, appSecret: string): void {
     },
   }).catch((err: unknown) => {
     feishuConnected = false; // allow retry after failure
-    applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-      text: `❌ 飞书 WebSocket 连接失败: ${err instanceof Error ? err.message : String(err)}` } as TuiEvent);
+    setFeishuConnection({
+      enabled: true,
+      connected: false,
+      status: `连接失败: ${err instanceof Error ? err.message : String(err)}`,
+    });
     feishuLog(`[FeishuWS] startup failed: ${err instanceof Error ? err.message : String(err)}`);
   });
 }
@@ -843,7 +937,8 @@ function startLeaderAgent(opts: LeaderOpts): void {
   }
 
   const cfg = loadConfig();
-  const model = opts.model ?? cfg.agents.leader.model ?? MODEL;
+  const leaderProviderCfg = getAgentProviderConfig(cfg, "leader");
+  const model = opts.model ?? leaderProviderCfg.model ?? MODEL;
   const isRoot = !opts.parentId;
   const promptFile = opts.promptFile ?? (isRoot ? "pm" : "leader");
 
@@ -877,7 +972,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
   const a = new HttpConvAgent({
     id: opts.id,
     role: "Leader",
-    providerCfg: { ...cfg.agents.leader, model },
+    providerCfg: { ...leaderProviderCfg, model },
     systemPrompt,
     resumeFrom: opts.isForkedTask ? undefined : opts.resumedMemoryId,
     initialMessages: opts.initialMessages,
@@ -902,7 +997,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
         stop_conditions: ["user.quit"],
       },
     });
-    const sec = new SecretaryProxy(mem);
+    const sec = new SecretaryProxy(mem, { startNewSession: !existingMem });
     secretaries.set(opts.id, sec);
     return sec;
   })();
@@ -1065,13 +1160,34 @@ function startLeaderAgent(opts: LeaderOpts): void {
 
     if (e.type === "message" && !checkMessageLegal(e)) return;
 
+    // Non-root leaders/TLs do not own the Feishu/user reply channel. If a TL
+    // writes message.to=user, relay it to its parent PM instead so the final
+    // artifact is not lost behind the OutboundGateway's active-child filter.
+    if (e.type === "message" && opts.parentId && e.to === "user") {
+      const redirected = { ...e, to: opts.parentId } as typeof e;
+      process.stderr.write(`[${opts.id}] redirected message.to=user → ${opts.parentId}\n`);
+      applyEvent(redirected);
+      pm.observe(redirected);
+      secretary?.observe(redirected);
+      reportedToParent = true;
+      turnShadow.markParentReport();
+      const parentAgent = agents.get(opts.parentId);
+      if (parentAgent instanceof HttpConvAgent && !killedAgents.has(opts.parentId)) {
+        parentAgent.sendCommand({
+          type: "user.message",
+          text: `[${opts.id}→${opts.parentId}] ${e.text}`,
+        });
+      }
+      return;
+    }
+
     // Approve/reject destructive Bash from a child agent
     if (e.type === "tool.approved" || e.type === "tool.rejected") {
       const pending = leaderApprovalQueue.get(e.id);
       if (pending) {
         leaderApprovalQueue.delete(e.id);
         if (e.type === "tool.approved") {
-          executeTool(pending.toolName, pending.toolArgs).then((r) => {
+          executeTool(pending.toolName, pending.toolArgs, { agentId: pending.workerChildId }).then((r) => {
             if (getState().agents.get(pending.workerChildId)?.state === "done" || killedAgents.has(pending.workerChildId)) {
               process.stderr.write(`[${pending.workerChildId}] dropped Bash-approval tool.result — agent done during execution\n`);
               return;
@@ -1300,7 +1416,7 @@ function startLeaderAgent(opts: LeaderOpts): void {
         const batch = toolQueue.splice(0);
         setImmediate(async () => {
           if (getState().agents.get(opts.id)?.state === "done" || killedAgents.has(opts.id)) return;
-          const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
+          const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args, { agentId: opts.id })));
           // Defer delivery via setImmediate so the I/O phase can drain SSE events (including
           // agent.done from the LLM stream) before we re-check and deliver. A microtask
           // continuation here would fire BEFORE pending SSE I/O, missing a concurrent agent.done.
@@ -1516,7 +1632,10 @@ function startLeaderAgent(opts: LeaderOpts): void {
   a.sendCommand({ type: "user.message", text: initMsg });
 }
 
-function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
+function startWorker(
+  e: Extract<TuiEvent, { type: "spawn" }>,
+  opts: { resumedMemoryId?: string; firstMessage?: string } = {},
+): void {
   if (agents.has(e.child)) return;
 
   // Leader role: delegate to startLeaderAgent (Tech Lead pattern)
@@ -1561,13 +1680,14 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   }
 
   const cfg = loadConfig();
-  const workerModel = e.model ?? cfg.agents.worker.model;
+  const baseWorkerProviderCfg = getAgentProviderConfig(cfg, "worker");
+  const workerModel = e.model ?? baseWorkerProviderCfg.model;
   if (!workerModel) {
     applyEvent({ v: 1, type: "agent.error", agent: e.parent,
-      code: "no_worker_model", detail: "No model configured for worker — use /connect worker <preset> <model> <key>" });
+      code: "no_worker_model", detail: "No model configured for worker — use /model worker <model-name>" });
     return;
   }
-  const workerProviderCfg = { ...cfg.agents.worker, ...(e.model ? { model: e.model } : {}) };
+  const workerProviderCfg = { ...baseWorkerProviderCfg, ...(e.model ? { model: e.model } : {}) };
 
   // Compute parent depth for child's memory
   const parentDepth = getState().agents.get(e.parent) ?
@@ -1592,10 +1712,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
   }
 
   const systemPrompt = buildSystemPrompt(
-    e.role, e.child, e.goal, undefined,
+    e.role, e.child, e.goal, opts.resumedMemoryId,
     e.dispatch?.prompt_file ?? undefined,
   );
-  const a = new HttpConvAgent({ id: e.child, role: e.role, providerCfg: workerProviderCfg, systemPrompt });
+  const a = new HttpConvAgent({
+    id: e.child,
+    role: e.role,
+    providerCfg: workerProviderCfg,
+    systemPrompt,
+    resumeFrom: opts.resumedMemoryId,
+  });
   agents.set(e.child, a);
   globalBus.registerAgent(e.child, a);
 
@@ -1606,7 +1732,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     acceptance_criteria: ["agent.done"],
     stop_conditions: ["agent.done"],
   };
-  const mem = createMemory({
+  const existingMem = opts.resumedMemoryId ? loadMemory(e.child) : null;
+  const mem = existingMem ?? createMemory({
     agentId: e.child,
     agentType: e.role === "Secretary" ? "SECRETARY" : "WORKER",
     parentChain,
@@ -1615,7 +1742,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     roleName: e.role,
     dispatch,
   });
-  const secretary = new SecretaryProxy(mem);
+  const secretary = new SecretaryProxy(mem, { startNewSession: !existingMem });
   secretaries.set(e.child, secretary);
 
   // Pending tool calls emitted during one send() round — batched and executed on idle
@@ -1688,9 +1815,24 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
     const doneTodos = todos.filter((t) => t.state === "done").map((t) => t.text);
     const stuckTodo = todos.find((t) => t.state === "run" || t.state === "todo")?.text ?? "(无明确 todo)";
     const lastErr = wLastFailOutput || "(无捕获错误，疑似网络重试无产出 / 空转)";
+    const elapsedMs = Date.now() - wHardStartTs;
+    recordHealthMetric({
+      agent_id: e.child,
+      event_type: "hard_circuit_fired",
+      severity: "critical",
+      reason,
+      latency_ms: elapsedMs,
+      meta: {
+        parent: e.parent,
+        stallCount: wStallCount,
+        stuckTodo,
+        doneTodos,
+        lastError: lastErr.replace(/\s+/g, " ").slice(0, 500),
+      },
+    });
     process.stderr.write(
       `[hard-circuit] worker=${e.child} reason=${reason} stall=${wStallCount} ` +
-      `elapsed=${Math.round((Date.now() - wHardStartTs) / 1000)}s stuck-todo="${stuckTodo}" ` +
+      `elapsed=${Math.round(elapsedMs / 1000)}s stuck-todo="${stuckTodo}" ` +
       `last-error="${lastErr.replace(/\s+/g, " ").slice(0, 120)}"\n`,
     );
     a.emit("event", {
@@ -1806,6 +1948,27 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       process.stderr.write(
         `[${e.child}] completion guard: blocked agent.done(success) — RunTests shows ${wLastTestFailed} failure(s)\n`,
       );
+      recordHealthMetric({
+        agent_id: e.child,
+        event_type: "test_failed_but_claimed_done",
+        severity: "critical",
+        reason: `agent_done_success_blocked_with_${wLastTestFailed}_test_failures`,
+        meta: {
+          parent: e.parent,
+          failedTests: wLastTestFailed,
+          runTestsSummary: wLastRunTestsSummary,
+        },
+      });
+      recordHealthMetric({
+        agent_id: e.child,
+        event_type: "agent_done_blocked_by_guard",
+        severity: "warn",
+        reason: "test_failed_but_claimed_done",
+        meta: {
+          parent: e.parent,
+          failedTests: wLastTestFailed,
+        },
+      });
       setImmediate(() => {
         if (killedAgents.has(e.child) || getState().agents.get(e.child)?.state === "done") return;
         a.sendCommand({
@@ -1822,6 +1985,16 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
       process.stderr.write(
         `[${e.child}] completion guard: blocked agent.done(success) — ran test cmd but NO valid test result (attempted=${wTestAttemptedButNoResult})\n`,
       );
+      recordHealthMetric({
+        agent_id: e.child,
+        event_type: "agent_done_blocked_by_guard",
+        severity: "warn",
+        reason: "missing_valid_test_evidence",
+        meta: {
+          parent: e.parent,
+          testAttemptedButNoResult: wTestAttemptedButNoResult,
+        },
+      });
       setImmediate(() => {
         if (killedAgents.has(e.child) || getState().agents.get(e.child)?.state === "done") return;
         a.sendCommand({
@@ -2041,7 +2214,7 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
         setImmediate(async () => {
           // Guard: agent may have reached terminal state while this callback was queued.
           if (getState().agents.get(e.child)?.state === "done" || killedAgents.has(e.child)) return;
-          const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args)));
+          const results = await Promise.all(batch.map((c) => executeTool(c.name, c.args, { agentId: e.child })));
           // Defer delivery via setImmediate so the I/O phase can drain SSE events (including
           // agent.done from the LLM stream) before we re-check and deliver. A microtask
           // continuation here would fire BEFORE pending SSE I/O, missing a concurrent agent.done.
@@ -2150,19 +2323,10 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
             a.sendCommand({ type: "user.message", text: "【系统】你有未完成的 todo。立刻执行下一步：输出 step + tool.call，不要只规划。" });
           });
         } else if (hasPending) {
-          // 3 nudges failed — escalate to parent so leader can decide
+          // 3 nudges failed — terminate the worker as failed so it cannot remain
+          // idle forever and keep the parent/Feishu queue blocked.
           workerGaveUp = true;
-          const pendingTodos = todos
-            .filter((t) => t.state === "todo" || t.state === "run")
-            .map((t) => t.text)
-            .join("; ");
-          const parentAgent = agents.get(e.parent);
-          if (parentAgent instanceof HttpConvAgent) {
-            parentAgent.sendCommand({
-              type: "user.message",
-              text: `[系统-卡住] ${e.child} 经过 3 次推进仍无有效行动，任务可能超出能力范围。未完成项：${pendingTodos}。\n请立即 message→user 说明情况，并提供选项：\n① 重试（重新 spawn 同目标 worker）\n② 换策略（spawn 新 worker 用不同方法）\n③ 放弃该子任务，继续其他工作\n④ 人工介入`,
-            });
-          }
+          fireHardCircuit("nudge-exhausted");
         } else if (workerContinuations < 2) {
           // Worker processed a message but produced no output, and has no pending todos.
           workerContinuations++;
@@ -2175,7 +2339,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
             });
           });
         } else {
-          workerContinuations = 0;
+          workerGaveUp = true;
+          fireHardCircuit("silent-no-output");
         }
       }
     }
@@ -2193,8 +2358,8 @@ function startWorker(e: Extract<TuiEvent, { type: "spawn" }>): void {
 
   // Build initial message from goal + dispatch context so worker has full picture
   const dispatchCtx = e.dispatch;
-  let initMsg = e.goal;
-  if (dispatchCtx) {
+  let initMsg = opts.firstMessage ?? e.goal;
+  if (!opts.firstMessage && dispatchCtx) {
     const parts: string[] = [`任务目标：${e.goal}`];
     if (dispatchCtx.background) parts.push(`背景：${dispatchCtx.background}`);
     if (dispatchCtx.constraints?.length) parts.push(`约束：${dispatchCtx.constraints.join("；")}`);
@@ -2508,6 +2673,7 @@ function App() {
     Array.from(s.agents.entries()).filter(([, a]) => !a.hidden).map(([id]) => id));
   const sel = useStore((s) => s.selectedAgent);
   const pending = useStore((s) => s.pendingApprovals);
+  const selectedPending = pending.filter((pa) => pa.agent === sel);
   const [paletteName, setPaletteName] = useState<PaletteName>(loadConfig().palette);
   const palette = PALETTES[paletteName];
   const layout = useStore((s) => s.layout);
@@ -2515,6 +2681,7 @@ function App() {
   const agentPaneScroll  = useStore((s) => s.agentPaneScroll);
   const effort           = useStore((s) => s.effort);
   const [effortSelecting, setEffortSelecting] = useState(false);
+  const [modelSelecting, setModelSelecting] = useState(false);
   // Zen mode: hide left (AGENTS) and right (TODO) panes, keep only the centre ConvPane
   // so the conversation text can be selected/copied without sidebar columns interleaving.
   const [zenMode, setZenMode] = useState(false);
@@ -2524,6 +2691,8 @@ function App() {
   const [exitSecsLeft, setExitSecsLeft] = useState(0);
   const exitConfirm                     = exitSecsLeft > 0;
   const exitConfirmTimer                = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastExitRequestAt               = useRef(0);
+  const lastInputFocusLog               = useRef("");
   const cmdHistory      = useRef<string[]>([]);
   const historyIdx      = useRef(-1);
   const browsingHistory = useRef(false);
@@ -2554,6 +2723,142 @@ function App() {
     }
     if (changed) bumpQueue();
   }, [agentStates]);
+
+  const emitCommandMessage = (text: string) => {
+    applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text } as TuiEvent);
+  };
+
+  const selectedConfigRole = (): AgentConfigRole => {
+    const selected = getState().agents.get(getState().selectedAgent);
+    if (selected?.role === "Worker") return "worker";
+    if (selected?.role === "Secretary") return "secretary";
+    return "leader";
+  };
+
+  const showModelConfig = () => {
+    const cfg = loadConfig();
+    const roleLines = (["leader", "worker", "secretary"] as AgentConfigRole[]).map((role) => {
+      const roleCfg = cfg.agents[role];
+      const providerCfg = getAgentProviderConfig(cfg, role);
+      const base = providerCfg.baseUrl ? ` ${providerCfg.baseUrl}` : "";
+      return `${role}: ${roleCfg.model} -> ${providerCfg.provider} / ${providerCfg.model}${base}`;
+    });
+    const modelLines = Object.entries(cfg.models).map(([name, modelCfg]) => {
+      const base = modelCfg.baseUrl ? ` ${modelCfg.baseUrl}` : "";
+      return `${name}: ${modelCfg.provider} / ${modelCfg.model}${base}`;
+    });
+    emitCommandMessage(
+      `当前角色模型:\n${roleLines.join("\n")}\n\n已注册模型:\n${modelLines.join("\n")}` +
+      `\n\n用法:\n/connect <name> <preset|baseUrl> [modelId] <apiKey>\n/model <leader|worker|secretary> <name>`,
+    );
+  };
+
+  const registerModelCommand = (
+    name: string | undefined,
+    preset: string | undefined,
+    modelOrKey: string | undefined,
+    maybeApiKey: string | undefined,
+  ) => {
+    if (!name || !preset || !modelOrKey) {
+      emitCommandMessage("用法: /connect <name> <preset|baseUrl> [modelId] <apiKey>");
+      return;
+    }
+    const cfg = resolveModelConfigInput(preset, modelOrKey, maybeApiKey);
+    if (!cfg) {
+      emitCommandMessage(`缺少模型名。preset "${preset}" 没有默认模型时，请使用: /connect ${name} ${preset} <modelId> <apiKey>`);
+      return;
+    }
+    saveModelConfig(name, cfg);
+    emitCommandMessage(`模型已注册: ${name} -> ${cfg.provider} / ${cfg.model}${cfg.baseUrl ? ` ${cfg.baseUrl}` : ""} ✓`);
+  };
+
+  const switchModelCommand = (
+    role: string | undefined,
+    modelName: string | undefined,
+  ) => {
+    if (!role || !modelName) {
+      emitCommandMessage("用法: /model <leader|worker|secretary> <name>");
+      return;
+    }
+    if (!isAgentConfigRole(role)) {
+      emitCommandMessage(`未知 agent 角色 "${role}"，可用: leader, worker, secretary`);
+      return;
+    }
+    const cfg = loadConfig();
+    const modelCfg = cfg.models[modelName];
+    if (!modelCfg) {
+      emitCommandMessage(`未知模型 "${modelName}"。先用 /connect ${modelName} <preset|baseUrl> [modelId] <apiKey> 注册。`);
+      return;
+    }
+    if (!saveAgentModel(role, modelName)) {
+      emitCommandMessage(`模型切换失败: ${role} -> ${modelName}`);
+      return;
+    }
+    if (role === "leader") updateAgentInfo("pm", { model: modelCfg.model });
+    emitCommandMessage(`${role} 模型已切换: ${modelName} -> ${modelCfg.model} ✓`);
+  };
+
+  const confirmModelChoice = (role: AgentConfigRole, model: string) => {
+    const cfg = loadConfig();
+    const modelCfg = cfg.models[model];
+    if (!modelCfg || !saveAgentModel(role, model)) {
+      emitCommandMessage(`未知模型 "${model}"。先用 /connect 注册。`);
+      setModelSelecting(false);
+      return;
+    }
+    if (role === "leader") updateAgentInfo("pm", { model: modelCfg.model });
+    setModelSelecting(false);
+    emitCommandMessage(`${role} 模型已切换: ${model} -> ${modelCfg.model} ✓`);
+  };
+
+  const showWebConfig = () => {
+    const cfg = loadConfig();
+    const providerLines = Object.entries(cfg.web.providers).map(([name, provider]) => {
+      const active = name === cfg.web.search.provider ? "*" : " ";
+      const details = provider.type === "serper"
+        ? `${provider.type}${provider.hl ? ` hl=${provider.hl}` : ""}${provider.gl ? ` gl=${provider.gl}` : ""}`
+        : provider.type;
+      return `${active} ${name}: ${details} key=${provider.apiKey ? "***" : "(missing)"}`;
+    });
+    emitCommandMessage(
+      `WebSearch: ${cfg.web.search.enabled ? "enabled" : "disabled"} provider=${cfg.web.search.provider}` +
+      ` max=${cfg.web.search.maxResults ?? 5} timeout=${cfg.web.search.timeoutSeconds ?? 10}s\n` +
+      `${providerLines.length ? providerLines.join("\n") : "(no configured web providers)"}\n\n` +
+      `用法:\n/web connect <name> <serper|brave> <apiKey> [hl] [gl]\n/web provider <name>\n/web show`,
+    );
+  };
+
+  const connectWebProviderCommand = (args: string[]) => {
+    const [name, typeRaw, apiKey, hl, gl] = args;
+    if (!name || !typeRaw || !apiKey) {
+      emitCommandMessage("用法: /web connect <name> <serper|brave> <apiKey> [hl] [gl]");
+      return;
+    }
+    const type = typeRaw as WebSearchProviderType;
+    if (type !== "serper" && type !== "brave") {
+      emitCommandMessage(`未知 WebSearch 供应商 "${typeRaw}"，可用: serper, brave`);
+      return;
+    }
+    saveWebSearchProvider(name, {
+      type,
+      apiKey,
+      ...(type === "serper" && hl ? { hl } : {}),
+      ...(type === "serper" && gl ? { gl } : {}),
+    });
+    emitCommandMessage(`WebSearch 供应商已保存并启用: ${name} (${type}) ✓`);
+  };
+
+  const switchWebProviderCommand = (name: string | undefined) => {
+    if (!name) {
+      emitCommandMessage("用法: /web provider <name>");
+      return;
+    }
+    if (!saveWebSearchSelection(name)) {
+      emitCommandMessage(`未知 WebSearch 供应商 "${name}"。先用 /web connect ${name} <serper|brave> <apiKey> 注册。`);
+      return;
+    }
+    emitCommandMessage(`WebSearch 默认供应商已切换: ${name} ✓`);
+  };
 
   const COMMANDS: CmdDef[] = [
     { name: "pause",   desc: "kill the selected agent",     handler: () => { const sel = getState().selectedAgent; agents.get(sel)?.kill(); } },
@@ -2695,6 +3000,11 @@ function App() {
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
         text: `已安排 ${ev.task.id}：${new Date(runAt).toLocaleString()} 执行\n${text}` });
     } },
+    { name: "metrics", desc: "/metrics [event_type|agentId] — 查看最近 HealthMetric", handler: (args) => {
+      const filter = args[0]?.trim();
+      const text = formatMetricsReport(getHealthMetricsStore().readMetrics(), filter);
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user", text });
+    } },
     { name: "tasks", desc: "/tasks [cancel <id>] — list or cancel scheduled tasks", handler: (args) => {
       if (args[0] === "cancel" && args[1]) {
         const ev = scheduledTasks.cancel(args[1]);
@@ -2721,7 +3031,7 @@ function App() {
         return;
       }
       const id = mem.agent_id;
-      agents.get(id)?.kill?.();
+      replaceAgentForResume(id);
       selectAgent(id);
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
         text: `Resuming ${id} (hash: ${mem.session_hash ?? "?"}) from last checkpoint` });
@@ -2762,7 +3072,21 @@ function App() {
           role: "Leader", goal: mem.dispatch.background, dispatch: mem.dispatch,
         };
         applyEvent(spawnEv);
-        startWorker(spawnEv);
+        const hint = mem.tombstone.resume_hint ?? "上次 TL 会话中断";
+        const resumeHint = [
+          `[系统-恢复指令] 上次中断：${hint}`,
+          `任务背景：${mem.dispatch.background}`,
+          `请先输出 todo.set 恢复计划，然后继续推进。不要等待确认。`,
+        ].join("\n");
+        startLeaderAgent({
+          id,
+          parentId,
+          goal: mem.dispatch.background,
+          dispatch: mem.dispatch,
+          resumedMemoryId: id,
+          promptFile: "leader",
+          firstMessage: resumeHint,
+        });
       } else {
         const parentId = mem.parent_chain[mem.parent_chain.length - 1] ?? "pm";
         applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
@@ -2773,7 +3097,13 @@ function App() {
           goal: mem.dispatch.background, dispatch: mem.dispatch,
         };
         applyEvent(spawnEv);
-        startWorker(spawnEv);
+        const hint = mem.tombstone.resume_hint ?? "上次 worker 会话中断";
+        const resumeHint = [
+          `[系统-恢复指令] 上次中断：${hint}`,
+          `任务目标：${mem.dispatch.background}`,
+          `请先输出 todo.set 恢复计划，然后继续执行未完成步骤。不要等待确认。`,
+        ].join("\n");
+        startWorker(spawnEv, { resumedMemoryId: id, firstMessage: resumeHint });
       }
     } },
     { name: "palette", desc: "切换配色 paper | green | amber", handler: (args) => { const name = args[0] as PaletteName; if (name && name in PALETTES) { setPaletteName(name); savePalette(name); } } },
@@ -2808,16 +3138,37 @@ function App() {
       applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
         text: `飞书连接中... (${appId}) 凭证已保存到 .env` } as TuiEvent);
     } },
-    { name: "connect", desc: "/connect <role> <preset> <model> <apiKey> — preset: anthropic|deepseek|openai|ollama", handler: (args) => {
-      const [role, preset, model, apiKey] = args;
-      if (!role || !preset || !model || !apiKey) return;
-      if (!["leader","secretary","worker"].includes(role)) return;
-      const base = PROVIDER_PRESETS[preset] ?? { provider: "openai" as const, baseUrl: preset };
-      const cfg: ProviderConfig = { ...base, model, apiKey };
-      saveAgentConfig(role as "leader" | "secretary" | "worker", cfg);
-      if (role === "leader") updateAgentInfo("pm", { model });
-      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
-        text: `${role} 已连接 ${preset} / ${model} ✓`, } as TuiEvent);
+    { name: "model", desc: "/model [role name] — 查看/切换 leader|worker|secretary 使用的已注册模型", handler: (args) => {
+      const [role, modelName] = args;
+      if (!role) {
+        setModelSelecting(true);
+        return;
+      }
+      if (role === "show" || role === "status" || role === "ls") {
+        showModelConfig();
+        return;
+      }
+      switchModelCommand(role, modelName);
+    } },
+    { name: "connect", desc: "/connect <name> <preset|baseUrl> [modelId] <apiKey> — 注册/更新模型连接", handler: (args) => {
+      const [name, preset, modelOrKey, maybeApiKey] = args;
+      registerModelCommand(name, preset, modelOrKey, maybeApiKey);
+    } },
+    { name: "web", desc: "/web show|provider <name>|connect <name> <serper|brave> <apiKey> [hl] [gl] — 配置 WebSearch", handler: (args) => {
+      const [sub, ...rest] = args;
+      if (!sub || sub === "show" || sub === "status" || sub === "ls") {
+        showWebConfig();
+        return;
+      }
+      if (sub === "connect") {
+        connectWebProviderCommand(rest);
+        return;
+      }
+      if (sub === "provider") {
+        switchWebProviderCommand(rest[0]);
+        return;
+      }
+      emitCommandMessage("用法: /web show | /web connect <name> <serper|brave> <apiKey> [hl] [gl] | /web provider <name>");
     } },
     { name: "alerts",  desc: "/alerts [ack <code>] — PM 告警面板", handler: (args) => {
       if (args[0] === "ack" && args[1]) { pm.ackAlert(args[1]); return; }
@@ -2967,7 +3318,8 @@ function App() {
   // 启动: 注册 PM + process-monitor 占位，检查未完成会话
   useEffect(() => {
     const cfg = loadConfig();
-    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle", sub: "waiting for first message", model: cfg.agents.leader.model });
+    const leaderCfg = getAgentProviderConfig(cfg, "leader");
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle", sub: "waiting for first message", model: leaderCfg.model });
     // process-monitor: visual representation of the TypeScript ProcessManager in the agent tree
     ensureAgent({ id: "process-monitor", name: "monitor", role: "Secretary", parent: "pm", state: "idle", sub: "", model: "internal" });
 
@@ -3164,6 +3516,9 @@ function App() {
   };
 
   const requestExit = () => {
+    const now = Date.now();
+    if (now - lastExitRequestAt.current < 120) return;
+    lastExitRequestAt.current = now;
     if (exitConfirm) {
       if (exitConfirmTimer.current) clearInterval(exitConfirmTimer.current);
       exit();
@@ -3183,24 +3538,63 @@ function App() {
     }, 1000);
   };
 
+  useEffect(() => {
+    requestExitFromSignal = requestExit;
+    return () => {
+      if (requestExitFromSignal === requestExit) requestExitFromSignal = null;
+    };
+  });
+
+  useEffect(() => {
+    const focused = selectedPending.length === 0 && !modelSelecting && !effortSelecting;
+    const signature = [
+      `sel=${sel}`,
+      `focused=${focused}`,
+      `inputLen=${input.length}`,
+      `pendingSel=${selectedPending.length}`,
+      `pendingAll=${pending.length}`,
+      `model=${modelSelecting}`,
+      `effort=${effortSelecting}`,
+    ].join(" ");
+    if (signature !== lastInputFocusLog.current) {
+      lastInputFocusLog.current = signature;
+      process.stderr.write(`[input] ${signature}\n`);
+    }
+  }, [sel, input.length, selectedPending.length, pending.length, modelSelecting, effortSelecting]);
+
   // 全局快捷键
   useInput((char, key) => {
     if (key.ctrl && char === "c") { requestExit(); return; }
     if (char === "q" && !input) { requestExit(); return; }
+    if (key.tab && !input) {
+      if (modelSelecting) setModelSelecting(false);
+      if (effortSelecting) setEffortSelecting(false);
+      const ids = agentList;
+      if (!ids.length) return;
+      const idx = ids.indexOf(sel);
+      const nextIdx = idx >= 0 ? (idx + 1) % ids.length : 0;
+      const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+      selectAgentVisible(ids[nextIdx]!, maxVis);
+      return;
+    }
+    if (modelSelecting) {
+      if (key.escape) setModelSelecting(false);
+      return;
+    }
     // Only handle ESC here when InputBar is NOT focused (pending approvals).
     // When InputBar is focused (pending.length===0), it handles ESC itself via onESC prop.
     // Handling it in both places caused double "⏹ interrupted by ESC" messages.
-    if (key.escape && pending.length > 0) { handleESCInterrupt(); return; }
+    if (key.escape && selectedPending.length > 0) { handleESCInterrupt(); return; }
 
     // 待审批时 y/n 接管
-    if (pending.length > 0) {
+    if (selectedPending.length > 0) {
       if (char === "y") {
-        const m = pending[0]!;
+        const m = selectedPending[0]!;
         const toolId = m.tool_id!;
         approve(toolId);
         const agentInst = agents.get(m.agent);
         if (agentInst) {
-          executeTool(m.tool_name ?? "", m.tool_args).then((r) => {
+          executeTool(m.tool_name ?? "", m.tool_args, { agentId: m.agent }).then((r) => {
             applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: r.ok, output: r.output });
             agentInst.sendCommand({ type: "tool.result", id: toolId, ok: r.ok, output: r.output });
           });
@@ -3208,7 +3602,7 @@ function App() {
         return;
       }
       if (char === "n") {
-        const m = pending[0]!;
+        const m = selectedPending[0]!;
         const toolId = m.tool_id!;
         reject(toolId);
         const agentInst = agents.get(m.agent);
@@ -3227,11 +3621,12 @@ function App() {
       if (char === "]") { scrollBy(-3); return; } // newer = unhide 3 recent msgs
     }
 
-    // P/F/C/E shortcuts — only when not typing and no pending approvals
-    if (!input && !pending.length) {
+    // P/F/C/E/M shortcuts — only when not typing and no pending approvals
+    if (!input && selectedPending.length === 0) {
       // E — open effort selector (ESC/Enter handled inside EffortBar's own useInput)
       if (char === "E" && !effortSelecting) { setEffortSelecting(true); return; }
       if (key.escape && effortSelecting)    { setEffortSelecting(false); return; }
+      if (char === "M" && !effortSelecting) { setModelSelecting(true); return; }
       if (char === "P") {
         const id = getState().selectedAgent;
         agents.get(id)?.kill?.();
@@ -3330,7 +3725,8 @@ function App() {
       if (!ids.length) return;
       const idx = ids.indexOf(sel);
       const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
-      selectAgentVisible(ids[(idx + 1) % ids.length]!, maxVis);
+      const nextIdx = idx >= 0 ? (idx + 1) % ids.length : 0;
+      selectAgentVisible(ids[nextIdx]!, maxVis);
     }
   });
 
@@ -3374,7 +3770,30 @@ function App() {
             );
           })()
         )}
-        {effortSelecting
+        {modelSelecting
+          ? (() => {
+              const cfg = loadConfig();
+              const modelChoices = Object.keys(cfg.models);
+              const modelDescriptions = Object.fromEntries(
+                Object.entries(cfg.models).map(([name, modelCfg]) => [
+                  name,
+                  `${modelCfg.provider} / ${modelCfg.model}${modelCfg.baseUrl ? ` ${modelCfg.baseUrl}` : ""}`,
+                ]),
+              );
+              return <ModelBar
+                currentRole={selectedConfigRole()}
+                currentModelByRole={{
+                  leader: cfg.agents.leader.model,
+                  worker: cfg.agents.worker.model,
+                  secretary: cfg.agents.secretary.model,
+                }}
+                modelChoices={modelChoices}
+                modelDescriptions={modelDescriptions}
+                onConfirm={confirmModelChoice}
+                onCancel={() => setModelSelecting(false)}
+              />;
+            })()
+          : effortSelecting
           ? <EffortBar current={effort} onConfirm={confirmEffort} onCancel={() => setEffortSelecting(false)} />
           : <>
               {slashDisplay.length > 0 && (
@@ -3401,7 +3820,7 @@ function App() {
               )}
               <InputBar
                 key={completeTick.current}
-                focused={pending.length === 0}
+                focused={selectedPending.length === 0}
                 value={input}
                 onChange={setInput}
                 onESC={handleESCInterrupt}
@@ -3415,8 +3834,10 @@ function App() {
                   setInput("");
                 }}
                 hint={
-                  pending.length > 0
-                    ? `[${pending[0]!.agent}] ${pending[0]!.tool_name ?? ""} — y approve · n reject`
+                  selectedPending.length > 0
+                    ? `[${selectedPending[0]!.agent}] ${selectedPending[0]!.tool_name ?? ""} — y approve · n reject`
+                    : pending.length > 0
+                    ? `${pending.length} pending approval(s) in other agent(s) — Tab to review`
                     : getState().pendingRating
                     ? "Session done — /rate good [comment] or /rate bad [comment] to rate"
                     : (() => {
@@ -3494,12 +3915,26 @@ if (_rgCheck.error || _rgCheck.status !== 0) {
   console.warn("   Install: apt install ripgrep  |  brew install ripgrep  |  cargo install ripgrep\n");
 }
 
-// ── stdin passthrough (no mouse interception) ───────────────────────────────
-// 关掉所有鼠标追踪，还给终端原生文字选中能力。
-// 滚动改用键盘（[ / ]，见 useInput 处理）。
-process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+// ── stdin passthrough (keyboard-only TUI) ───────────────────────────────────
+// This TUI deliberately does not implement mouse interaction. Keep terminal
+// mouse tracking disabled so normal terminal selection/copy remains native.
+const DISABLE_MOUSE_TRACKING = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
+process.stdout.write(DISABLE_MOUSE_TRACKING);
 
-const filteredStdin = new PassThrough();
+const filteredStdin = new Transform({
+  transform(chunk, _encoding, callback) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const ctrlC = buf.includes(0x03);
+    const cleaned = ctrlC ? Buffer.from(buf.filter((byte) => byte !== 0x03)) : buf;
+    if (ctrlC) {
+      const request = requestExitFromSignal;
+      if (request) request();
+      else process.exit(130);
+    }
+    if (cleaned.length > 0) this.push(cleaned);
+    callback();
+  },
+});
 process.stdin.pipe(filteredStdin, { end: false });
 
 Object.defineProperties(filteredStdin, {
@@ -3510,10 +3945,23 @@ Object.defineProperties(filteredStdin, {
 });
 
 // Re-disable on exit — covers clean exit, SIGINT (Ctrl+C), and SIGTERM
-const TERM_RESET = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h";
-process.on("exit", () => { process.stdout.write(TERM_RESET); });
-process.on("SIGINT", () => { process.stdout.write(TERM_RESET); process.exit(130); });
+const TERM_RESET = `${DISABLE_MOUSE_TRACKING}\x1b[?2004l\x1b[?25h`;
+function restoreTerminalForExit(): void {
+  const rows = process.stdout.rows ?? 24;
+  process.stdout.write(`${TERM_RESET}\x1b[${rows};1H\x1b[2K\n`);
+}
+process.on("exit", restoreTerminalForExit);
 process.on("SIGTERM", () => { process.stdout.write(TERM_RESET); process.exit(143); });
+
+let requestExitFromSignal: (() => void) | null = null;
+process.on("SIGINT", () => {
+  process.stdout.write(TERM_RESET);
+  if (requestExitFromSignal) {
+    requestExitFromSignal();
+    return;
+  }
+  process.exit(130);
+});
 
 // ── Synchronized output — prevent lower-half flicker ───────────────────────
 // Ink's log-update writes each frame as one stream.write() call:
@@ -3536,7 +3984,7 @@ process.on("SIGTERM", () => { process.stdout.write(TERM_RESET); process.exit(143
     // synchronized-output begin/end markers.
     if (s.includes("\x1b[1A") || s.includes("\x1b[2J")) {
       _inside = true;
-      const r = _orig(`\x1b[?2026h${s}\x1b[?2026l`, ...rest);
+      const r = _orig(`\x1b[?2026h${s}${getCursorAnchorSequence()}\x1b[?2026l`, ...rest);
       _inside = false;
       return r;
     }

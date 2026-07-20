@@ -1,14 +1,24 @@
 import { describe, it, beforeEach } from "node:test";
 import { strict as assert } from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   applyEvent, getState, selectAgent, approve, reject,
   setMinLevel, scrollBy, _resetForTest, ensureAgent, updateAgentInfo,
-  clearDoneAgents,
+  clearDoneAgents, selectAgentVisible,
 } from "../store.js";
 import type { TuiEvent, DispatchSpec } from "../protocol.js";
+import { HealthMetricsStore, setHealthMetricsStoreForTests } from "../runtime/HealthMetrics.js";
 
-beforeEach(() => _resetForTest());
+let metricsStore: HealthMetricsStore;
+
+beforeEach(() => {
+  _resetForTest();
+  metricsStore = new HealthMetricsStore(fs.mkdtempSync(path.join(os.tmpdir(), "smoke-health-")));
+  setHealthMetricsStoreForTests(metricsStore);
+});
 
 describe("applyEvent — level tags", () => {
   it("message → level info", () => {
@@ -74,6 +84,9 @@ describe("applyEvent — state updates", () => {
     applyEvent({ v: 1, type: "agent.done", agent: "a", success: true, reason: "all good" });
     assert.equal(getState().agents.get("a")!.state, "done");
     assert.equal(getState().agents.get("a")!.hidden, undefined, "visible until next PM message");
+    const metrics = metricsStore.readMetrics();
+    assert.equal(metrics.at(-1)?.event_type, "trace_completed");
+    assert.equal(metrics.at(-1)?.agent_id, "a");
   });
 
   it("agent.state:idle after agent.done does NOT reset terminal state (stream-close race)", () => {
@@ -91,6 +104,7 @@ describe("applyEvent — state updates", () => {
     ensureAgent({ id: "w-err", name: "w-err", role: "Worker", state: "run", parent: "pm" });
     applyEvent({ v: 1, type: "agent.done",  agent: "w-err", success: false });
     assert.equal(getState().agents.get("w-err")!.state, "err");
+    assert.equal(metricsStore.readMetrics().at(-1)?.event_type, "trace_failed");
     applyEvent({ v: 1, type: "agent.state", agent: "w-err", state: "idle" });
     assert.equal(getState().agents.get("w-err")!.state, "err", "idle must NOT overwrite err");
   });
@@ -178,6 +192,17 @@ describe("scrollBy", () => {
     assert.ok(getState().scrollOffset > 0);
     selectAgent("b");
     assert.equal(getState().scrollOffset, 0);
+  });
+
+  it("selectAgentVisible scrolls agent pane so selected agent is visible", () => {
+    ensureAgent({ id: "pm", name: "pm", role: "Leader", state: "idle" });
+    for (let i = 0; i < 10; i++) {
+      ensureAgent({ id: `a${i}`, name: `a${i}`, role: "Worker", state: "run", parent: "pm" });
+    }
+    selectAgentVisible("a8", 3);
+    assert.equal(getState().selectedAgent, "a8");
+    assert.ok(getState().agentPaneScroll > 0, "agent pane should scroll down to selected agent");
+    assert.ok(getState().agentPaneScroll <= 8, "scroll stays within valid range");
   });
 });
 

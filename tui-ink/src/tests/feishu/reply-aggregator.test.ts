@@ -80,6 +80,26 @@ describe("FeishuReplyAggregator — 飞书层回归哨兵", () => {
         "第二次 send 应正常调用——finally { sending=false } 必须无条件执行");
     },
   );
+
+  it(
+    "passes responder agent metadata to the final Feishu sender",
+    async () => {
+      let receivedAgentId = "";
+
+      const agg = new FeishuReplyAggregator(
+        async (_text, meta) => { receivedAgentId = meta?.agentId ?? ""; },
+        async (_text) => { /* sendCard — not under test */ },
+        { idleFlushMs: 30 },
+      );
+
+      agg.onChunk("最终回复", "text", { agentId: "feishu-fork-abc123" });
+      agg.onTurnEnd();
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      assert.equal(receivedAgentId, "feishu-fork-abc123");
+    },
+  );
 });
 
 // ── (c): HttpConvAgent._queue drain，使用 MockLLMServer ───────────────────────

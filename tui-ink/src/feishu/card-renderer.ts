@@ -139,6 +139,10 @@ export function createCardRenderer(tokenManager: TokenManager): (e: PMEvent) => 
       }
 
       case 'agent_done': {
+        if (task.status === 'done' || task.status === 'failed') {
+          feishuLog(`[CardRenderer] duplicate agent_done ignored for task ${e.taskId}`);
+          break;
+        }
         const block = task.blocks.get(e.agentPath);
         if (block) {
           if (e.finalText !== undefined) block.body = e.finalText;
@@ -149,6 +153,10 @@ export function createCardRenderer(tokenManager: TokenManager): (e: PMEvent) => 
       }
 
       case 'task_done': {
+        if (task.status === 'done') {
+          feishuLog(`[CardRenderer] duplicate task_done ignored for task ${e.taskId}`);
+          break;
+        }
         // Mark any still-streaming blocks as done
         for (const b of task.blocks.values()) {
           if (b.state === 'streaming' || b.state === 'pending') b.state = 'done';

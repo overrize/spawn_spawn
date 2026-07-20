@@ -11,10 +11,11 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execSync } from "node:child_process";
 import { useStore, approve, reject, switchSession, getSessionTokens } from "./store.js";
+import { setCursorAnchor } from "./runtime/CursorAnchor.js";
 import type {
   AgentInfo, Message, TodoItem, AgentRunState,
 } from "./protocol.js";
-import type { PaletteName } from "./config.js";
+import type { AgentConfigRole, PaletteName } from "./config.js";
 
 // ── Version ──────────────────────────────────────────────────────────────────
 const APP_VERSION = process.env["npm_package_version"] ?? "0.1.0";
@@ -30,16 +31,10 @@ const VERSION_LABEL = GIT_HASH ? `v${APP_VERSION}·${GIT_HASH}` : `v${APP_VERSIO
 // Writes to OS temp dir so it never touches the project or TUI output.
 // Tail it with: tail -f <path printed on startup>
 const LAYOUT_LOG = path.join(os.tmpdir(), "tui-layout-debug.log");
-let _layoutLogPrinted = false;
 
 function layoutLog(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   try { fs.appendFileSync(LAYOUT_LOG, line); } catch { /* non-fatal */ }
-  if (!_layoutLogPrinted) {
-    _layoutLogPrinted = true;
-    // Print once to stderr (visible before TUI takes over)
-    process.stderr.write(`[layout-debug] logging to ${LAYOUT_LOG}\n`);
-  }
 }
 
 // FIXED_COLS = AgentsPane(22) + VDiv(1) + VDiv(1) + TodoPane(32) = 56
@@ -346,6 +341,24 @@ function displayWidth(s: string): number {
   return w;
 }
 
+const LOG_LINE_RE = /^\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s+[A-Z]\s+\(\d+\)\s+[\w.-]+:\s+/;
+const LOG_SPLIT_CONT_RE = /^\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s+([a-z]{1,6}: .*)$/;
+
+function repairSplitLogLines(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (const line of lines) {
+    const cont = line.match(LOG_SPLIT_CONT_RE);
+    const prev = out[out.length - 1];
+    if (cont && prev && LOG_LINE_RE.test(prev) && /[A-Za-z0-9_]$/.test(prev)) {
+      out[out.length - 1] = prev + cont[1];
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 function wrapAt(text: string, cols: number): string[] {
   if (!text) return [""];
   if (displayWidth(text) <= cols) return [text];
@@ -354,20 +367,20 @@ function wrapAt(text: string, cols: number): string[] {
   while (displayWidth(rem) > cols) {
     // Walk character by character tracking display columns
     let w = 0;
-    let lastSpace = -1;
+    let lastBreak = -1;
     let hardCut = rem.length;
     for (let i = 0; i < rem.length; ) {
       const cp = rem.codePointAt(i) ?? 0;
       const cw = charWidth(cp);
       if (w + cw > cols) { hardCut = i; break; }
       w += cw;
-      if (rem[i] === " ") lastSpace = i;
+      if (/[\s,;，。！？!?]/.test(rem[i] ?? "")) lastBreak = i;
       i += cp > 0xFFFF ? 2 : 1;
     }
-    // Prefer word boundary if it's not too far back
-    const cut = lastSpace >= Math.floor(hardCut * 0.35) ? lastSpace : hardCut;
+    // Prefer a token boundary if it does not waste most of the line.
+    const cut = lastBreak >= Math.floor(hardCut * 0.55) ? lastBreak : hardCut;
     out.push(rem.slice(0, cut).trimEnd());
-    rem = rem.slice(cut === lastSpace ? cut + 1 : cut);
+    rem = rem.slice(cut === lastBreak ? cut + 1 : cut);
   }
   if (rem) out.push(rem);
   return out;
@@ -393,7 +406,7 @@ function messagesToLines(msgs: Message[], cols: number, p: Palette): RenderLine[
     if (m.kind === "system") {
       prevTextKey = "";
       const c = m.level === "error" ? p.error : p.warn;
-      for (const raw of m.text.split("\n"))
+      for (const raw of repairSplitLogLines(m.text).split("\n"))
         for (const l of wrapAt(raw, cols)) out.push({ text: l, color: c });
       out.push({ text: "" });
       continue;
@@ -409,7 +422,7 @@ function messagesToLines(msgs: Message[], cols: number, p: Palette): RenderLine[
       out.push({ text: who, color: wc, bold: true });
     }
     let inCode = false;
-    for (const raw of m.text.split("\n")) {
+    for (const raw of repairSplitLogLines(m.text).split("\n")) {
       const t = raw.trimStart();
       if (t.startsWith("```"))  { inCode = !inCode; continue; }
       if (inCode)               { for (const l of wrapAt("  " + raw, cols)) out.push({ text: l, dim: true }); continue; }
@@ -876,6 +889,107 @@ export function EffortBar({
   );
 }
 
+export const MODEL_CHOICES = [
+  "claude-sonnet-4-5",
+  "kimi-k3",
+  "deepseek-v4-pro",
+  "deepseek-chat",
+  "deepseek-reasoner",
+  "gpt-4.1",
+  "gpt-4.1-mini",
+] as const;
+
+const MODEL_DESC: Record<string, string> = {
+  "claude-sonnet-4-5": "Claude Sonnet，通用编码/推理",
+  "kimi-k3": "Kimi K3，Moonshot OpenAI-compatible",
+  "deepseek-v4-pro": "DeepSeek V4 Pro，当前常用配置",
+  "deepseek-chat": "DeepSeek chat，通用对话/编码",
+  "deepseek-reasoner": "DeepSeek reasoner，偏推理",
+  "gpt-4.1": "OpenAI GPT-4.1，通用高能力",
+  "gpt-4.1-mini": "OpenAI GPT-4.1 mini，轻量快速",
+};
+
+const MODEL_ROLES: AgentConfigRole[] = ["leader", "worker", "secretary"];
+
+/** Model selector — quick-switches the model id for one configured agent role. */
+export function ModelBar({
+  currentRole, currentModelByRole, modelChoices, modelDescriptions, onConfirm, onCancel,
+}: {
+  currentRole: AgentConfigRole;
+  currentModelByRole: Record<AgentConfigRole, string>;
+  modelChoices?: readonly string[];
+  modelDescriptions?: Record<string, string>;
+  onConfirm: (role: AgentConfigRole, model: string) => void;
+  onCancel: () => void;
+}) {
+  const p = usePalette();
+  const choices = modelChoices && modelChoices.length > 0 ? modelChoices : MODEL_CHOICES;
+  const [roleIdx, setRoleIdx] = useState<number>(Math.max(0, MODEL_ROLES.indexOf(currentRole)));
+  const role = MODEL_ROLES[roleIdx]!;
+  const currentModel = currentModelByRole[role];
+  const initialModelIdx = choices.indexOf(currentModel);
+  const [modelIdxByRole, setModelIdxByRole] = useState<Record<AgentConfigRole, number>>({
+    leader: Math.max(0, choices.indexOf(currentModelByRole.leader)),
+    worker: Math.max(0, choices.indexOf(currentModelByRole.worker)),
+    secretary: Math.max(0, choices.indexOf(currentModelByRole.secretary)),
+  });
+  const modelIdx = modelIdxByRole[role] ?? Math.max(0, initialModelIdx);
+  const chosen = choices[modelIdx]!;
+
+  useInput((_ch, key) => {
+    if (key.upArrow) {
+      setRoleIdx((s) => (s <= 0 ? MODEL_ROLES.length - 1 : s - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setRoleIdx((s) => (s >= MODEL_ROLES.length - 1 ? 0 : s + 1));
+      return;
+    }
+    if (key.leftArrow) {
+      setModelIdxByRole((prev) => ({
+        ...prev,
+        [role]: modelIdx <= 0 ? choices.length - 1 : modelIdx - 1,
+      }));
+      return;
+    }
+    if (key.rightArrow) {
+      setModelIdxByRole((prev) => ({
+        ...prev,
+        [role]: modelIdx >= choices.length - 1 ? 0 : modelIdx + 1,
+      }));
+      return;
+    }
+    if (key.return) { onConfirm(role, chosen); return; }
+    if (key.escape) { onCancel(); return; }
+  });
+
+  return (
+    <Box flexDirection="column" borderStyle="single" borderColor="gray"
+         borderLeft={false} borderRight={false} paddingX={1}>
+      <Box>
+        <Text dimColor>model  </Text>
+        {MODEL_ROLES.map((r, i) => (
+          <Text key={r} inverse={i === roleIdx} bold={i === roleIdx} color={i === roleIdx ? undefined : p.dim}>
+            {` ${r} `}
+          </Text>
+        ))}
+        <Text dimColor>  ↑↓ role  ←→ model  ↩ confirm  esc cancel</Text>
+      </Box>
+      <Box>
+        <Text dimColor>  </Text>
+        {choices.map((m, i) => (
+          <Text key={m} inverse={i === modelIdx} bold={i === modelIdx} color={i === modelIdx ? undefined : p.dim}>
+            {` ${m} `}
+          </Text>
+        ))}
+      </Box>
+      <Box>
+        <Text dimColor>  current: {currentModel}  →  {chosen} · {modelDescriptions?.[chosen] ?? MODEL_DESC[chosen] ?? ""}</Text>
+      </Box>
+    </Box>
+  );
+}
+
 function fmtK(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + "k";
@@ -895,6 +1009,7 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
   const minLevel = useStore((s) => s.minLevel);
   const sessionTokens = useStore((s) => s.sessionTokens);
   const tokenBudget   = useStore((s) => s.tokenBudget);
+  const feishu = useStore((s) => s.feishuConnection);
   const termCols = typeof process !== "undefined" ? (process.stdout.columns ?? 80) : 80;
   const termRows = typeof process !== "undefined" ? (process.stdout.rows ?? 24) : 24;
   const contentCols = Math.max(20, termCols - (FIXED_COLS + CONV_OVERHEAD));
@@ -917,6 +1032,11 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
         <Text dimColor>$ {cost.toFixed(2)}</Text>
         {tokenLabel ? <Text color={tokenColor}>  {tokenLabel}</Text> : null}
         {effort && <Text dimColor>  effort:<Text color={p.accent}>{effort}</Text></Text>}
+        {feishu.enabled && (
+          <Text dimColor>
+            {"  "}飞书:<Text color={feishu.connected ? p.success : p.error}>{feishu.connected ? "已连接" : "未连接"}</Text>
+          </Text>
+        )}
         {demo && <Text color="yellow" bold> [DEMO] </Text>}
         {isDebug && (
           <Text color={contentCols <= 20 ? "red" : p.dim}>
@@ -1002,6 +1122,19 @@ export function InputBar({
 }) {
   const p = usePalette();
   const { isRawModeSupported } = useStdin();
+  const useNativeCursor = process.env.SPAWN_INPUT_CURSOR_ANCHOR !== "0";
+  useEffect(() => {
+    const rows = process.stdout.rows ?? 24;
+    const cols = process.stdout.columns ?? 80;
+    const rowOffset = Number.parseInt(process.env.SPAWN_INPUT_CURSOR_ROW_OFFSET ?? "2", 10);
+    const colOffset = Number.parseInt(process.env.SPAWN_INPUT_CURSOR_COL_OFFSET ?? "5", 10);
+    setCursorAnchor({
+      focused: focused && useNativeCursor,
+      row: Math.max(1, rows - (Number.isFinite(rowOffset) ? rowOffset : 2)),
+      col: Math.max(1, Math.min(cols, colOffset + displayWidth(value))),
+    });
+    return () => setCursorAnchor({ focused: false });
+  }, [focused, value, useNativeCursor]);
   useInput((_char, key) => {
     if (key.escape && focused && onESC) {
       onESC();

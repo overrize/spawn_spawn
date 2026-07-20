@@ -7,6 +7,7 @@ import type { TuiEvent } from "../protocol.js";
 import type { AgentMemory, MemoryFact, MemoryDecision } from "./types.js";
 import { saveMemory, appendMessage, appendReminder, startSession, topFactsByWeight } from "./MemoryStore.js";
 import { globalBus } from "../bus/Bus.js";
+import { recordHealthMetric } from "../runtime/HealthMetrics.js";
 
 const DECISION_KEYWORDS = /应该|决定|选择|采用|方案|确认|将要|采取|should|decided|chosen|use|using|will\s/i;
 const TIME_KEYWORDS = /下午|上午|晚上|早上|明天|后天|今天|[0-9]+[:：][0-9]+|[0-9]+\s*点|pm\b|am\b/i;
@@ -23,7 +24,7 @@ export class SecretaryProxy extends EventEmitter {
   // On resume: replay log from this offset onwards to recover events not yet in working_set.
   private _logCursor: number = 0;
 
-  constructor(memory: AgentMemory) {
+  constructor(memory: AgentMemory, opts: { startNewSession?: boolean } = {}) {
     super();
     this.memory = memory;
     // Resume: init seqs from existing data to avoid ID collisions
@@ -43,7 +44,9 @@ export class SecretaryProxy extends EventEmitter {
     }
     // Persist initial state + register new session entry
     saveMemory(memory.agent_id, memory);
-    startSession(memory.agent_id, memory.session_hash ?? "unknown");
+    if (opts.startNewSession !== false) {
+      startSession(memory.agent_id, memory.session_hash ?? "unknown");
+    }
 
     // 60s periodic snapshot —防止崩溃时丢失进度
     this.snapshotTimer = setInterval(() => {
@@ -245,21 +248,10 @@ export class SecretaryProxy extends EventEmitter {
     }
   }
 
-  /** Jaccard similarity between two strings (token-level) */
-  private jaccard(a: string, b: string): number {
-    const tokenize = (s: string) => new Set(s.toLowerCase().split(/\s+/).filter(Boolean));
-    const sa = tokenize(a);
-    const sb = tokenize(b);
-    if (sa.size === 0 && sb.size === 0) return 1;
-    let intersect = 0;
-    for (const t of sa) { if (sb.has(t)) intersect++; }
-    const union = sa.size + sb.size - intersect;
-    return union === 0 ? 0 : intersect / union;
-  }
-
   private addFact(fact: MemoryFact): void {
     const facts = this.memory.working_set.facts;
-    // 0.72: high enough to avoid false merges on CJK text (common words inflate 0.6 too easily)
+    // CJK-aware n-gram Jaccard: Chinese text has no whitespace, so token-level
+    // Jaccard degenerates into exact-match only and misses near-duplicate facts.
     const SIMILARITY_THRESHOLD = 0.72;
     const now = Date.now();
 
@@ -267,14 +259,29 @@ export class SecretaryProxy extends EventEmitter {
     let merged = false;
     for (let i = 0; i < facts.length; i++) {
       const existing = facts[i];
-      if (this.jaccard(existing.text, fact.text) >= SIMILARITY_THRESHOLD) {
+      if (factSimilarity(existing.text, fact.text) >= SIMILARITY_THRESHOLD) {
         // Merge: bump weight, update text to the longer one, refresh ts
+        const previousWeight = existing.weight ?? 1;
         const newWeight = (existing.weight ?? 1) + (fact.weight ?? 1);
         existing.weight = newWeight;
         if (fact.text.length > existing.text.length) {
           existing.text = fact.text;
         }
         existing.ts = now;
+        recordHealthMetric({
+          agent_id: this.memory.agent_id,
+          event_type: "memory_fact_merged",
+          severity: "info",
+          reason: "similar_fact_merged",
+          refs: [existing.text.slice(0, 300), fact.text.slice(0, 300)],
+          meta: {
+            existingFactId: existing.id,
+            incomingFactId: fact.id,
+            previousWeight,
+            newWeight,
+            src: fact.src,
+          },
+        });
         merged = true;
         break;
       }
@@ -295,12 +302,29 @@ export class SecretaryProxy extends EventEmitter {
   private gc(): void {
     const facts = this.memory.working_set.facts;
     if (facts.length <= 50) return;
+    const before = facts.slice();
     const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
     const recent = facts.filter((f) => f.ts > cutoff);
     // 保留至少 20 条，丢弃最旧的重复 src
     this.memory.working_set.facts = recent.length < 20
       ? facts.slice(-50)
       : recent.slice(-50);
+    const kept = new Set(this.memory.working_set.facts.map((f) => f.id));
+    const dropped = before.filter((f) => !kept.has(f.id));
+    if (dropped.length > 0) {
+      recordHealthMetric({
+        agent_id: this.memory.agent_id,
+        event_type: "memory_fact_dropped",
+        severity: "warn",
+        reason: "working_set_fact_gc",
+        refs: dropped.slice(0, 5).map((f) => f.text.slice(0, 300)),
+        meta: {
+          droppedCount: dropped.length,
+          beforeCount: before.length,
+          afterCount: this.memory.working_set.facts.length,
+        },
+      });
+    }
   }
 
   private saveAsync(): void {
@@ -332,5 +356,69 @@ export class SecretaryProxy extends EventEmitter {
       clearInterval(this.snapshotTimer);
       this.snapshotTimer = null;
     }
+  }
+}
+
+export function factSimilarity(a: string, b: string): number {
+  const sa = factTokens(a);
+  const sb = factTokens(b);
+  if (sa.size === 0 && sb.size === 0) return 1;
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let intersect = 0;
+  for (const token of sa) {
+    if (sb.has(token)) intersect++;
+  }
+  const union = sa.size + sb.size - intersect;
+  const jaccard = union === 0 ? 0 : intersect / union;
+  const minSize = Math.min(sa.size, sb.size);
+  const containment = minSize >= 4 ? intersect / minSize : 0;
+  return Math.max(jaccard, containment);
+}
+
+export function factTokens(input: string): Set<string> {
+  const normalized = input
+    .toLowerCase()
+    .replace(/[\u3000\s]+/g, " ")
+    .replace(/[，。！？；：、“”‘’（）【】《》,.!?;:"'()[\]{}<>]/g, " ")
+    .trim();
+  const tokens = new Set<string>();
+  if (!normalized) return tokens;
+
+  const asciiParts = normalized.match(/[a-z0-9_./:-]+/g) ?? [];
+  for (const part of asciiParts) {
+    if (part.length >= 2) tokens.add(part);
+  }
+
+  const cjkRuns = normalized.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu) ?? [];
+  for (const run of cjkRuns) {
+    const compactRun = normalizeCjkRun(run);
+    if (!compactRun) continue;
+    addCharNgrams(tokens, compactRun, 1);
+    addCharNgrams(tokens, compactRun, 2);
+    addCharNgrams(tokens, compactRun, 3);
+  }
+
+  if (tokens.size === 0) {
+    const compact = normalized.replace(/\s+/g, "");
+    addCharNgrams(tokens, compact, compact.length <= 4 ? 1 : 2);
+  }
+  return tokens;
+}
+
+function normalizeCjkRun(run: string): string {
+  return run
+    .replace(/(需要|必须|应该|应当|可以|能够|进行|通过|已经|当前|这个|那个|一种|一个)/g, "")
+    .replace(/[的在是了要]/g, "");
+}
+
+function addCharNgrams(tokens: Set<string>, text: string, size: number): void {
+  const chars = Array.from(text);
+  if (chars.length === 0) return;
+  if (chars.length < size) {
+    tokens.add(chars.join(""));
+    return;
+  }
+  for (let i = 0; i <= chars.length - size; i++) {
+    tokens.add(chars.slice(i, i + size).join(""));
   }
 }

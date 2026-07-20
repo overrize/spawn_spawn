@@ -16,7 +16,14 @@ const hasRg = (() => {
   return !r.error && r.status === 0;
 })();
 
-import { executeTool, toolNeedsApproval, getToolsForRole } from "../tools/registry.js";
+import {
+  buildToolSchemaBlock,
+  executeTool,
+  getToolsForRole,
+  toolNeedsApproval,
+  validateToolArgs,
+} from "../tools/registry.js";
+import { HealthMetricsStore, setHealthMetricsStoreForTests } from "../runtime/HealthMetrics.js";
 import {
   createMemory, saveMemory, deleteAgentMemory,
   startSession, appendMessage, loadMessages, loadSessions,
@@ -85,6 +92,57 @@ describe("getToolsForRole", () => {
   });
 });
 
+// ── tool argument schema ──────────────────────────────────────────────────────
+
+describe("tool argument schema", () => {
+  it("normalizes aliases without changing runtime defaults", () => {
+    const result = validateToolArgs("Read", { file_path: "a.txt" });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.deepEqual(result.args, { path: "a.txt" });
+    }
+  });
+
+  it("rejects non-object, unknown, and wrongly typed arguments", () => {
+    assert.deepEqual(validateToolArgs("Read", null), {
+      ok: false,
+      errors: ["args must be a JSON object"],
+    });
+    const result = validateToolArgs("Read", { path: "a.txt", limit: "10", extra: true });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.ok(result.errors.includes('unknown field "extra"'));
+      assert.ok(result.errors.includes('field "limit" must be integer'));
+    }
+  });
+
+  it("executeTool emits invalid_args result and HealthMetric before tool execution", async () => {
+    const store = new HealthMetricsStore(fs.mkdtempSync(path.join(os.tmpdir(), "registry-health-")));
+    setHealthMetricsStoreForTests(store);
+    try {
+      const r = await executeTool("Read", { path: 123 }, { agentId: "worker-schema" });
+      assert.equal(r.ok, false);
+      assert.equal(r.code, "invalid_args");
+      assert.ok(r.output.includes("tool_error(invalid_args)"));
+      assert.ok(r.output.includes('field "path" must be string'));
+
+      const metrics = store.readMetrics();
+      assert.equal(metrics.length, 1);
+      assert.equal(metrics[0]!.event_type, "tool_arg_schema_failed");
+      assert.equal(metrics[0]!.agent_id, "worker-schema");
+      assert.equal(metrics[0]!.meta?.tool, "Read");
+    } finally {
+      setHealthMetricsStoreForTests(null);
+    }
+  });
+
+  it("buildToolSchemaBlock renders parameter text from structured specs", () => {
+    const block = buildToolSchemaBlock("Leader");
+    assert.ok(block.includes("path(string), offset?(int), limit?(int default:200)"));
+    assert.ok(block.includes("action?(enum:'navigate'|'screenshot'|'text' default:navigate)"));
+  });
+});
+
 // ── executeTool — Read ───────────────────────────────────────────────────────
 
 describe("executeTool — Read", () => {
@@ -100,6 +158,13 @@ describe("executeTool — Read", () => {
   it("returns ok:false for missing file", async () => {
     const r = await executeTool("Read", { path: path.join(tmpDir, "missing.txt") });
     assert.equal(r.ok, false);
+  });
+
+  it("rejects paths outside workspace and temp roots", async () => {
+    const outside = path.parse(tmpDir).root;
+    const r = await executeTool("Read", { path: outside });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /Path rejected|EISDIR/);
   });
 });
 

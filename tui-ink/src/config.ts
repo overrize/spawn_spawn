@@ -13,6 +13,13 @@ export interface ProviderConfig {
   apiKey: string;
   baseUrl?: string;
   maxTokens?: number;
+  reasoningEffort?: "low" | "medium" | "high" | "max";
+}
+
+export interface AgentRoleConfig {
+  /** Model registry key. The actual provider/model/baseUrl/apiKey live in Config.models. */
+  model: string;
+  maxTokens?: number;
 }
 
 /**
@@ -31,22 +38,78 @@ export function resolveMaxTokens(role: string, depth?: number): number {
   return 8192; // unknown role: safe default
 }
 
-export const PROVIDER_PRESETS: Record<string, Omit<ProviderConfig, "model" | "apiKey">> = {
+export type ProviderPreset = Omit<ProviderConfig, "model" | "apiKey"> & Partial<Pick<ProviderConfig, "model">>;
+
+export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   anthropic: { provider: "anthropic" },
   openai:    { provider: "openai", baseUrl: "https://api.openai.com" },
   deepseek:  { provider: "openai", baseUrl: "https://api.deepseek.com" },
+  kimi:      { provider: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k2.6" },
+  "kimi-k3": { provider: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k3" },
+  moonshot:  { provider: "openai", baseUrl: "https://api.moonshot.ai/v1" },
+  "kimi-cn": { provider: "openai", baseUrl: "https://api.moonshot.cn/v1" },
   ollama:    { provider: "openai", baseUrl: "http://localhost:11434" },
   dashscope: { provider: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
 };
 
-interface Config {
+export type AgentConfigRole = "leader" | "secretary" | "worker";
+
+export function isAgentConfigRole(role: string): role is AgentConfigRole {
+  return role === "leader" || role === "secretary" || role === "worker";
+}
+
+export function resolveProviderConfigInput(
+  preset: string,
+  modelOrKey: string,
+  maybeApiKey?: string,
+): ProviderConfig | null {
+  const base = PROVIDER_PRESETS[preset] ?? { provider: "openai" as const, baseUrl: preset };
+  const model = maybeApiKey ? modelOrKey : base.model;
+  const apiKey = maybeApiKey ?? modelOrKey;
+  if (!model || !apiKey) return null;
+  return { ...base, model, apiKey };
+}
+
+export function resolveModelConfigInput(
+  presetOrBaseUrl: string,
+  modelOrKey: string,
+  maybeApiKey?: string,
+): ProviderConfig | null {
+  return resolveProviderConfigInput(presetOrBaseUrl, modelOrKey, maybeApiKey);
+}
+
+export interface ServerConfig {
+  port: number;
+  enabled: boolean;
+}
+
+export type WebSearchProviderType = "brave" | "serper";
+
+export interface WebSearchProviderConfig {
+  type: WebSearchProviderType;
+  apiKey: string;
+  baseUrl?: string;
+  hl?: string;
+  gl?: string;
+}
+
+export interface WebConfig {
+  search: {
+    enabled: boolean;
+    provider: string;
+    maxResults?: number;
+    timeoutSeconds?: number;
+  };
+  providers: Record<string, WebSearchProviderConfig>;
+}
+
+export interface Config {
   palette: PaletteName;
   layout: "v1" | "v3";
-  agents: {
-    leader: ProviderConfig;
-    secretary: ProviderConfig;
-    worker: ProviderConfig;
-  };
+  models: Record<string, ProviderConfig>;
+  agents: Record<AgentConfigRole, AgentRoleConfig>;
+  web: WebConfig;
+  server?: Partial<ServerConfig>;
 }
 
 const DEFAULT_PROVIDER: ProviderConfig = {
@@ -58,21 +121,99 @@ const DEFAULT_PROVIDER: ProviderConfig = {
 const DEFAULT: Config = {
   palette: "paper",
   layout: "v1",
+  models: {
+    "claude-sonnet-4-5": { ...DEFAULT_PROVIDER },
+    "deepseek-chat": { provider: "openai", baseUrl: "https://api.deepseek.com", model: "deepseek-chat", apiKey: "" },
+    "deepseek-reasoner": { provider: "openai", baseUrl: "https://api.deepseek.com", model: "deepseek-reasoner", apiKey: "" },
+    "kimi-k2.6": { provider: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k2.6", apiKey: "" },
+  },
   agents: {
-    leader:    { ...DEFAULT_PROVIDER },
-    secretary: { ...DEFAULT_PROVIDER },
-    worker:    { ...DEFAULT_PROVIDER },
+    leader:    { model: "claude-sonnet-4-5" },
+    secretary: { model: "claude-sonnet-4-5" },
+    worker:    { model: "claude-sonnet-4-5" },
+  },
+  web: {
+    search: {
+      enabled: true,
+      provider: "serper",
+      maxResults: 5,
+      timeoutSeconds: 10,
+    },
+    providers: {},
   },
 };
+
+function isProviderConfig(value: unknown): value is ProviderConfig {
+  const v = value as Partial<ProviderConfig> | null;
+  return !!v && typeof v === "object" &&
+    (v.provider === "anthropic" || v.provider === "openai") &&
+    typeof v.model === "string" &&
+    typeof v.apiKey === "string";
+}
+
+function normalizeConfig(parsed: Partial<Config> & { agents?: Record<string, unknown>; models?: Record<string, ProviderConfig> }): Config {
+  const models: Record<string, ProviderConfig> = {
+    ...DEFAULT.models,
+    ...(parsed.models ?? {}),
+  };
+  const agents: Record<AgentConfigRole, AgentRoleConfig> = {
+    leader: { ...DEFAULT.agents.leader },
+    secretary: { ...DEFAULT.agents.secretary },
+    worker: { ...DEFAULT.agents.worker },
+  };
+
+  const web: WebConfig = {
+    search: {
+      ...DEFAULT.web.search,
+      ...(parsed.web?.search ?? {}),
+    },
+    providers: {
+      ...(parsed.web?.providers ?? {}),
+    },
+  };
+
+  for (const role of ["leader", "secretary", "worker"] as AgentConfigRole[]) {
+    const raw = parsed.agents?.[role];
+    if (isProviderConfig(raw)) {
+      models[raw.model] = raw;
+      agents[role] = { model: raw.model, ...(raw.maxTokens ? { maxTokens: raw.maxTokens } : {}) };
+    } else if (raw && typeof raw === "object" && typeof (raw as Partial<AgentRoleConfig>).model === "string") {
+      const roleCfg = raw as Partial<AgentRoleConfig>;
+      agents[role] = {
+        model: roleCfg.model!,
+        ...(typeof roleCfg.maxTokens === "number" ? { maxTokens: roleCfg.maxTokens } : {}),
+      };
+    } else if (typeof raw === "string") {
+      agents[role] = { model: raw };
+    }
+  }
+
+  return {
+    ...DEFAULT,
+    ...parsed,
+    models,
+    agents,
+    web,
+  };
+}
 
 export function loadConfig(): Config {
   try {
     const raw = fs.readFileSync(CONFIG_FILE, "utf8");
-    const parsed = JSON.parse(raw) as Partial<Config>;
-    return { ...DEFAULT, ...parsed };
+    const parsed = JSON.parse(raw) as Partial<Config> & { agents?: Record<string, unknown> };
+    return normalizeConfig(parsed);
   } catch {
-    return { ...DEFAULT };
+    return normalizeConfig({});
   }
+}
+
+export function getAgentProviderConfig(cfg: Config, role: AgentConfigRole): ProviderConfig {
+  const roleCfg = cfg.agents[role];
+  const modelCfg = cfg.models[roleCfg.model] ?? cfg.models[DEFAULT.agents[role].model] ?? DEFAULT_PROVIDER;
+  return {
+    ...modelCfg,
+    ...(roleCfg.maxTokens ? { maxTokens: roleCfg.maxTokens } : {}),
+  };
 }
 
 export function savePalette(name: PaletteName): void {
@@ -91,11 +232,59 @@ export function saveLayout(l: "v1" | "v3"): void {
   } catch { /* 静默失败 */ }
 }
 
-export function saveAgentConfig(role: "leader" | "secretary" | "worker", cfg: ProviderConfig): void {
+export function saveAgentConfig(role: AgentConfigRole, cfg: ProviderConfig): void {
   try {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
     const existing = loadConfig();
-    existing.agents[role] = cfg;
+    existing.models[cfg.model] = cfg;
+    existing.agents[role] = { model: cfg.model, ...(cfg.maxTokens ? { maxTokens: cfg.maxTokens } : {}) };
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2));
   } catch { /* 静默失败 */ }
+}
+
+export function saveModelConfig(name: string, cfg: ProviderConfig): void {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    const existing = loadConfig();
+    existing.models[name] = cfg;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2));
+  } catch { /* 静默失败 */ }
+}
+
+export function saveAgentModel(role: AgentConfigRole, modelName: string): boolean {
+  try {
+    const existing = loadConfig();
+    if (!existing.models[modelName]) return false;
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    existing.agents[role] = { ...existing.agents[role], model: modelName };
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveWebSearchProvider(name: string, cfg: WebSearchProviderConfig): void {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    const existing = loadConfig();
+    existing.web.providers[name] = cfg;
+    existing.web.search.provider = name;
+    existing.web.search.enabled = true;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2));
+  } catch { /* 静默失败 */ }
+}
+
+export function saveWebSearchSelection(providerName: string): boolean {
+  try {
+    const existing = loadConfig();
+    if (!existing.web.providers[providerName]) return false;
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    existing.web.search.provider = providerName;
+    existing.web.search.enabled = true;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -130,6 +130,39 @@ describe("parseTestCounts — deno", () => {
   });
 });
 
+describe("parseTestCounts — bun", () => {
+  const framework = "bun";
+
+  it("parses pass and fail counts from bun test summary", () => {
+    const output = " 5 pass\n 1 fail\n Ran 6 tests";
+    const r = parseTestCounts(output, framework);
+    assert.equal(r.passed, 5);
+    assert.equal(r.failed, 1);
+  });
+
+  it("parses all-pass bun output", () => {
+    const output = " 12 pass\n 0 fail\n Ran 12 tests";
+    const r = parseTestCounts(output, framework);
+    assert.equal(r.passed, 12);
+    assert.equal(r.failed, 0);
+  });
+
+  it("parses skipped bun output when present", () => {
+    const output = " 7 pass\n 0 fail\n 2 skip\n Ran 9 tests";
+    const r = parseTestCounts(output, framework);
+    assert.equal(r.passed, 7);
+    assert.equal(r.failed, 0);
+    assert.equal(r.skipped, 2);
+  });
+
+  it("parses zero tests bun output (no tests at all)", () => {
+    const output = " 0 pass\n 0 fail\n Ran 0 tests";
+    const r = parseTestCounts(output, "bun");
+    assert.equal(r.passed, 0);
+    assert.equal(r.failed, 0);
+  });
+});
+
 // ── detectTestCommand ─────────────────────────────────────────────────────────
 
 describe("detectTestCommand", () => {
@@ -149,6 +182,22 @@ describe("detectTestCommand", () => {
       assert.ok(result, "should detect command");
       assert.equal(result!.framework, "node");
       assert.match(result!.cmd, /npm/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects Bun project via bun test script", () => {
+    const dir = mkTmp();
+    try {
+      fs.writeFileSync(
+        path.join(dir, "package.json"),
+        JSON.stringify({ scripts: { test: "bun test" } }),
+      );
+      const result = detectTestCommand(dir);
+      assert.ok(result, "should detect command");
+      assert.equal(result!.framework, "bun");
+      assert.equal(result!.cmd, "bun test");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -202,6 +251,32 @@ describe("detectTestCommand", () => {
       assert.ok(result);
       assert.equal(result!.framework, "go");
       assert.match(result!.cmd, /go test/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects Bun project via bun.lock file", () => {
+    const dir = mkTmp();
+    try {
+      fs.writeFileSync(path.join(dir, "bun.lock"), "# bun lockfile\n");
+      const result = detectTestCommand(dir);
+      assert.ok(result, "should detect command");
+      assert.equal(result!.framework, "bun");
+      assert.equal(result!.cmd, "bun test");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects Bun project via bun.lock file", () => {
+    const dir = mkTmp();
+    try {
+      fs.writeFileSync(path.join(dir, "bun.lock"), "# bun lockfile\n");
+      const result = detectTestCommand(dir);
+      assert.ok(result, "should detect command");
+      assert.equal(result!.framework, "bun");
+      assert.equal(result!.cmd, "bun test");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
