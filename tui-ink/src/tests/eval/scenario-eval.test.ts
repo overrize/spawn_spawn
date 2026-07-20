@@ -1,0 +1,142 @@
+/**
+ * M3-2 · Scenario eval set — seed batch (EV-001..EV-010, target ≥30 by M3).
+ *
+ * Outcome-focused acceptance cases driving REAL components via the shared
+ * harness (parser → gate → store → ProcessManager → Secretary). Complements
+ * the M1-5 golden baseline: golden pins exact event timelines (regression),
+ * eval asserts end-state outcomes (capability acceptance) — categories map to
+ * WORKPLAN M3-2: 协议遵守 / 治理 / 收敛 / 记忆质量 / 审批.
+ *
+ * BC-001 section: pins the *trigger condition* of the plan-only-first-turn
+ * bad case (the part testable pre-split) and registers post-M1-6e specs as
+ * it.todo so the deferred coverage stays visible in every test run.
+ */
+
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { approve, ensureAgent, getState, _resetForTest } from "../../store.js";
+import type { TuiEvent } from "../../protocol.js";
+import { Timeline, DISPATCH } from "../support/orchestrationHarness.js";
+
+let tmpDir: string;
+let origCwd: string;
+before(() => {
+  origCwd = process.cwd();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-eval-"));
+  process.chdir(tmpDir);
+});
+after(() => {
+  process.chdir(origCwd);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+let t: Timeline;
+beforeEach(() => { _resetForTest(); t = new Timeline(); t.boot(); });
+afterEach(() => t.destroy());
+
+const dispatchJson = JSON.stringify(DISPATCH);
+
+describe("EV·协议遵守", () => {
+  it("EV-001 合规多事件轮零 fallback、全部入 store", () => {
+    t.feed("pm", [
+      `{"type":"message","to":"user","text":"开始处理"}`,
+      ``,
+      `{"type":"spawn","parent":"pm","child":"tl-1","role":"Leader","goal":"任务A","dispatch":${dispatchJson}}`,
+    ].join("\n"));
+    assert.equal(t.entries.some((e) => e.includes("(fallback)")), false);
+    assert.equal(getState().agents.get("tl-1")?.state, "idle");
+  });
+
+  it("EV-009 修复管线抢救的事件仍正常入 store（协议韧性）", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    // 非法转义 + 缺右括号，双重损坏
+    t.feed("tl-1", `{"type":"message","to":"user","text":"第一行\n第二行"`);
+    const msgs = getState().messagesByAgent.get("tl-1") ?? [];
+    assert.equal(msgs.some((m) => m.text.includes("第一行")), true);
+  });
+});
+
+describe("EV·治理", () => {
+  it("EV-002 PM 直接 spawn Worker 被拒且不产生 agent", () => {
+    t.route({ v: 1, type: "spawn", parent: "pm", child: "w-x", role: "Worker", goal: "越级", dispatch: DISPATCH });
+    assert.equal(getState().agents.has("w-x"), false);
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "pm_cannot_spawn_worker"), true);
+  });
+
+  it("EV-003 归一化后的重复 goal 被拒", () => {
+    t.route({ v: 1, type: "spawn", parent: "pm", child: "tl-a", role: "Leader", goal: "修复 BUG", dispatch: DISPATCH });
+    t.route({ v: 1, type: "spawn", parent: "pm", child: "tl-b", role: "Leader", goal: "修复  bug", dispatch: DISPATCH });
+    assert.equal(getState().agents.has("tl-a"), true);
+    assert.equal(getState().agents.has("tl-b"), false);
+  });
+
+  it("EV-004 worker 越权 message→user 触发通信矩阵告警", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "tl-1" });
+    t.route({ v: 1, type: "message", agent: "w-1", to: "user", text: "直接汇报" });
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "illegal_message" && a.agent === "w-1"), true);
+  });
+});
+
+describe("EV·收敛", () => {
+  it("EV-005 终态后 idle 不复活（done 保持 done）", () => {
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "pm" });
+    t.route({ v: 1, type: "agent.done", agent: "w-1", success: true, reason: "done" });
+    t.route({ v: 1, type: "agent.state", agent: "w-1", state: "idle" });
+    assert.equal(getState().agents.get("w-1")?.state, "done");
+  });
+});
+
+describe("EV·记忆质量", () => {
+  it("EV-006 中文近似 fact 合并为一条并加权（M1-2 能力验收）", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("tl-1", "LEADER", 1);
+    t.route({ v: 1, type: "tool.result", agent: "tl-1", id: "t1", ok: true, output: "配置文件在 src/config.ts，需要保留 baseUrl" });
+    t.route({ v: 1, type: "tool.result", agent: "tl-1", id: "t2", ok: true, output: "src/config.ts 的配置文件必须保留 baseUrl" });
+    const facts = sec.getMemory().working_set.facts;
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0]!.weight, 2);
+  });
+
+  it("EV-007 btw 旁路信息入 fact", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("tl-1", "LEADER", 1);
+    t.route({ v: 1, type: "message", agent: "pm", to: "tl-1", text: "btw: 部署窗口是周五" });
+    assert.equal(sec.getMemory().working_set.facts.some((f) => f.text.includes("部署窗口")), true);
+  });
+});
+
+describe("EV·审批", () => {
+  it("EV-008 破坏性 Bash 进审批队列，approve 后清空且标记", () => {
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "pm" });
+    t.route({ v: 1, type: "tool.call", agent: "w-1", id: "b1", name: "Bash",
+              args: { command: "rm -rf dist" }, needs_approval: true });
+    assert.equal(getState().pendingApprovals.length, 1);
+    approve("b1");
+    assert.equal(getState().pendingApprovals.length, 0);
+    assert.equal(getState().messagesByAgent.get("w-1")!.find((m) => m.tool_id === "b1")?.approved, true);
+  });
+});
+
+describe("EV·BC-001 首轮只规划不执行", () => {
+  it("EV-010 触发条件画像：纯规划轮只产出 todo.set/step，无任何行动事件", () => {
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "pm" });
+    t.feed("w-1", [
+      `{"type":"todo.set","items":[{"id":"1","text":"读代码","state":"todo"},{"id":"2","text":"改实现","state":"todo"}]}`,
+      ``,
+      `{"type":"step","text":"规划完成，准备开始"}`,
+    ].join("\n"));
+    const ACTION_TYPES = new Set(["tool.call", "spawn", "message", "unit.handup", "agent.done"]);
+    const actions = t.entries.filter((e) => ACTION_TYPES.has(e.split(" ")[0]!));
+    assert.deepEqual(actions, [], "纯规划轮：0 个行动事件 → 现行 harness 只能靠 nudge 补救（BC-001）");
+  });
+
+  // ── M1-6e 拆分后必须补的闭包内行为（当前结构上不可测，保持可见）──────────
+  it.todo("EV-011 [after M1-6e] 纯规划轮触发 nudge 且写 no_progress_nudge 指标");
+  it.todo("EV-012 [after M1-6e] leader/worker acted 判定统一：纯 todo.set 两侧都不算 acted（M1-7 修复后）");
+  it.todo("EV-013 [after M1-6e] nudge 3 次耗尽后收敛/上报，不无限催");
+});

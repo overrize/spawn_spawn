@@ -94,7 +94,7 @@
 | M2-1 | provider `capabilities: { nativeFC, structuredOutput }` 配置与运行时选轨 | config 扩展 | config-presets 测试扩展 | M1 | 未开始 |
 | M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 | M2-1 | 未开始 |
 | M2-3 | 文本轨修复管线指标 → provider 协议健康度评分 | 健康度聚合 | 指标断言测试 | M0-2 | 未开始 |
-| M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | 用例文件 + 测试 | 全部用例通过或明确 xfail | — | 未开始 |
+| M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | `src/tests/eval/parser-eval.test.ts`（13 用例：7 绿 + 6 XFAIL 账本，源自 tui.log 3500 次真实 parse 失败的挖掘） | 全部用例通过或明确 xfail | — | 待回归 |
 | M2-5 | ToolRegistry 抽 adapter 层：Local / Mcp / Http 同接口，权限与观测在 adapter 之上收口 | adapter 层 | 现有工具行为不回归（registry 测试）；tool span 产出 | M1-6b | 未开始 |
 | M2-6 | MCP 最小接入：stdio MCP server 挂载为工具组 | McpAdapter | 新增一个 MCP 工具全程零核心代码改动（验收演示） | M2-5 | 未开始 |
 | M2-7 | trace_id/parent_span 全链路传播 + `/trace <id>` 调用树还原 | trace 传播 + TUI 命令 | 单任务链路日志可还原完整调用树（G6 验收用例） | M1-6a | 未开始 |
@@ -106,7 +106,7 @@
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | M3-1 | 向量化长期记忆：写入时 embedding（sqlite-vec 或纯文件索引）；按 goal 检索 top-k 注入替代时间序注入；GC 改为热数据 50 条 + 全量归档 | 向量记忆层 | 跨 session 相关性注入命中率基线；embedding 失败降级 n-gram 的容错测试 | M1-2 | 未开始 |
-| M3-2 | 评测集 ≥30 条端到端用例（任务拆分/工具准确率/协议遵守/收敛/记忆质量），QA-TL 执行器，demo/live 双模式 | eval 用例 + 执行器 | 评测集在 demo 模式全量可跑，live 抽样可跑 | M1 起持续积累 | 未开始 |
+| M3-2 | 评测集 ≥30 条端到端用例（任务拆分/工具准确率/协议遵守/收敛/记忆质量），QA-TL 执行器，demo/live 双模式 | eval 用例 + 执行器 | 评测集在 demo 模式全量可跑，live 抽样可跑 | M1 起持续积累 | 进行中（种子 10/30） |
 | M3-3 | prompt 即数据：frontmatter 版本号、运行时记录 prompt_version、评测门禁、一键回滚 | prompt 版本机制 | 演示：改 prompt → 门禁拦截劣化 → 回滚（G4 验收用例） | M3-2 | 未开始 |
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
@@ -148,6 +148,7 @@
 | 2026-07-20 | v1.0.0 | **M0-6 回归通过置「完成」**：`formatMetricsReport` 纯函数 + 空/过滤/格式 3 类快照断言齐备；隔离修复实测有效（跑 smoke+pm-hierarchy 后真实 `.spawn/metrics` 零增长），清掉 15 行历史污染 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M0 里程碑出口回归通过，M0 关闭**：G7 达成。出口脚本 `scripts/m0-exit-check.mts`（真实组件、非 test 进程）驱动一次完整多 agent 任务，7 类关键事件（protocol_repaired/parse_failed/fallback/fact_merged/tool_call_repeated/trace_failed/trace_completed）全部落真实 store 并经 `/metrics` 渲染。回归记录归档 `regression/M0-20260720.md`。递延项（4 个 index.tsx 闭包内埋点断言）转 M1-6e | Claude (QA) |
 | 2026-07-20 | v1.0.0 | M1-1 实现完成，状态置为「待回归」：15 个工具接入结构化参数规格，`executeTool` 执行前强校验并返回 `tool_error(invalid_args)`，失败写 `tool_arg_schema_failed` HealthMetric；工具 prompt 参数列由规格生成；主链路 executeTool 调用补 agentId 归因；registry/coding 专项 68/68 绿，`typecheck` 通过，`npm test` 420/420 绿。注意：当前未新增外部 Zod 依赖，用内部 schema 达成同等运行时合同；“超过 2 次后 handup”建议随 M1-6b ToolRuntime 拆分做可测治理 | 执行侧 |
+| 2026-07-21 | v1.1.0 | **QA 侧三项交付，置「待回归」由执行侧/用户核收**：① M2-4 parser 评测集（挖掘 tui.log：3500 次 parse 失败 / 3146 次 fallback，主导失败=markdown 全文逐行碎片化；13 用例含 6 条 XFAIL 账本：碎片化/Think 大小写/tool_result 下划线/工具名当事件/尾部垃圾蒸发/截断蒸发）；② M3-2 场景评测种子 EV-001..010（协议遵守/治理/收敛/记忆/审批）+ 3 条 it.todo 挂账 M1-6e 后补；③ M1-7 QA 部分：BC-001 触发条件画像已钉（EV-010），闭包内 nudge 行为规格以 it.todo 显式挂账。公共骨架抽至 `tests/support/orchestrationHarness.ts`，golden 25 用例重构后逐字节不变。全量 448 过 + 3 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M3-8 增补 Claude Code 对标基线**（用户定的产品原则，已存长期记忆）：/usage、/context、/compact、/clear 补齐，命名沿用 Claude Code；现有 24 命令 vs 基线的缺口盘点完成 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **定调变更升版（对齐 PLAN v0.3）：TUI 重构进入 1.0**。M3-7 拆为 M3-7a 设计冻结（进行中，4 个待确认项见 `TUI_REDESIGN.md`）+ M3-7b 单主视图实现（依赖 M1-6e）；M3-8 改为落在新 UI 命令层并收编旧快捷键迁移。结构性消灭竖直分割线错位 bug 类别。旧版归档 `archive/WORKPLAN-v1.0.0.md` | Claude (QA) |
 | 2026-07-21 | v1.0.0 | **M1-2 回归通过置「完成」**（QA 复核 424/424 绿）：factSimilarity 改 CJK 1/2/3 字符 n-gram + 虚词剥离 + containment 度量，中文近似对/无关对/英文回归/召回率断言齐备。长期记忆的中文硬伤已修复 | Claude (QA) |
