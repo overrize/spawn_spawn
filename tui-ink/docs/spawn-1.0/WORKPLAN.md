@@ -72,7 +72,7 @@
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 完成 |
-| M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 未开始 |
+| M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 完成 |
 | M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | tokenizer 估算层 | 中英文混合历史截断对比测试 | — | 未开始 |
 | M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | 协议 + SecretaryProxy 改造 | decision 提取用例（中/英） | — | 未开始 |
 | M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/orchestration-golden.test.ts`（25 用例，已入 `npm test`） | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 完成 |
@@ -82,6 +82,7 @@
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
 | M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
 | M1-7 | **BC-001 修复**（用户可感知：不再"催了才干活"）：统一 leader/worker 的 acted 判定（纯 `todo.set` 不算 acted）+ prompt 强化首轮必须带执行动作 | 判定统一 + prompt 修订（见 `badcases/BC-001`） | QA 先交 characterization 测试钉现状；修复后示例任务 `no_progress_nudge` 显著下降；M1-5 快照按预期变化（nudge 分支收敛） | M0-3 | 未开始 |
+| M1-8 | **resume 完整性**（用户可感知：断了接得上"现场"，不只接得上记忆）：中断时的审批队列 + 未完成 tool.call 写入 tombstone；resume 时重建为待办提示注入首轮（PLAN WS5.3 落地）；`resume_context_missing` 扩展检测部分缺失（缺 history/todo/child state，M0-4 观察项） | tombstone 扩展 + resume 注入 | resume 后首轮提示包含中断时 pending 项（单测）；部分缺失场景各产出一条 metric；明确不承诺恢复 streaming/活跃子进程 | M1-6c/d 后更易做，可提前 | 未开始 |
 
 **出口**：G2、G5 达成；`npm test` + `typecheck` 全绿；回归记录归档。
 拆分按 a→e 分 PR 小步走，每步快照必须不变。
@@ -111,7 +112,7 @@
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
 | M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
 | M3-7 | TUI 输入 + 渲染修复（用户可感知：界面不再错位）：① 输入层：Tab 卡住 / cursor 消失 / 审批锁全局输入；② **渲染层：CJK 宽度计算全覆盖**——`ui.tsx` 已有 displayWidth 函数但仍有路径裸用 `.length`/`truncate`，中文重内容溢出换行顶歪两侧分割线；全部宽度计算收口到同一函数 | 修复 + ink-testing-library 回归用例 | 已知输入 bug 清零；中文重内容渲染快照（长中文消息 + 多 agent 满栏）分割线对齐 | — | 未开始 |
-| M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus 等）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示 | 命令层扩充（拆分后落在 TUI glue，薄层） | 命令解析单测（别名/容错/相似提示）；/help 输出快照 | M1-6e | 未开始 |
+| M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus 等）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示；⑤ **`/sessions` 列表增强**：当前只有 `[hash] id | goal | 时间`，补状态（done/err/中断点）、todo 进度、最后活动时间，支持按 agent/时间过滤 | 命令层扩充（拆分后落在 TUI glue，薄层） | 命令解析单测（别名/容错/相似提示）；/help 输出快照；/sessions 输出快照（含状态与进度列） | M1-6e | 未开始 |
 
 **出口**：G3、G4 达成；完整演示「线上 bad case → HealthMetric 归档 → QA-TL 分析 → 改 prompt → 门禁 → 回滚」；**1.0 发布**，发布前跑全量回归并归档最终回归记录。
 
@@ -146,5 +147,8 @@
 | 2026-07-20 | v1.0.0 | **M0-6 回归通过置「完成」**：`formatMetricsReport` 纯函数 + 空/过滤/格式 3 类快照断言齐备；隔离修复实测有效（跑 smoke+pm-hierarchy 后真实 `.spawn/metrics` 零增长），清掉 15 行历史污染 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M0 里程碑出口回归通过，M0 关闭**：G7 达成。出口脚本 `scripts/m0-exit-check.mts`（真实组件、非 test 进程）驱动一次完整多 agent 任务，7 类关键事件（protocol_repaired/parse_failed/fallback/fact_merged/tool_call_repeated/trace_failed/trace_completed）全部落真实 store 并经 `/metrics` 渲染。回归记录归档 `regression/M0-20260720.md`。递延项（4 个 index.tsx 闭包内埋点断言）转 M1-6e | Claude (QA) |
 | 2026-07-20 | v1.0.0 | M1-1 实现完成，状态置为「待回归」：15 个工具接入结构化参数规格，`executeTool` 执行前强校验并返回 `tool_error(invalid_args)`，失败写 `tool_arg_schema_failed` HealthMetric；工具 prompt 参数列由规格生成；主链路 executeTool 调用补 agentId 归因；registry/coding 专项 68/68 绿，`typecheck` 通过，`npm test` 420/420 绿。注意：当前未新增外部 Zod 依赖，用内部 schema 达成同等运行时合同；“超过 2 次后 handup”建议随 M1-6b ToolRuntime 拆分做可测治理 | 执行侧 |
+| 2026-07-21 | v1.0.0 | **M1-2 回归通过置「完成」**（QA 复核 424/424 绿）：factSimilarity 改 CJK 1/2/3 字符 n-gram + 虚词剥离 + containment 度量，中文近似对/无关对/英文回归/召回率断言齐备。长期记忆的中文硬伤已修复 | Claude (QA) |
+| 2026-07-21 | v1.0.0 | **记忆/resume 缺口登记**：① 新增 M1-8 resume 完整性（PLAN WS5.3 此前未映射到任务——审批队列/未完成 tool.call 进 tombstone、部分缺失检测收编 M0-4 观察项）；② M3-8 增补 /sessions 列表增强（状态/进度/最后活动/过滤） | Claude (QA) |
 | 2026-07-21 | v1.0.0 | **用户体验反馈登记为任务**（来源：真实使用反馈）：① "催了才干活" → BC-001 归档 + 新增 M1-7（acted 判定统一 + prompt 强化，`no_progress_nudge` 为验收指标）；② 中文重内容分割线错位 → M3-7 扩充渲染层（CJK 宽度收口 + 对齐快照）；③ 指令僵硬 → 新增 M3-8（命令补齐/容错/相似提示/help 分组） | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M1-1 回归通过置「完成」**（QA 复核 420/420 绿 + typecheck 干净）：校验器为真结构化校验（类型/必填/枚举/min-max/alias 归一/未知字段拒绝），字段级错误 + 期望规格回给模型可自纠，指标带 agentId 归因。**接受偏差**：内部 schema 替代 Zod（合同等价、零新依赖），PLAN G2 措辞同步修正；递延项「≤2 次自纠计数治理」写入 M1-6b 回归验证列。**风险提示**：CI 在远端不可绿——npm test 列表引用大量未落库文件（src/execution、src/inbound、src/runtime 部分、feishu 测试等），执行侧需整体提交一次实现代码 | Claude (QA) |
+| 2026-07-21 | v1.0.0 | M1-2 实现完成，状态置为「待回归」：SecretaryProxy fact 去重改为 CJK 友好的 n-gram + containment 相似度；导出 `factSimilarity` / `factTokens` 纯函数；补中文 10 组重复 fact 召回 ≥90%、中文不相似不合并、英文近重复不回归、真实 SecretaryProxy merge 权重/指标断言。专项 `pm-hierarchy` 35/35 绿，`typecheck` 通过，`npm test` 424/424 绿 | 执行侧 |
