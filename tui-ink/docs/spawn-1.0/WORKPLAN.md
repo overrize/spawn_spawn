@@ -94,7 +94,7 @@
 | M2-1 | provider `capabilities: { nativeFC, structuredOutput }` 配置与运行时选轨 | config 扩展 | config-presets 测试扩展 | M1 | 未开始 |
 | M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 | M2-1 | 未开始 |
 | M2-3 | 文本轨修复管线指标 → provider 协议健康度评分 | 健康度聚合 | 指标断言测试 | M0-2 | 未开始 |
-| M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | `src/tests/eval/parser-eval.test.ts`（13 用例：7 绿 + 6 XFAIL 账本，源自 tui.log 3500 次真实 parse 失败的挖掘） | 全部用例通过或明确 xfail | — | 待回归 |
+| M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | `src/tests/eval/parser-eval.test.ts`（13 用例：7 绿 + 6 XFAIL 账本，源自 tui.log 3500 次真实 parse 失败的挖掘） | 全部用例通过或明确 xfail | — | 完成 |
 | M2-5 | ToolRegistry 抽 adapter 层：Local / Mcp / Http 同接口，权限与观测在 adapter 之上收口 | adapter 层 | 现有工具行为不回归（registry 测试）；tool span 产出 | M1-6b | 未开始 |
 | M2-6 | MCP 最小接入：stdio MCP server 挂载为工具组 | McpAdapter | 新增一个 MCP 工具全程零核心代码改动（验收演示） | M2-5 | 未开始 |
 | M2-7 | trace_id/parent_span 全链路传播 + `/trace <id>` 调用树还原 | trace 传播 + TUI 命令 | 单任务链路日志可还原完整调用树（G6 验收用例） | M1-6a | 未开始 |
@@ -111,7 +111,7 @@
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
 | M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
-| M3-7a | **TUI 重构·设计冻结**：`TUI_REDESIGN.md` 四个待确认项（审批浮层/chat 归属/滚动/旧键位迁移）确认关闭 | 设计规格终版 | 用户确认 + QA 评审无遗留缺口 | — | 待回归 |
+| M3-7a | **TUI 重构·设计冻结**：`TUI_REDESIGN.md` 四个待确认项（审批浮层/chat 归属/滚动/旧键位迁移）确认关闭 | 设计规格终版 | 用户确认 + QA 评审无遗留缺口 | — | 完成 |
 | M3-7b | **TUI 重构·实现**（用户可感知：界面自然、永不错位）：单主视图（Home/Chat/Logs）+ Plan 三态展开层 + 常驻状态栏 + 审批浮层；渲染纯函数化 f(state)→lines；行内截断统一 displayWidth，禁裸 `.length` | 新 ui 层（按 `TUI_REDESIGN.md`） | 渲染快照矩阵（5 视图 × 英文/中文重/混合超长）零错位；键位状态机全转移单测；审批浮层用例；旧输入 bug 清单逐条不复现 | M1-6e, M3-7a | 未开始 |
 | M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus，含旧快捷键迁移 /pause /fork /info）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示；⑤ **`/sessions` 列表增强**：补状态（done/err/中断点）、todo 进度、最后活动时间，支持按 agent/时间过滤；⑥ **Claude Code 对标基线（用户定的产品原则）**：基础操作对齐——新增 `/usage`（token/成本汇总，从 /status 独立）、`/context`（各 agent 上下文占用/预算/截断状态）、`/compact`（手动压缩历史，compactHistory 已有只缺命令）、`/clear`；命名沿用 Claude Code 习惯 | 新 UI 命令层扩充（落在 M3-7b 的薄命令层上） | 命令解析单测（别名/容错/相似提示）；/help 输出快照；/sessions 输出快照（含状态与进度列） | M3-7b | 未开始 |
 
@@ -157,3 +157,5 @@
 | 2026-07-20 | v1.0.0 | **M1-1 回归通过置「完成」**（QA 复核 420/420 绿 + typecheck 干净）：校验器为真结构化校验（类型/必填/枚举/min-max/alias 归一/未知字段拒绝），字段级错误 + 期望规格回给模型可自纠，指标带 agentId 归因。**接受偏差**：内部 schema 替代 Zod（合同等价、零新依赖），PLAN G2 措辞同步修正；递延项「≤2 次自纠计数治理」写入 M1-6b 回归验证列。**风险提示**：CI 在远端不可绿——npm test 列表引用大量未落库文件（src/execution、src/inbound、src/runtime 部分、feishu 测试等），执行侧需整体提交一次实现代码 | Claude (QA) |
 | 2026-07-21 | v1.0.0 | M1-2 实现完成，状态置为「待回归」：SecretaryProxy fact 去重改为 CJK 友好的 n-gram + containment 相似度；导出 `factSimilarity` / `factTokens` 纯函数；补中文 10 组重复 fact 召回 ≥90%、中文不相似不合并、英文近重复不回归、真实 SecretaryProxy merge 权重/指标断言。专项 `pm-hierarchy` 35/35 绿，`typecheck` 通过，`npm test` 424/424 绿 | 执行侧 |
 | 2026-07-21 | v1.1.0 | M3-7a 设计冻结完成，状态置为「待回归」：`TUI_REDESIGN.md` 四个待确认项已收口为冻结方案（审批浮层顶掉 Plan、chat 为选中 agent 收件箱、P/F/C 迁 slash、`[`/`]` 滚动与 Logs live 规则）；补完整 ASCII 设计稿（Agents Home、Agent Chat、Plan 半展/全展、Logs、Approval 浮层）。实现仍按计划等待 M1-6e 后进入 M3-7b | 执行侧 |
+| 2026-07-21 | v1.1.0 | **M2-4 回归通过置「完成」**：`parser-eval.test.ts` 已接入 `npm test`，13 个真实坏输出衍生用例全部执行；6 条 XFAIL 以 characterization + ledger 固定当前缺陷，不伪装为已修复能力。复核 `typecheck` 通过，`npm test` 451 tests / 448 pass / 3 todo / 0 fail | Claude (QA) |
+| 2026-07-21 | v1.1.0 | **M3-7a 回归通过置「完成」**：`TUI_REDESIGN.md` 已冻结单主视图方案，四个待确认项关闭，ASCII 稿覆盖 Agents Home / Agent Chat / Plan 半展全展 / Logs / Approval 浮层；实现边界明确为 M1-6e 后进入 M3-7b。M3-2 种子评测和 M1-7 BC-001 画像已验收为有效基线，但 M3-2 目标为 ≥30 条，状态继续保持「进行中（种子 10/30）」 | Claude (QA) |
