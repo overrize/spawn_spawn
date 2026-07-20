@@ -111,9 +111,9 @@
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
 | M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
-| M3-7a | **TUI 重构·设计冻结**：`TUI_REDESIGN.md` 四个待确认项（审批浮层/chat 归属/滚动/旧键位迁移）确认关闭 | 设计规格终版 | 用户确认 + QA 评审无遗留缺口 | — | 进行中 |
+| M3-7a | **TUI 重构·设计冻结**：`TUI_REDESIGN.md` 四个待确认项（审批浮层/chat 归属/滚动/旧键位迁移）确认关闭 | 设计规格终版 | 用户确认 + QA 评审无遗留缺口 | — | 待回归 |
 | M3-7b | **TUI 重构·实现**（用户可感知：界面自然、永不错位）：单主视图（Home/Chat/Logs）+ Plan 三态展开层 + 常驻状态栏 + 审批浮层；渲染纯函数化 f(state)→lines；行内截断统一 displayWidth，禁裸 `.length` | 新 ui 层（按 `TUI_REDESIGN.md`） | 渲染快照矩阵（5 视图 × 英文/中文重/混合超长）零错位；键位状态机全转移单测；审批浮层用例；旧输入 bug 清单逐条不复现 | M1-6e, M3-7a | 未开始 |
-| M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus，含旧快捷键迁移 /pause /fork /info）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示；⑤ **`/sessions` 列表增强**：补状态（done/err/中断点）、todo 进度、最后活动时间，支持按 agent/时间过滤 | 新 UI 命令层扩充（落在 M3-7b 的薄命令层上） | 命令解析单测（别名/容错/相似提示）；/help 输出快照；/sessions 输出快照（含状态与进度列） | M3-7b | 未开始 |
+| M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus，含旧快捷键迁移 /pause /fork /info）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示；⑤ **`/sessions` 列表增强**：补状态（done/err/中断点）、todo 进度、最后活动时间，支持按 agent/时间过滤；⑥ **Claude Code 对标基线（用户定的产品原则）**：基础操作对齐——新增 `/usage`（token/成本汇总，从 /status 独立）、`/context`（各 agent 上下文占用/预算/截断状态）、`/compact`（手动压缩历史，compactHistory 已有只缺命令）、`/clear`；命名沿用 Claude Code 习惯 | 新 UI 命令层扩充（落在 M3-7b 的薄命令层上） | 命令解析单测（别名/容错/相似提示）；/help 输出快照；/sessions 输出快照（含状态与进度列） | M3-7b | 未开始 |
 
 **出口**：G3、G4 达成；完整演示「线上 bad case → HealthMetric 归档 → QA-TL 分析 → 改 prompt → 门禁 → 回滚」；**1.0 发布**，发布前跑全量回归并归档最终回归记录。
 
@@ -148,9 +148,11 @@
 | 2026-07-20 | v1.0.0 | **M0-6 回归通过置「完成」**：`formatMetricsReport` 纯函数 + 空/过滤/格式 3 类快照断言齐备；隔离修复实测有效（跑 smoke+pm-hierarchy 后真实 `.spawn/metrics` 零增长），清掉 15 行历史污染 | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M0 里程碑出口回归通过，M0 关闭**：G7 达成。出口脚本 `scripts/m0-exit-check.mts`（真实组件、非 test 进程）驱动一次完整多 agent 任务，7 类关键事件（protocol_repaired/parse_failed/fallback/fact_merged/tool_call_repeated/trace_failed/trace_completed）全部落真实 store 并经 `/metrics` 渲染。回归记录归档 `regression/M0-20260720.md`。递延项（4 个 index.tsx 闭包内埋点断言）转 M1-6e | Claude (QA) |
 | 2026-07-20 | v1.0.0 | M1-1 实现完成，状态置为「待回归」：15 个工具接入结构化参数规格，`executeTool` 执行前强校验并返回 `tool_error(invalid_args)`，失败写 `tool_arg_schema_failed` HealthMetric；工具 prompt 参数列由规格生成；主链路 executeTool 调用补 agentId 归因；registry/coding 专项 68/68 绿，`typecheck` 通过，`npm test` 420/420 绿。注意：当前未新增外部 Zod 依赖，用内部 schema 达成同等运行时合同；“超过 2 次后 handup”建议随 M1-6b ToolRuntime 拆分做可测治理 | 执行侧 |
+| 2026-07-21 | v1.1.0 | **M3-8 增补 Claude Code 对标基线**（用户定的产品原则，已存长期记忆）：/usage、/context、/compact、/clear 补齐，命名沿用 Claude Code；现有 24 命令 vs 基线的缺口盘点完成 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **定调变更升版（对齐 PLAN v0.3）：TUI 重构进入 1.0**。M3-7 拆为 M3-7a 设计冻结（进行中，4 个待确认项见 `TUI_REDESIGN.md`）+ M3-7b 单主视图实现（依赖 M1-6e）；M3-8 改为落在新 UI 命令层并收编旧快捷键迁移。结构性消灭竖直分割线错位 bug 类别。旧版归档 `archive/WORKPLAN-v1.0.0.md` | Claude (QA) |
 | 2026-07-21 | v1.0.0 | **M1-2 回归通过置「完成」**（QA 复核 424/424 绿）：factSimilarity 改 CJK 1/2/3 字符 n-gram + 虚词剥离 + containment 度量，中文近似对/无关对/英文回归/召回率断言齐备。长期记忆的中文硬伤已修复 | Claude (QA) |
 | 2026-07-21 | v1.0.0 | **记忆/resume 缺口登记**：① 新增 M1-8 resume 完整性（PLAN WS5.3 此前未映射到任务——审批队列/未完成 tool.call 进 tombstone、部分缺失检测收编 M0-4 观察项）；② M3-8 增补 /sessions 列表增强（状态/进度/最后活动/过滤） | Claude (QA) |
 | 2026-07-21 | v1.0.0 | **用户体验反馈登记为任务**（来源：真实使用反馈）：① "催了才干活" → BC-001 归档 + 新增 M1-7（acted 判定统一 + prompt 强化，`no_progress_nudge` 为验收指标）；② 中文重内容分割线错位 → M3-7 扩充渲染层（CJK 宽度收口 + 对齐快照）；③ 指令僵硬 → 新增 M3-8（命令补齐/容错/相似提示/help 分组） | Claude (QA) |
 | 2026-07-20 | v1.0.0 | **M1-1 回归通过置「完成」**（QA 复核 420/420 绿 + typecheck 干净）：校验器为真结构化校验（类型/必填/枚举/min-max/alias 归一/未知字段拒绝），字段级错误 + 期望规格回给模型可自纠，指标带 agentId 归因。**接受偏差**：内部 schema 替代 Zod（合同等价、零新依赖），PLAN G2 措辞同步修正；递延项「≤2 次自纠计数治理」写入 M1-6b 回归验证列。**风险提示**：CI 在远端不可绿——npm test 列表引用大量未落库文件（src/execution、src/inbound、src/runtime 部分、feishu 测试等），执行侧需整体提交一次实现代码 | Claude (QA) |
 | 2026-07-21 | v1.0.0 | M1-2 实现完成，状态置为「待回归」：SecretaryProxy fact 去重改为 CJK 友好的 n-gram + containment 相似度；导出 `factSimilarity` / `factTokens` 纯函数；补中文 10 组重复 fact 召回 ≥90%、中文不相似不合并、英文近重复不回归、真实 SecretaryProxy merge 权重/指标断言。专项 `pm-hierarchy` 35/35 绿，`typecheck` 通过，`npm test` 424/424 绿 | 执行侧 |
+| 2026-07-21 | v1.1.0 | M3-7a 设计冻结完成，状态置为「待回归」：`TUI_REDESIGN.md` 四个待确认项已收口为冻结方案（审批浮层顶掉 Plan、chat 为选中 agent 收件箱、P/F/C 迁 slash、`[`/`]` 滚动与 Logs live 规则）；补完整 ASCII 设计稿（Agents Home、Agent Chat、Plan 半展/全展、Logs、Approval 浮层）。实现仍按计划等待 M1-6e 后进入 M3-7b | 执行侧 |
