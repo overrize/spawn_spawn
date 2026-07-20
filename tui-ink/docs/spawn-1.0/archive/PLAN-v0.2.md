@@ -1,6 +1,6 @@
 # Spawn 1.0 方案（草案）
 
-> 状态：Draft v0.3 · 起草日期 2026-07-20 · 更新日期 2026-07-21
+> 状态：Draft v0.2 · 起草日期 2026-07-20 · 更新日期 2026-07-20
 > 定位口径：Spawn 是自研 Agent Harness——多 Agent 执行操作系统的内核雏形。
 > 1.0 的目标不是"再加几个 Agent"，而是两条主线：
 > **结构优化** + **自主进化埋点长期存在**。
@@ -171,12 +171,11 @@ type HealthMetric = {
 - 5.3 resume 完整性提升（量力而为，如实声明边界）：审批队列与未完成 tool.call 进 tombstone，resume 时重建为待办提示注入（不承诺恢复 streaming 请求与活跃子进程）。
 - **验收**：G5、G6。
 
-### WS6 · 安全与 TUI 体验（P1）
+### WS6 · 安全与输入层可靠性（P1）
 
 - 6.1 安全模型成文：WorkspaceBoundary 覆盖所有写路径工具（Write/Edit/Bash cwd 逃逸检查）、Bash banned list、审批矩阵（谁批谁、什么必须批）写成 `SECURITY_MODEL.md` 并配测试。
-- 6.2 **TUI 重构（v0.3 定调变更）**：从"修输入 bug"升级为"单主视图重构"——三栏并排布局是分割线错位的结构性根源，重构为 单主视图（Home/Chat/Logs 切换）+ Plan 可展开层 + 常驻状态栏，见 [TUI_REDESIGN.md](TUI_REDESIGN.md)。旧输入 bug（Tab 卡住/cursor 消失/审批锁输入）在新 UI 下逐条验证不复现，而非逐个修补。依赖 M1-6e 拆分完成。
-- 6.3 指令体验：常用命令补齐、容错、相似提示、/help 分组、/sessions 列表增强——落在新 UI 的命令层。
-- **验收**：安全矩阵有测试覆盖；渲染快照矩阵（含中文重内容）零错位；键位状态机全转移单测；旧输入 bug 清单不复现。
+- 6.2 TUI 输入层修复：Tab 卡住、cursor 消失、pending approval 锁全局输入——输入焦点是运行时的一部分，纳入回归测试（ink-testing-library）。
+- **验收**：安全矩阵有测试覆盖；已知输入层 bug 清零并有回归用例。
 
 ---
 
@@ -221,4 +220,3 @@ type HealthMetric = {
 | 2026-07-20 | v0.2 | 定调改为双主线（结构优化 + 自主进化埋点长期存在）；新增 G7 与 HealthMetric 埋点契约（§2.1）；WS5 细化为 5-runtime 拆分；WS4 增进化触发器（建议模式）；新增 M0 埋点契约阶段 |
 | 2026-07-20 | — | 文档迁移至 `docs/spawn-1.0/PLAN.md`，配套 WORKPLAN 与回归记录体系建立 |
 | 2026-07-20 | — | G7 达成（M0 关闭，回归归档）；G2 达成并修正措辞：Zod → 内部结构化 schema（合同等价、零依赖，M1-1 验收接受的实现偏差） |
-| 2026-07-21 | v0.3 | **定调变更：TUI 重构进入 1.0**（用户提案 + QA 评审采纳）：WS6.2 从"修输入 bug"改为"单主视图重构"（Home/Chat/Logs + Plan 展开层 + 常驻状态栏），设计规格 `TUI_REDESIGN.md`；结构性消灭竖直分割线错位 bug 类别；依赖 M1-6e。旧版已归档 `archive/PLAN-v0.2.md` |
