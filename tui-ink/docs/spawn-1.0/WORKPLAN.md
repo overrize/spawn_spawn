@@ -140,7 +140,7 @@
 | M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿；**补 M1-1 递延项**：invalid_args ≤2 次自纠、超限 handup 的计数治理随 ToolRuntime 实现并可测 | M1-5, M1-1 | 未开始 |
 | M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
-| M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
+| M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | **验收改（原 index.tsx<1500 被 Goodhart）**：无单一编排文件 >1500 行 + 提取的策略必须接进活代码 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
 | M1-7 | **BC-001 修复**（用户可感知：不再"催了才干活"）：统一 leader/worker 的 acted 判定（纯 `todo.set` 不算 acted）+ prompt 强化首轮必须带执行动作 | index.tsx todo.set 不再置 actedThisTurn（对齐 worker）+ leader.md/pm.md 首轮必带执行动作 | golden 25 不变 + 全量 0 fail（无回归）；**真实效果需用户端到端**（🔴 不再"催了才动"、`/metrics no_progress_nudge` 下降）；EV-011/012 自动断言随 M1-6e 补 | M0-3 | 待回归（实现完成，待用户端到端） |
 | M1-8 | **resume 完整性**（用户可感知：断了接得上"现场"，不只接得上记忆）：中断时的审批队列 + 未完成 tool.call 写入 tombstone；resume 时重建为待办提示注入首轮（PLAN WS5.3 落地）；`resume_context_missing` 扩展检测部分缺失（缺 history/todo/child state，M0-4 观察项） | tombstone 扩展 + resume 注入 | resume 后首轮提示包含中断时 pending 项（单测）；部分缺失场景各产出一条 metric；明确不承诺恢复 streaming/活跃子进程 | M1-6c/d 后更易做，可提前 | 未开始 |
 
@@ -189,6 +189,7 @@
 
 ## 变更记录
 
+| 2026-07-22 | v1.1.0 | **M1-6 退回整改（QA 独立复核抓到指标 Goodhart + 假信心）**：文件已落库（7c18c63，CI 安全），但拆分未达目标。真的：RuntimeContext（状态收进 context，L174 实例化）、index.tsx→1行入口、golden 25 不变、524/517/0 fail。**三个整改项**：① AgentRuntime.tsx **3984 行**——god-file 只是改名不是拆解，「index.tsx<1500」是被 Goodhart 的代理指标，验收改为「无单一编排文件>1500 行」；② Observability/Tool/Memory/Orchestrator 是 6-11 行 re-export 桶文件、零逻辑——要么装真逻辑要么删掉当噪音；③ **最严重**：`decideAgentIdleAfterNoTools` 活代码调用 0 次、内联 nudge 逻辑仍在（×11）——AgentIdlePolicy 是平行实现，EV-011/012/013 测的不是活路径=假信心（同 worker-circuit 老坑）。整改：把活代码的 idle 处理真正委托给 AgentIdlePolicy，EV 才有效 | Claude |
 | 2026-07-22 | v1.1.0 | **M3-7b-view 核心建成（并行轨，不依赖 M1-6）**：`src/tui/` — width.ts（CJK 对齐基元）、viewState.ts（Home/Chat/Logs + Plan 三态状态机纯 reducer）、render.ts（纯 `f(snapshot)→lines`，全视图 + Plan 层 + 审批浮层 + 状态栏）；`render.test.ts` 25 用例：**每视图每行 displayWidth 精确=cols**（英文/中文重/混合超长/审批，@88+@100）+ 状态机全转移。`scripts/tui-preview.mts` 可视预览——中文帧右边框与英文精确对齐，错位 bug 结构性消除。typecheck 干净、全量 524/514/0 fail。余：store→snapshot selector + 视图内滚动 | Claude |（"尽早拿到新 TUI"）**：视图层（Home/Chat/Logs+Plan+审批浮层的状态机与渲染）建 `src/tui/`、对现有 store 契约，**不依赖 M1-6，可立即开工**；仅接线步依赖 M1-6e。并行接缝写入 `TUI_REDESIGN.md`：两轨互不改对方文件（view 只加 src/tui/、M1-6 只动 src/runtime/+index.tsx 内部），冲突面仅 App() 且延到 wire 步——可不同人/会话同时推 | Claude |
 
 | 2026-07-22 | v1.1.0 | **M1-6 交接规格就绪 `M1-6-SPLIT-SPEC.md`（回答"能否指定人看文档做"）**：给出 index.tsx 结构地图、god-object 共享状态清单（agents 被引用 117 次等）+ RuntimeContext 注入方案（第0步）、5 步模块边界（搬什么进哪个）、安全拆分协议（每步 golden 逐字节不变/等价重构禁夹带行为变更）、6e 递延断言清单、验收。结论：senior TS 可照做，6e 需人工冒烟 + 用户端到端；golden 是防拆坏的唯一自动闸 | Claude |
