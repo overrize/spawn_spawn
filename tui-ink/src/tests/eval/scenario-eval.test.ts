@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { approve, ensureAgent, getState, _resetForTest } from "../../store.js";
+import { approve, ensureAgent, getState, pruneAgents, _resetForTest } from "../../store.js";
 import type { TuiEvent } from "../../protocol.js";
 import { Timeline, DISPATCH } from "../support/orchestrationHarness.js";
 
@@ -119,6 +119,74 @@ describe("EV·审批", () => {
     approve("b1");
     assert.equal(getState().pendingApprovals.length, 0);
     assert.equal(getState().messagesByAgent.get("w-1")!.find((m) => m.tool_id === "b1")?.approved, true);
+  });
+});
+
+describe("EV·治理·扩展", () => {
+  it("EV-014 fanout 上限阻止第 N+1 个 RUNNING 子节点", () => {
+    t.pm.setFanout(2);
+    for (const [c, g] of [["tl-a", "任务甲"], ["tl-b", "任务乙"]] as const) {
+      t.route({ v: 1, type: "spawn", parent: "pm", child: c, role: "Leader", goal: g, dispatch: DISPATCH });
+      t.route({ v: 1, type: "agent.state", agent: c, state: "run" });
+    }
+    t.route({ v: 1, type: "spawn", parent: "pm", child: "tl-c", role: "Leader", goal: "任务丙", dispatch: DISPATCH });
+    assert.equal(getState().agents.has("tl-c"), false);
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "fanout_exceeded"), true);
+  });
+
+  it("EV-015 depth≥2 的 agent 不能 spawn Leader", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    ensureAgent({ id: "mid", name: "mid", role: "Leader", state: "run", parent: "tl-1" });
+    t.route({ v: 1, type: "spawn", parent: "mid", child: "deep", role: "Leader", goal: "过深", dispatch: DISPATCH });
+    assert.equal(getState().agents.has("deep"), false);
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "depth_role_violation"), true);
+  });
+});
+
+describe("EV·收敛·扩展", () => {
+  it("EV-016 worker 报错终态后 idle 不复活（保持 err）", () => {
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "pm" });
+    t.route({ v: 1, type: "agent.error", agent: "w-1", code: "http_error", detail: "boom" });
+    t.route({ v: 1, type: "agent.state", agent: "w-1", state: "idle" });
+    assert.equal(getState().agents.get("w-1")?.state, "err");
+  });
+
+  it("EV-017 handup 的 facts_to_promote 提升进父 TL 记忆", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("tl-1", "LEADER", 1);
+    t.route({ v: 1, type: "unit.handup", agent: "tl-1", parent: "pm",
+      summary: "子任务完成", artifacts: [],
+      facts_to_promote: ["模块 A 用单例", "配置走环境变量"], decisions: [], failed_acceptance: [] } as TuiEvent);
+    const texts = sec.getMemory().working_set.facts.map((f) => f.text);
+    assert.equal(texts.some((x) => x.includes("单例")), true);
+    assert.equal(texts.some((x) => x.includes("环境变量")), true);
+  });
+
+  it("EV-018 done 后完成的 todo 项落 decisions", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("tl-1", "LEADER", 1);
+    t.route({ v: 1, type: "todo.set", agent: "tl-1", items: [
+      { id: "1", text: "评审设计", state: "done" }, { id: "2", text: "实现", state: "run" },
+    ] });
+    assert.equal(sec.getMemory().working_set.decisions.some((d) => d.text.includes("评审设计")), true);
+  });
+});
+
+describe("EV·UI 状态·扩展", () => {
+  it("EV-019 prune 目标子树隐藏而非删除（pm 免疫）", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "done", parent: "pm" });
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "done", parent: "tl-1" });
+    const n = pruneAgents("tl-1");
+    assert.ok(n >= 2);
+    assert.equal(getState().agents.get("tl-1")?.hidden, true);
+    assert.equal(getState().agents.get("w-1")?.hidden, true);
+    assert.equal(getState().agents.get("pm")?.hidden, undefined); // pm 永不隐藏
+  });
+
+  it("EV-020 spawn 事件自动聚焦新子节点（当前聚焦在父）", () => {
+    // 选中 pm，spawn tl-1 → 自动切到 tl-1
+    t.route({ v: 1, type: "spawn", parent: "pm", child: "tl-1", role: "Leader", goal: "聚焦测试", dispatch: DISPATCH });
+    assert.equal(getState().selectedAgent, "tl-1");
   });
 });
 
