@@ -96,6 +96,7 @@ export type TuiEvent =
       facts_to_promote: string[]; decisions: string[];
       failed_acceptance: string[];
       findings?: Array<{ level: "CRITICAL" | "WARNING" | "INFO"; text: string }> }
+  | { v: 1; type: "decision.record"; agent: string; decision: string; reason?: string }
   | { v: 1; type: "memory.snapshot"; agent: string; path: string; size_kb: number }
   | { v: 1; type: "shutdown.start"; agent: string; reason: string }
   | { v: 1; type: "pm.alert"; severity: "warn" | "error";

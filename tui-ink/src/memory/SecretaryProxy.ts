@@ -9,7 +9,14 @@ import { saveMemory, appendMessage, appendReminder, startSession, topFactsByWeig
 import { globalBus } from "../bus/Bus.js";
 import { recordHealthMetric } from "../runtime/HealthMetrics.js";
 
-const DECISION_KEYWORDS = /应该|决定|选择|采用|方案|确认|将要|采取|should|decided|chosen|use|using|will\s/i;
+// M1-4: fallback-only heuristic. Requires an actual decision VERB (not a topic
+// word like 方案/should/will) and excludes questions, so "这个方案你看过了吗？"
+// is no longer captured. Primary path is the explicit decision.record event.
+const DECISION_VERB = /决定|采用|选择|采取|确定|敲定|拍板|decided|chose|chosen|adopt|go with/i;
+const QUESTION_HINT = /[?？]|吗\s*[?？]?\s*$|呢\s*[?？]?\s*$/;
+function looksLikeDecision(text: string): boolean {
+  return DECISION_VERB.test(text) && !QUESTION_HINT.test(text);
+}
 const TIME_KEYWORDS = /下午|上午|晚上|早上|明天|后天|今天|[0-9]+[:：][0-9]+|[0-9]+\s*点|pm\b|am\b/i;
 
 export class SecretaryProxy extends EventEmitter {
@@ -74,9 +81,21 @@ export class SecretaryProxy extends EventEmitter {
         }
         break;
 
+      case "decision.record":
+        if (ev.agent === id) {
+          this.addDecision({
+            id: `d${++this.decisionSeq}`,
+            text: ev.decision.slice(0, 300),
+            rationale: (ev.reason ?? "").slice(0, 300),
+            ts: Date.now(),
+          });
+        }
+        break;
+
       case "message":
         if (ev.agent === id) {
-          if (DECISION_KEYWORDS.test(ev.text)) {
+          // Fallback only — the primary path is the explicit decision.record event.
+          if (looksLikeDecision(ev.text)) {
             this.addDecision({
               id: `d${++this.decisionSeq}`,
               text: ev.text.slice(0, 300),

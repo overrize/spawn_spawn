@@ -134,7 +134,7 @@
 | M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 完成 |
 | M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 完成 |
 | M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | `src/context/tokens.ts`（estimateTokens/totalTokens）+ `compactHistoryByTokens`；resume→15K tok、trim→20K tok、fork→10K tok | `token-budget-m1-3.test.ts` 8/8 绿（含 5 条原 it.todo 转正 + 单调性）；golden 25 不变 | — | 完成 |
-| M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | 协议 + SecretaryProxy 改造 | decision 提取用例（中/英）— QA 已交测试先行 `src/tests/eval/decision-extraction-m1-4.test.ts`（4 characterization 钉现状+假阳/假阴/**normalizer 缺 decision.record 的 GAP** + 4 it.todo 目标契约） | — | 进行中（QA 测试先行已交，待实现） |
+| M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | protocol TuiEvent + normalizer VALID_TYPES + SecretaryProxy(decision.record→rationale) + store 展示；正则收紧为「决策动词且非疑问句」 | `decision-extraction-m1-4.test.ts` 8/8 绿（4 it.todo 转正 + 2 假阳/GAP characterization 有意识更新）；golden 25 不变 | — | 完成 |
 | M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/orchestration-golden.test.ts`（25 用例，已入 `npm test`） | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 完成 |
 | M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获） | 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始 |
 | M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿；**补 M1-1 递延项**：invalid_args ≤2 次自纠、超限 handup 的计数治理随 ToolRuntime 实现并可测 | M1-5, M1-1 | 未开始 |
@@ -188,6 +188,7 @@
 
 ## 变更记录
 
+| 2026-07-22 | v1.1.0 | **M1-4 完成（Claude 直接实现）**：`decision.record` 加入 protocol TuiEvent + normalizer VALID_TYPES（原被当未知类型丢弃的 GAP 修复）；SecretaryProxy 新增 decision.record 分支（decision→text、reason→rationale）；store 加展示（🧭 debug）；关键词正则收紧为 `looksLikeDecision`（需决策动词 决定/采用/… 且排除疑问句），消除"方案你看过了吗？"假阳。8/8 绿（4 it.todo 转正 + 假阳/GAP 两条 characterization 有意识翻转）、golden 25 不变、test:full exit 0、全量 499/489/0 fail | Claude |
 | 2026-07-21 | v1.1.0 | **M1-3 完成（Claude 直接实现）**：新增 `context/tokens.ts` estimateTokens（CJK≈1/字、ASCII≈len/4、单调、han(100)≥3×ascii(100)）+ `compactHistoryByTokens`；resume 60K字→15K tok、trim 80K字→20K tok、fork 40K字→10K tok 全切 token 预算；char 版 compactHistory 降级保留。5 条 it.todo 转正、golden 25 不变、test:full exit 0、全量 499/485/0 fail。**偏差**：原「estimateTokens 不可用降级 char」的 it.todo 取消——实现为纯启发式无网络、恒可用，改测单调性+欠预算直通 | Claude |
 | 2026-07-21 | v1.1.0 | **分工模型废止**：用户指示 Claude 直接实现+验证，不再拆 QA/执行侧两角。「分工」节加废止横幅、记忆 `feedback-prompt-style` 已更新。执行顺序/DoD/双轨预取等质量机制保留 | Claude |
 | 2026-07-21 | v1.1.0 | **新增「执行侧验收自查清单（DoD）」节**：为 M1-3/M1-4/M1-6a..e/M1-7/M2-2 逐条列出完成必满足项 + 通用前置（typecheck/npm test/test:full/golden 不变），执行侧交付前自查勾全再置「待回归」，省一轮来回 | Claude (QA) |

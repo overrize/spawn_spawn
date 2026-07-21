@@ -7,6 +7,8 @@ const VALID_TYPES = new Set([
   // S6 events
   "unit.handup", "memory.snapshot", "shutdown.start",
   "pm.alert", "proposal.new", "proposal.decision",
+  // M1-4: explicit decision recording (primary; keyword regex is fallback)
+  "decision.record",
   // Bash approval protocol: leader approves/rejects destructive worker commands
   "tool.approved", "tool.rejected",
   // Parent can kill a child agent

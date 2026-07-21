@@ -438,6 +438,13 @@ export function applyEvent(e: TuiEvent) {
         level: "info",
       });
       break;
+    case "decision.record":
+      pushMessage(e.agent, {
+        agent: e.agent, to: "user", kind: "system",
+        text: `🧭 decision: ${e.decision}${e.reason ? ` — ${e.reason}` : ""}`,
+        level: "debug",
+      });
+      break;
     case "memory.snapshot":
       pushMessage(e.agent, {
         agent: e.agent, to: "user", kind: "system",

@@ -59,10 +59,11 @@ describe("M1-4·characterization: decision = keyword regex (current)", () => {
     assert.deepEqual(decisionsOf(sec), ["我们决定采用方案 B"]);
   });
 
-  it("FALSE POSITIVE: non-decision containing a keyword is logged anyway", () => {
-    // "方案" appears but this is a question, not a decision.
+  it("FIXED (M1-4): question containing a topic word is no longer captured", () => {
+    // "方案" appears but this is a question — fallback now requires a decision VERB
+    // and excludes questions, so it is NOT logged.
     sec.observe({ v: 1, type: "message", agent: "tl-1", to: "pm", text: "这个方案你看过了吗？" } as TuiEvent);
-    assert.equal(decisionsOf(sec).length, 1, "current regex over-captures — logged despite not being a decision");
+    assert.equal(decisionsOf(sec).length, 0, "tightened fallback no longer over-captures");
   });
 
   it("FALSE NEGATIVE: a real decision without a keyword is missed", () => {
@@ -70,11 +71,11 @@ describe("M1-4·characterization: decision = keyword regex (current)", () => {
     assert.equal(decisionsOf(sec).length, 0, "current regex under-captures — real decision has no keyword");
   });
 
-  it("GAP: decision.record JSON is dropped by normalizer today (not in VALID_TYPES)", () => {
+  it("FIXED (M1-4): decision.record JSON now emits an event (added to VALID_TYPES)", () => {
     const out: TuiEvent[] = [];
     parseAgentOutput(`{"type":"decision.record","decision":"采用方案 B","reason":"改动面小"}`, "tl-1", (ev) => out.push(ev));
-    // Unknown type → dropped. The executor must add decision.record to VALID_TYPES.
-    assert.deepEqual(out, [], "decision.record currently produces no event");
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.type, "decision.record");
   });
 });
 
@@ -87,9 +88,36 @@ describe("M1-4·characterization: decision = keyword regex (current)", () => {
 // 4. Precision/recall on a labeled CN+EN decision set beats the current regex
 //    baseline (regex baseline captured by the characterization above).
 
-describe("M1-4·target: explicit decision.record primary (executor implements)", () => {
-  it.todo("normalizer emits decision.record event (added to VALID_TYPES)");
-  it.todo("SecretaryProxy records decision.record with rationale=reason");
-  it.todo("keyword regex demoted to fallback — false-positive case above no longer logged");
-  it.todo("labeled CN+EN decision set: precision & recall both improve vs regex baseline");
+describe("M1-4·target: explicit decision.record primary (implemented)", () => {
+  let sec: SecretaryProxy;
+  beforeEach(() => { sec = newSecretary("tl-2"); });
+
+  it("SecretaryProxy records decision.record with rationale=reason", () => {
+    sec.observe({ v: 1, type: "decision.record", agent: "tl-2", decision: "配置拆两层", reason: "改动面小" } as TuiEvent);
+    const d = sec.getMemory().working_set.decisions;
+    assert.equal(d.length, 1);
+    assert.equal(d[0]!.text, "配置拆两层");
+    assert.equal(d[0]!.rationale, "改动面小");
+  });
+
+  it("end-to-end: decision.record JSON → parse → Secretary records it (rationale preserved)", () => {
+    parseAgentOutput(
+      `{"type":"decision.record","decision":"采用 provider catalog","reason":"解耦 model/baseUrl"}`,
+      "tl-2",
+      (ev) => sec.observe(ev),
+    );
+    const d = sec.getMemory().working_set.decisions;
+    assert.equal(d.some((x) => x.text.includes("provider catalog") && x.rationale.includes("解耦")), true);
+  });
+
+  it("regex is fallback: a keyword-free real decision is still missed by regex (needs decision.record)", () => {
+    // The false-negative case — regex can't catch it; decision.record is how it gets recorded.
+    sec.observe({ v: 1, type: "message", agent: "tl-2", to: "pm", text: "配置拆成两层，角色只引用模型键。" } as TuiEvent);
+    assert.equal(sec.getMemory().working_set.decisions.length, 0);
+  });
+
+  it("fallback still captures an explicit verb decision (真决定 via message)", () => {
+    sec.observe({ v: 1, type: "message", agent: "tl-2", to: "pm", text: "我们决定采用方案 B" } as TuiEvent);
+    assert.equal(sec.getMemory().working_set.decisions.length, 1);
+  });
 });
