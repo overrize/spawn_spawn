@@ -75,7 +75,7 @@
 |---|---|---|---|---|---|
 | M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 完成 |
 | M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 完成 |
-| M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | tokenizer 估算层 | 中英文混合历史截断对比测试 | — | 未开始 |
+| M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | tokenizer 估算层 | 中英文混合历史截断对比测试 — QA 已交测试先行 `src/tests/eval/token-budget-m1-3.test.ts`（3 characterization 钉现状 + 5 it.todo 目标契约：estimateTokens 语言权重 / compactHistoryByTokens / 等 token 公平截断 / resume 重表述为 token / 降级兜底），执行侧实现到 it.todo 转绿 | — | 进行中（QA 测试先行已交，待实现） |
 | M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | 协议 + SecretaryProxy 改造 | decision 提取用例（中/英） | — | 未开始 |
 | M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/orchestration-golden.test.ts`（25 用例，已入 `npm test`） | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 完成 |
 | M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获） | 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始 |
@@ -130,6 +130,7 @@
 
 ## 变更记录
 
+| 2026-07-21 | v1.1.0 | **M1-3 测试先行交付（QA，协作节奏#1）**：`token-budget-m1-3.test.ts` 先于实现交付——A 半 characterization 钉死当前 char 预算行为（含"BUG: char 预算语言盲，等 char 的中英文截断结果相同、无视 token 成本差"）；B 半 5 条 it.todo 写死 token 预算目标契约（estimateTokens：ascii≈len/4、CJK≈1/字、han(100)≥3×ascii(100)；compactHistoryByTokens 保留 idx0+末4 按 token 丢中段；等 token EN/CN 公平截断；resume 重表述 ~15K token；estimateTokens 不可用时降级 char）。M1-3 置「进行中（待实现）」，执行侧实现到 5 条 it.todo 转绿。全量 460/452 绿/0 fail/8 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M0-7 回归通过置「完成」，BC-002 关闭，CI 全绿达成**：修复 8c24027 采纳 BC-002 推荐叠加方案——退出闸改 `suite.isSuccessful()`（phase 计数 + length>0 防空）+ `ensureMonitor()` 幂等兜底 + `run-full-exit.test.ts` 子进程退出码断言。QA 独立复核 CI 全部步骤：typecheck 干净、npm test 452/449 绿/0 fail/3 todo、test:headless 82/82、**test:full exit 0（65/0，修复目标达成）**、test:e2e:full exit 0（62/0，无连带回归）。CI red 两源（缺文件 5961b95 + 退出码 8c24027）均已解决 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **CI 落库复核 + 发现第二个 CI-red 源**：验证 5961b95 落库完整自洽（31 测试文件全跟踪、src/config 树与 HEAD 一致、无未跟踪 src import）；独立跑 CI 全部步骤——`npm test` 448 绿、`test:headless` 82 绿、`test:e2e:full` exit 0，但 **`test:full` 检查全绿却 exit 1**。归因：`test-monitor` 被 phase 清理删除→最终 agent.done no-op→退出闸判定失败（探针实测 monitor 不存在）。先前存在（父提交同样复现），归档 BC-002 + 新增 M0-7。缺文件的 CI 风险已由落库解决，此为独立第二源 | Claude (QA) |
 
