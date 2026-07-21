@@ -78,6 +78,7 @@ export class TestSuite {
     await this.runPhase("4. 长周期多 Agent 测试",   (chk) => this.phaseLongSession(chk));
     await this.runPhase("5. Token 统计验证",        (chk) => this.phaseTokens(chk));
 
+    this.ensureMonitor();
     this.outputReport();
 
     // Remove transient test agents created across all phases.
@@ -93,9 +94,13 @@ export class TestSuite {
     applyEvent({
       v: 1, type: "agent.done",
       agent: this.monitorId,
-      success: this.phases.every((p) => p.failed === 0),
+      success: this.isSuccessful(),
       reason:  "测试完成",
     });
+  }
+
+  isSuccessful(): boolean {
+    return this.phases.length > 0 && this.phases.every((p) => p.failed === 0);
   }
 
   // ── Phase runner ──────────────────────────────────────────────────────────
@@ -477,5 +482,10 @@ export class TestSuite {
 
   protected emit(text: string): void {
     applyEvent({ v: 1, type: "message", agent: this.monitorId, to: "user", text });
+  }
+
+  private ensureMonitor(): void {
+    ensureAgent({ id: this.monitorId, name: "test-monitor", role: "Leader", state: "run" });
+    selectAgent(this.monitorId);
   }
 }

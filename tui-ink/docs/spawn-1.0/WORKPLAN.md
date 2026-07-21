@@ -64,7 +64,7 @@
 | M0-4 | memory / resume 接入：`memory_fact_merged` / `memory_fact_dropped` / `resume_context_missing` | SecretaryProxy / MemoryStore / resume 路径埋点 | pm-hierarchy + integration 测试扩展 | M0-1 | 完成 |
 | M0-5 | 任务收敛事件：`trace_completed` / `trace_failed` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` | done-guard 与任务终态埋点 | 完成守卫测试扩展 | M0-1 | 完成 |
 | M0-6 | 查询入口：`/metrics` slash command（按 event_type/agent/时间过滤）或等价 CLI | TUI 命令或脚本 | 手工验收 + 快照测试 | M0-1..5 | 完成 |
-| M0-7 | **BC-002 修复**（CI 绿的必要条件）：`test:full` 检查全绿却退出码 1——`test-monitor` 被 phase 清理删除，最终 agent.done 落空 no-op（见 `badcases/BC-002`）。清理排除 monitor / 或退出闸改用 phases 计数 + 加 exit-code 冒烟 | run-full 或 TestSuite 修复 + CI 冒烟 | `npm run test:full` exit 0；父提交回归对照 | — | 未开始 |
+| M0-7 | **BC-002 修复**（CI 绿的必要条件）：`test:full` 检查全绿却退出码 1——`test-monitor` 被 phase 清理删除，最终 agent.done 落空 no-op（见 `badcases/BC-002`）。清理排除 monitor / 或退出闸改用 phases 计数 + 加 exit-code 冒烟 | run-full 或 TestSuite 修复 + CI 冒烟 | `npm run test:full` exit 0；父提交回归对照 | — | 待回归 |
 
 **出口**：G7 达成；跑一次真实任务后 `.spawn/metrics/` 有完整事件流；回归记录归档。
 **注**：M0-7 是先前潜伏的 CI-red 源（与 M0 埋点无关，因 CI 复核发现顺手归此里程碑），修复前 CI 无法全绿。
@@ -163,3 +163,4 @@
 | 2026-07-21 | v1.1.0 | M3-7a 设计冻结完成，状态置为「待回归」：`TUI_REDESIGN.md` 四个待确认项已收口为冻结方案（审批浮层顶掉 Plan、chat 为选中 agent 收件箱、P/F/C 迁 slash、`[`/`]` 滚动与 Logs live 规则）；补完整 ASCII 设计稿（Agents Home、Agent Chat、Plan 半展/全展、Logs、Approval 浮层）。实现仍按计划等待 M1-6e 后进入 M3-7b | 执行侧 |
 | 2026-07-21 | v1.1.0 | **M2-4 回归通过置「完成」**：`parser-eval.test.ts` 已接入 `npm test`，13 个真实坏输出衍生用例全部执行；6 条 XFAIL 以 characterization + ledger 固定当前缺陷，不伪装为已修复能力。复核 `typecheck` 通过，`npm test` 451 tests / 448 pass / 3 todo / 0 fail | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M3-7a 回归通过置「完成」**：`TUI_REDESIGN.md` 已冻结单主视图方案，四个待确认项关闭，ASCII 稿覆盖 Agents Home / Agent Chat / Plan 半展全展 / Logs / Approval 浮层；实现边界明确为 M1-6e 后进入 M3-7b。M3-2 种子评测和 M1-7 BC-001 画像已验收为有效基线，但 M3-2 目标为 ≥30 条，状态继续保持「进行中（种子 10/30）」 | Claude (QA) |
+| 2026-07-21 | v1.1.0 | M0-7 实现完成，状态置为「待回归」：TestSuite 在输出报告/终态前幂等恢复 `test-monitor`，`run-full.ts` 退出闸改为 phase 结果 `suite.isSuccessful()`，不再依赖 monitor 存活；新增 `run-full-exit.test.ts` 子进程冒烟，断言 run-full exit 0 且报告 `65 通过 / 0 失败`；已跑 `typecheck`、`npm test`、headless 等价入口、`test:e2e:full` 等价入口、`test:full` 等价入口通过 | 执行侧 |

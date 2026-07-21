@@ -19,9 +19,7 @@ suite.run().then(() => {
     process.stdout.write(m.text + "\n");
   }
 
-  const monitor = getState().agents.get(MONITOR);
-  const ok = monitor?.state === "done";
-  process.exit(ok ? 0 : 1);
+  process.exit(suite.isSuccessful() ? 0 : 1);
 }).catch((e) => {
   process.stderr.write(`TestSuite fatal: ${e}\n`);
   process.exit(1);
