@@ -94,7 +94,7 @@
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | M2-1 | provider `capabilities: { nativeFC, structuredOutput }` 配置与运行时选轨 | config 扩展 | config-presets 测试扩展 | M1 | 未开始 |
-| M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 | M2-1 | 未开始 |
+| M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 — QA 已交判定框架 `src/tests/eval/dual-rail-equivalence-m2-2.test.ts`（`canonicalize()` 判等关系 + 6 条文本轨金牌签名含多动作硬用例 + 7 it.todo native 侧） | M2-1 | 进行中（QA 判定框架已交，待 native 实现） |
 | M2-3 | 文本轨修复管线指标 → provider 协议健康度评分 | 健康度聚合 | 指标断言测试 | M0-2 | 未开始 |
 | M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | `src/tests/eval/parser-eval.test.ts`（13 用例：7 绿 + 6 XFAIL 账本，源自 tui.log 3500 次真实 parse 失败的挖掘） | 全部用例通过或明确 xfail | — | 完成 |
 | M2-5 | ToolRegistry 抽 adapter 层：Local / Mcp / Http 同接口，权限与观测在 adapter 之上收口 | adapter 层 | 现有工具行为不回归（registry 测试）；tool span 产出 | M1-6b | 未开始 |
@@ -130,6 +130,7 @@
 
 ## 变更记录
 
+| 2026-07-21 | v1.1.0 | **M2-2 双轨等价性判定框架交付（QA 测试先行，执行侧建 native 轨前）**：定义 `canonicalize()` 判等关系（type + 语义字段签名，忽略 id/时间戳/_fallback 等轨道噪声）；6 条文本轨金牌签名钉住目标（单 message/tool.call/spawn、**多动作轮 message+spawn 硬用例**、plan-then-act、done）；7 条 it.todo 为 native 侧（含 emit_events 多动作 + 全 M3-2 意图集等价）。执行侧建 native 适配层时实现到 it.todo 逐条 deepEqual 文本轨金牌。全量 499/480 绿/0 fail/19 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **回应评审：EV-017 命名/语义修正 + 补真·父级聚合 EV-031**（执行侧+用户双方指出）：EV-017 改名为「facts_to_promote 落入该 agent 自己的 Secretary」并加注说明（unit.handup 走 `ev.agent===id` 自提升，非父聚合）；新增 EV-031 验 `PM Secretary.ingestChildMemory` 真父级聚合（子 TL 事实带 `[tl-1]` 来源前缀）。全量 486/474 绿/0 fail/12 todo | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M3-2 案例编写达标 30/30**：续扩 20→30——新增 EV-021 tombstone 落盘重载、022 消息持久化 loadMessages、023 err tombstone、024 token 累计 per-agent/session、025 loop 计数告警、026 leader→leader 正例、027 worker→worker 拦截、028 dispatch 缺 stop_conditions、029 同 goal 不同父放行、030 未知工具返错不抛。27 具体 demo 全绿 + 3 递延（M1-6e）。剩 M3-2 的「live QA-TL 执行器」半仍待做。全量 485/473 绿/0 fail/12 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **QA 并行批量交付（减少一收一放）**：一次交三样待实现/我方任务的产出——① M1-4 测试先行 `decision-extraction-m1-4.test.ts`（4 characterization 钉现状：真决定/假阳「方案」误捕/假阴无关键词漏捕/**GAP：decision.record 未入 normalizer VALID_TYPES 会被丢**；4 it.todo 目标契约）；② M3-2 评测集扩容 10→20（新增 EV-014 fanout、015 深度、016 err 不复活、017 handup facts 提升、018 todo done 落 decision、019 prune 子树隐藏 pm 免疫、020 spawn 自动聚焦）；③ M1-6 安全网加宽评估后跳过——kill/orchestrator 逻辑在 index.tsx 内、拆分前不可测（正是拆分本身解锁），不做低质填充。全量 475/463 绿/0 fail/12 todo，typecheck 干净。M1-4 置「进行中(待实现)」、M3-2「进行中(20/30)」 | Claude (QA) |
