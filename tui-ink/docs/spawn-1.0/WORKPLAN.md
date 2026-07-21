@@ -74,6 +74,40 @@
 
 ---
 
+## 执行侧验收自查清单（Definition of Done）
+
+交付前逐条勾全，全绿再置「待回归」。**通用前置**（每条都要）：`npm run typecheck` 干净 · `npm test` 0 fail · `npm run test:full` exit 0 · 触碰编排路径则 `orchestration-golden` 25 用例逐字节不变。
+
+**M1-3 token 预算**
+- [ ] `estimateTokens` 实现：ascii≈len/4、CJK≈1/字、`han(100) ≥ 3×ascii(100)`、单调不减
+- [ ] `compactHistoryByTokens` 保留 idx0+末4、按 token 丢中段；resume/trim/compact 三处 char 预算改 token（resume≈15K token）
+- [ ] estimateTokens 不可用时降级 char 预算不崩
+- [ ] `token-budget-m1-3.test.ts` 5 条 it.todo 全转绿；characterization 3 条被**有意识更新**（不是绕过）
+
+**M1-4 decision 协议化**
+- [ ] normalizer `VALID_TYPES` 加 `decision.record`，parseAgentOutput 能产出该事件（先补这个，否则被丢）
+- [ ] SecretaryProxy 记录 decision.record → `{text:decision, rationale:reason}`
+- [ ] 关键词正则降为 fallback：假阳用例（"这个方案你看过了吗？"）不再被记为 decision
+- [ ] `decision-extraction-m1-4.test.ts` 4 条 it.todo 全转绿
+
+**M1-6a..e 五步拆分**（每步一个 PR，小步走）
+- [ ] 每步 `orchestration-golden` 25 用例不变（这是硬门）
+- [ ] 6a Observability / 6b Tool（+registry 绿）/ 6c Memory（+memory 绿）/ 6d Orchestrator（+pm-hierarchy 绿）/ 6e Agent（index.tsx <1500 行）
+- [ ] 6e 补 M0 递延断言：`hard_circuit_fired`/`resume_context_missing`/`agent_done_blocked_by_guard`/`test_failed_but_claimed_done` 拆出后可单测并补
+- [ ] 6e 后 `scenario-eval` 3 条 it.todo（EV-011/012/013）转正
+
+**M1-7 BC-001 修复**
+- [ ] leader/worker 的 acted 判定统一：纯 `todo.set` 两侧都不算 acted
+- [ ] prompt 强化首轮必须带执行动作
+- [ ] 示例任务 `no_progress_nudge` 指标显著下降（跑 `/metrics no_progress_nudge` 对比）；EV-010 画像仍成立或按预期更新
+
+**M2-2 native 轨**
+- [ ] tool_use/tool_calls → TuiEvent 适配；多动作走 `emit_events`
+- [ ] `dual-rail-equivalence-m2-2.test.ts` 7 条 it.todo 全转绿：native 侧 `canonicalize()` 逐条 deepEqual 文本轨金牌
+- [ ] native 轨 `fallback_message_emitted` = 0
+
+---
+
 ## M0 · 埋点契约
 
 先把"系统怎么坏的"变成长期可查询数据。stderr 保留但不再是数据契约。
@@ -152,6 +186,7 @@
 
 ## 变更记录
 
+| 2026-07-21 | v1.1.0 | **新增「执行侧验收自查清单（DoD）」节**：为 M1-3/M1-4/M1-6a..e/M1-7/M2-2 逐条列出完成必满足项 + 通用前置（typecheck/npm test/test:full/golden 不变），执行侧交付前自查勾全再置「待回归」，省一轮来回 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **新增「执行顺序与双轨模型」节**（回应"为什么不按顺序"）：明确执行侧轨=关键路径按依赖顺序（给出 M1-3→…→M1-6e→M2/M3 的起步队列）、QA 轨=测试先行预取与顺序无关；固化关闭规则（测试先行≠完成、里程碑需全任务完成）；澄清 M3-2 恒「进行中」直至 live QA-TL 执行器（归执行侧，排 M3-3 后）完成 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M2-2 双轨等价性判定框架交付（QA 测试先行，执行侧建 native 轨前）**：定义 `canonicalize()` 判等关系（type + 语义字段签名，忽略 id/时间戳/_fallback 等轨道噪声）；6 条文本轨金牌签名钉住目标（单 message/tool.call/spawn、**多动作轮 message+spawn 硬用例**、plan-then-act、done）；7 条 it.todo 为 native 侧（含 emit_events 多动作 + 全 M3-2 意图集等价）。执行侧建 native 适配层时实现到 it.todo 逐条 deepEqual 文本轨金牌。全量 499/480 绿/0 fail/19 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **回应评审：EV-017 命名/语义修正 + 补真·父级聚合 EV-031**（执行侧+用户双方指出）：EV-017 改名为「facts_to_promote 落入该 agent 自己的 Secretary」并加注说明（unit.handup 走 `ev.agent===id` 自提升，非父聚合）；新增 EV-031 验 `PM Secretary.ingestChildMemory` 真父级聚合（子 TL 事实带 `[tl-1]` 来源前缀）。全量 486/474 绿/0 fail/12 todo | Claude (QA) |
