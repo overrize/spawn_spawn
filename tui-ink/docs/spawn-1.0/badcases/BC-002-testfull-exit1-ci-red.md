@@ -1,6 +1,7 @@
 # BC-002 · `npm run test:full` 检查全绿但退出码 1 → CI 红
 
-> 状态：已修复待回归，修复任务 M0-7 · 登记 2026-07-21 · 来源：CI 落库后 QA 独立复核
+> 状态：**已修复已验收（closed）**，修复提交 8c24027 · 登记 2026-07-21 · 来源：CI 落库后 QA 独立复核
+> 修复：run-full 退出闸改用 `suite.isSuccessful()`（phase 计数，含 length>0 防空数组）+ `ensureMonitor()` 幂等兜底 + `run-full-exit.test.ts` 子进程断言退出码。QA 复核：test:full exit 0（65/0）、npm test 449 绿、test:e2e:full/headless 未回归。
 > 性质：**先前存在**（父提交 5961b95~1 同样复现），与 eval 落库提交无关
 
 ## 现象

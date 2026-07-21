@@ -64,7 +64,7 @@
 | M0-4 | memory / resume 接入：`memory_fact_merged` / `memory_fact_dropped` / `resume_context_missing` | SecretaryProxy / MemoryStore / resume 路径埋点 | pm-hierarchy + integration 测试扩展 | M0-1 | 完成 |
 | M0-5 | 任务收敛事件：`trace_completed` / `trace_failed` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` | done-guard 与任务终态埋点 | 完成守卫测试扩展 | M0-1 | 完成 |
 | M0-6 | 查询入口：`/metrics` slash command（按 event_type/agent/时间过滤）或等价 CLI | TUI 命令或脚本 | 手工验收 + 快照测试 | M0-1..5 | 完成 |
-| M0-7 | **BC-002 修复**（CI 绿的必要条件）：`test:full` 检查全绿却退出码 1——`test-monitor` 被 phase 清理删除，最终 agent.done 落空 no-op（见 `badcases/BC-002`）。清理排除 monitor / 或退出闸改用 phases 计数 + 加 exit-code 冒烟 | run-full 或 TestSuite 修复 + CI 冒烟 | `npm run test:full` exit 0；父提交回归对照 | — | 待回归 |
+| M0-7 | **BC-002 修复**（CI 绿的必要条件）：`test:full` 检查全绿却退出码 1——`test-monitor` 被 phase 清理删除，最终 agent.done 落空 no-op（见 `badcases/BC-002`）。清理排除 monitor / 或退出闸改用 phases 计数 + 加 exit-code 冒烟 | run-full 或 TestSuite 修复 + CI 冒烟 | `npm run test:full` exit 0；父提交回归对照 | — | 完成 |
 
 **出口**：G7 达成；跑一次真实任务后 `.spawn/metrics/` 有完整事件流；回归记录归档。
 **注**：M0-7 是先前潜伏的 CI-red 源（与 M0 埋点无关，因 CI 复核发现顺手归此里程碑），修复前 CI 无法全绿。
@@ -130,6 +130,7 @@
 
 ## 变更记录
 
+| 2026-07-21 | v1.1.0 | **M0-7 回归通过置「完成」，BC-002 关闭，CI 全绿达成**：修复 8c24027 采纳 BC-002 推荐叠加方案——退出闸改 `suite.isSuccessful()`（phase 计数 + length>0 防空）+ `ensureMonitor()` 幂等兜底 + `run-full-exit.test.ts` 子进程退出码断言。QA 独立复核 CI 全部步骤：typecheck 干净、npm test 452/449 绿/0 fail/3 todo、test:headless 82/82、**test:full exit 0（65/0，修复目标达成）**、test:e2e:full exit 0（62/0，无连带回归）。CI red 两源（缺文件 5961b95 + 退出码 8c24027）均已解决 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **CI 落库复核 + 发现第二个 CI-red 源**：验证 5961b95 落库完整自洽（31 测试文件全跟踪、src/config 树与 HEAD 一致、无未跟踪 src import）；独立跑 CI 全部步骤——`npm test` 448 绿、`test:headless` 82 绿、`test:e2e:full` exit 0，但 **`test:full` 检查全绿却 exit 1**。归因：`test-monitor` 被 phase 清理删除→最终 agent.done no-op→退出闸判定失败（探针实测 monitor 不存在）。先前存在（父提交同样复现），归档 BC-002 + 新增 M0-7。缺文件的 CI 风险已由落库解决，此为独立第二源 | Claude (QA) |
 
 | 日期 | 版本 | 变更 | 记录人 |
