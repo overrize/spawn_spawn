@@ -1,13 +1,10 @@
 /**
- * store → TuiSnapshot selector (spawn-1.0 M3-7b-view).
- *
- * Pure projection of the store State into the render read-model. Keeps
- * render.ts decoupled from the store shape — the wire step (M3-7b-wire) calls
- * this inside a useStore selector. Pure ⇒ unit-testable without React.
+ * store → TuiSnapshot selector (spawn-1.0 M3-7c). Pure projection of the store
+ * State into the render read-model; keeps render.ts decoupled from the store.
  */
 
 import type { AgentInfo, Message, TodoItem } from "../protocol.js";
-import type { AgentRow, ChatMsg, LogRow, TodoRow, TuiSnapshot } from "./render.js";
+import type { AgentRow, AgentState, ChatMsg, LogRow, TodoRow, TuiSnapshot } from "./render.js";
 
 interface StoreLike {
   agents: Map<string, AgentInfo>;
@@ -17,55 +14,47 @@ interface StoreLike {
   pendingApprovals: Message[];
 }
 
-export interface SnapshotOpts {
-  model?: string;
-  webOn?: boolean;
-  input?: string;
+export interface SnapshotOpts { model?: string; webOn?: boolean; input?: string; scrollOffset?: number }
+
+function mapState(s: AgentInfo["state"]): AgentState {
+  if (s === "run" || s === "idle" || s === "done" || s === "err") return s;
+  return "waiting";
 }
 
-function mapState(s: AgentInfo["state"]): AgentRow["state"] {
-  return s === "run" || s === "idle" || s === "done" || s === "err" ? s : "idle";
-}
-
-/** Order agents as a stable pre-order tree (root → children), skipping hidden. */
-function orderedTree(agents: Map<string, AgentInfo>): AgentInfo[] {
+/** Pre-order tree (root → children), with `last` = last child at its level. */
+function orderedTree(agents: Map<string, AgentInfo>): Array<{ a: AgentInfo; depth: number; last: boolean }> {
   const all = [...agents.values()].filter((a) => !a.hidden);
-  const byParent = new Map<string, AgentInfo[]>();
+  const kids = new Map<string, AgentInfo[]>();
   for (const a of all) {
-    const key = a.parent ?? "";
-    (byParent.get(key) ?? byParent.set(key, []).get(key)!).push(a);
+    const k = a.parent && agents.has(a.parent) ? a.parent : "";
+    (kids.get(k) ?? kids.set(k, []).get(k)!).push(a);
   }
-  const out: AgentInfo[] = [];
-  const visit = (id: string) => {
-    for (const child of byParent.get(id) ?? []) { out.push(child); visit(child.id); }
+  const out: Array<{ a: AgentInfo; depth: number; last: boolean }> = [];
+  const visit = (id: string, depth: number) => {
+    const list = kids.get(id) ?? [];
+    list.forEach((c, i) => { out.push({ a: c, depth, last: i === list.length - 1 }); visit(c.id, depth + 1); });
   };
-  // roots = agents whose parent is absent or not in the map
-  const roots = all.filter((a) => !a.parent || !agents.has(a.parent));
-  for (const r of roots) { out.push(r); visit(r.id); }
+  visit("", 0);
   return out;
 }
 
-function depthOf(a: AgentInfo, agents: Map<string, AgentInfo>): number {
-  if (typeof a.depth === "number") return a.depth;
-  let d = 0, cur: AgentInfo | undefined = a;
-  while (cur?.parent && agents.has(cur.parent) && d < 10) { d++; cur = agents.get(cur.parent); }
-  return d;
-}
+const TODO_STATE: Record<string, TodoRow["state"]> = { done: "done", run: "run", todo: "todo", warn: "run", err: "run" };
 
-const TODO_STATE: Record<string, TodoRow["state"]> = {
-  done: "done", run: "run", todo: "todo", warn: "run", err: "run",
-};
+function statusLine(agents: AgentInfo[]): string {
+  const running = agents.filter((a) => a.state === "run").map((a) => `${a.id} running`);
+  const doneN = agents.filter((a) => a.state === "done").length;
+  const parts = [...running];
+  if (doneN) parts.push(`${doneN} done`);
+  return parts.join(" · ") || "idle";
+}
 
 export function buildSnapshot(state: StoreLike, opts: SnapshotOpts = {}): TuiSnapshot {
   const selectedId = state.selectedAgent;
   const tree = orderedTree(state.agents);
+  const allAgents = [...state.agents.values()].filter((a) => !a.hidden);
 
-  const agents: AgentRow[] = tree.map((a) => ({
-    id: a.id,
-    depth: depthOf(a, state.agents),
-    state: mapState(a.state),
-    runtime: "--:--",
-    sub: a.sub ?? a.goal ?? "",
+  const agents: AgentRow[] = tree.map(({ a, depth, last }) => ({
+    id: a.id, depth, last, state: mapState(a.state), sub: a.sub ?? "",
   }));
 
   const chat: ChatMsg[] = (state.messagesByAgent.get(selectedId) ?? []).map((m) => ({
@@ -75,38 +64,31 @@ export function buildSnapshot(state: StoreLike, opts: SnapshotOpts = {}): TuiSna
   }));
 
   const todos: TodoRow[] = (state.todosByAgent.get(selectedId) ?? []).map((t) => ({
-    state: TODO_STATE[t.state] ?? "todo",
-    text: t.text,
+    state: TODO_STATE[t.state] ?? "todo", text: t.text,
   }));
   const runIdx = todos.findIndex((t) => t.state === "run");
 
-  // Lightweight log: recent tool/system lines across agents (newest last).
   const logs: LogRow[] = [];
   for (const [agentId, msgs] of state.messagesByAgent) {
     for (const m of msgs) {
-      if (m.kind === "tool_call" || m.kind === "system") {
-        logs.push({ time: "", agent: agentId, kind: m.kind, summary: m.text });
-      }
+      if (m.kind === "tool_call" || m.kind === "system") logs.push({ time: "", agent: agentId, kind: m.kind, summary: m.text });
     }
   }
 
   const pa = state.pendingApprovals[0] ?? null;
-  const rootGoal = state.agents.get(selectedId)?.goal
-    ?? state.agents.get("pm")?.goal
-    ?? tree[0]?.goal ?? "";
 
   return {
-    goal: rootGoal,
     model: opts.model ?? state.agents.get(selectedId)?.model ?? "",
     webOn: opts.webOn ?? false,
     agents,
     selectedId,
-    running: tree.filter((a) => a.state === "run").map((a) => a.id),
+    statusLine: statusLine(allAgents),
     chat,
-    logs: logs.slice(-40),
+    logs: logs.slice(-200),
     todos,
     planCurrentIdx: runIdx >= 0 ? runIdx : 0,
     input: opts.input ?? "",
+    scrollOffset: opts.scrollOffset ?? 0,
     pendingApproval: pa ? { agent: pa.agent, tool: pa.tool_name ?? "tool", detail: pa.text } : null,
   };
 }

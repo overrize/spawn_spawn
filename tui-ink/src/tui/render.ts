@@ -1,177 +1,146 @@
 /**
- * Pure renderer for the single-main-view TUI (spawn-1.0 M3-7b-view).
+ * Pure renderer for the vertical single-main-view TUI (spawn-1.0 M3-7c).
  *
- * renderFrame(snapshot, view, cols, rows) → string[] where EVERY line has
- * display width exactly === cols. Because the whole frame is one main view
- * (no side-by-side panes), there are no vertical dividers to misalign — long
- * content wraps/truncates within the single box. This is the structural fix
- * for the CJK divider-misalignment bug.
+ * Old UI's rich style, new scrolling interaction. Default = Agents tree;
+ * Enter → agent chat; Ctrl+T plan drawer above input; Ctrl+L logs/chat;
+ * running-status line always above input (full-duplex state stays visible).
+ * Vertical, refresh-stable, no left/right panes.
  *
- * Reads a TuiSnapshot (built from the store by the caller), so this module is
- * decoupled from the store and snapshot-testable.
+ * renderFrame(snapshot, view, cols, rows) → EXACTLY `rows` lines, each EXACTLY
+ * `cols` wide: fills the terminal (the "没铺满" fix), borders always aligned
+ * (CJK-safe). The main body shows a scrolling window (tail = newest, or offset).
  */
 
-import { displayWidth, padToWidth, truncateToWidth, wrapToWidth } from "./width.js";
+import { displayWidth, truncateToWidth, wrapToWidth } from "./width.js";
 import type { ViewState } from "./viewState.js";
+
+export type AgentState = "run" | "idle" | "done" | "err" | "waiting";
 
 export interface AgentRow {
   id: string;
   depth: number;
-  state: "run" | "idle" | "done" | "err";
-  runtime: string;   // "02:14" | "--:--"
-  sub: string;       // current action / goal
+  last: boolean;      // last child at its level (tree connector)
+  state: AgentState;
+  sub: string;
 }
 export interface ChatMsg { from: string; text: string; system?: boolean }
 export interface LogRow { time: string; agent: string; kind: string; summary: string }
 export interface TodoRow { state: "done" | "run" | "todo"; text: string }
 
 export interface TuiSnapshot {
-  goal: string;
   model: string;
   webOn: boolean;
   agents: AgentRow[];
   selectedId: string;
-  running: string[];
+  statusLine: string;
   chat: ChatMsg[];
   logs: LogRow[];
   todos: TodoRow[];
-  planCurrentIdx: number;        // 0-based index of the "run" todo
+  planCurrentIdx: number;
   input: string;
+  scrollOffset: number;   // 0 = tail (newest); >0 scrolls up into history
   pendingApproval: { agent: string; tool: string; detail: string } | null;
 }
 
-// ── Box primitives — every returned line is exactly `cols` wide ───────────────
+/** Pad/truncate to exactly `n` cols, filling with `fill`. */
+function fit(s: string, n: number, fill = " "): string {
+  const t = truncateToWidth(s, n);
+  const gap = n - displayWidth(t);
+  return t + (gap > 0 ? fill.repeat(gap) : "");
+}
+const bTop = (c: number) => "┌" + "─".repeat(c - 2) + "┐";
+const bMid = (title: string, c: number) => "├" + fit(title ? "─ " + title + " " : "", c - 2, "─") + "┤";
+const bBot = (c: number) => "└" + "─".repeat(c - 2) + "┘";
+const row = (inner: string, c: number) => "│" + fit(" " + inner, c - 2) + "│";
 
-function topBorder(title: string, cols: number): string {
-  const label = ` ${title} `;
-  const rest = cols - 2 - displayWidth(label);
-  return "┌" + label + "─".repeat(Math.max(0, rest)) + "┐";
-}
-function midBorder(title: string, cols: number): string {
-  if (!title) return "├" + "─".repeat(cols - 2) + "┤";
-  const label = `─ ${title} `;
-  const rest = cols - 2 - displayWidth(label);
-  return "├" + label + "─".repeat(Math.max(0, rest)) + "┤";
-}
-function bottomBorder(cols: number): string {
-  return "└" + "─".repeat(cols - 2) + "┘";
-}
-/** Content row: "│ " + content + " │", padded to exactly cols. */
-function row(inner: string, cols: number): string {
-  return "│ " + padToWidth(inner, cols - 4) + " │";
-}
-function blank(cols: number): string {
-  return row("", cols);
-}
-
-const STATE_DOT: Record<AgentRow["state"], string> = {
-  run: "●", idle: "○", done: "○", err: "✗",
+const DOT: Record<AgentState, string> = { run: "●", waiting: "◐", idle: "○", done: "✓", err: "✗" };
+const STATE_LABEL: Record<AgentState, string> = {
+  run: "running", waiting: "waiting", idle: "idle", done: "done", err: "error",
 };
 
-// ── Sections ──────────────────────────────────────────────────────────────────
+// ── Body builders (inner strings, unwrapped) ─────────────────────────────────
 
-function agentTreeLines(s: TuiSnapshot, cols: number): string[] {
-  return s.agents.map((a) => {
-    const indent = a.depth > 0 ? "  ".repeat(a.depth - 1) + "├─ " : "";
-    const dot = STATE_DOT[a.state];
-    const sel = a.id === s.selectedId ? "▸" : " ";
-    const head = `${sel} ${indent}${dot} ${a.id}`;
-    const headCol = padToWidth(head, 30);
-    const st = padToWidth(a.state, 9);
-    const rt = padToWidth(a.runtime, 7);
-    return row(`${headCol}${st}${rt}${truncateToWidth(a.sub, cols - 4 - 30 - 9 - 7)}`, cols);
-  });
-}
-
-function chatLines(s: TuiSnapshot, cols: number): string[] {
-  const out: string[] = [];
-  for (const m of s.chat) {
-    out.push(row(m.system ? `· ${m.text}` : m.from, cols));
-    if (!m.system) {
-      for (const w of wrapToWidth(m.text, cols - 4)) out.push(row(w, cols));
-    }
-    out.push(blank(cols));
+function agentBody(s: TuiSnapshot, cols: number): string[] {
+  const out: string[] = [""];
+  for (const a of s.agents) {
+    const conn = a.depth === 0 ? "" : "  ".repeat(Math.max(0, a.depth - 1)) + (a.last ? "└─ " : "├─ ");
+    const sel = a.id === s.selectedId ? "▸ " : "  ";
+    const left = `${sel}${conn}${DOT[a.state]} ${a.id}`;
+    const label = STATE_LABEL[a.state];
+    out.push(fit(left, cols - 4 - 9) + label);
+    if (a.sub) out.push(fit("", left.length >= 0 ? 4 : 0) + "    " + truncateToWidth(a.sub, cols - 12));
   }
   return out;
 }
 
-function logLines(s: TuiSnapshot, cols: number): string[] {
+function chatBody(s: TuiSnapshot, cols: number): string[] {
+  const out: string[] = [];
+  for (const m of s.chat) {
+    out.push(m.from);
+    for (const w of wrapToWidth(m.text, cols - 6)) out.push("  " + w);
+    out.push("");
+  }
+  return out;
+}
+
+function logBody(s: TuiSnapshot, cols: number): string[] {
   return s.logs.map((l) =>
-    row(`${padToWidth(l.time, 9)}${padToWidth(l.agent, 8)}${padToWidth(l.kind, 12)}${l.summary}`, cols));
-}
-
-function planLines(s: TuiSnapshot, level: ViewState["planLevel"], cols: number): string[] {
-  const total = s.todos.length;
-  const cur = s.todos[s.planCurrentIdx]?.text ?? "(无)";
-  if (level === 0) {
-    return [midBorder("Progress", cols), row(`[${s.planCurrentIdx + 1}/${total}] current: ${cur}`, cols)];
-  }
-  if (level === 1) {
-    const next = s.todos.slice(s.planCurrentIdx + 1).map((t) => t.text).slice(0, 2).join(" · ");
-    return [
-      midBorder("Plan", cols),
-      row(`[${s.planCurrentIdx + 1}/${total}] → ${cur}`, cols),
-      row(`next: ${next || "(无)"}`, cols),
-    ];
-  }
-  // full
-  const mark = { done: "✓", run: "→", todo: "·" } as const;
-  const filled = Math.round((s.planCurrentIdx / Math.max(1, total)) * 12);
-  const bar = "■".repeat(filled) + "□".repeat(12 - filled);
-  return [
-    midBorder("Plan", cols),
-    row(`[${s.planCurrentIdx + 1}/${total}] ${bar}`, cols),
-    blank(cols),
-    ...s.todos.map((t) => row(`  ${mark[t.state]} ${t.text}`, cols)),
-  ];
-}
-
-function statusBar(s: TuiSnapshot, view: ViewState, cols: number): string[] {
-  const running = `Running ${s.running.join(" · ")}`;
-  const hints = view.mode === "home" ? "Enter open   Tab next   Esc home"
-    : view.mode === "logs" ? "Ctrl+L chat/logs   Esc home"
-    : "Ctrl+T plan   Ctrl+L logs   Esc home";
-  return [midBorder("", cols), row(`${padToWidth(running, cols - 4 - displayWidth(hints) - 2)}  ${hints}`, cols)];
-}
-
-function approvalOverlay(s: TuiSnapshot, cols: number): string[] {
-  const a = s.pendingApproval!;
-  return [
-    midBorder("⚠ Approval", cols),
-    row(`${a.agent} → ${a.tool}`, cols),
-    row(truncateToWidth(a.detail, cols - 4), cols),
-    row("y approve    n reject", cols),
-  ];
+    `${fit(l.time, 9)}${fit(l.agent, 12)}${fit(l.kind, 10)}${truncateToWidth(l.summary, cols - 35)}`);
 }
 
 // ── Frame ─────────────────────────────────────────────────────────────────────
 
-export function renderFrame(s: TuiSnapshot, view: ViewState, cols: number): string[] {
-  const title = view.mode === "home" ? "Spawn"
-    : view.mode === "logs" ? "Spawn / Logs"
-    : `Spawn / ${s.selectedId}`;
-  const meta = view.mode === "logs" ? "events · live" : `${s.model} · web: ${s.webOn ? "on" : "off"}`;
+export function renderFrame(s: TuiSnapshot, view: ViewState, cols: number, rows: number): string[] {
+  const title = view.mode === "home" ? "spawn"
+    : view.mode === "logs" ? `spawn / ${s.selectedId} · logs`
+    : `spawn / ${s.selectedId}`;
+  const bodyTitle = view.mode === "home" ? "Agents" : view.mode === "logs" ? "logs" : "";
+
+  const body = view.mode === "home" ? agentBody(s, cols)
+    : view.mode === "logs" ? logBody(s, cols)
+    : chatBody(s, cols);
+
+  // Drawers (above status): plan + approval.
+  const drawer: string[] = [];
+  if (view.planLevel > 0 && view.mode !== "logs" && s.todos.length) {
+    drawer.push(bMid("Plan", cols));
+    if (view.planLevel === 1) {
+      const cur = s.todos[s.planCurrentIdx];
+      drawer.push(row(`[${s.planCurrentIdx + 1}/${s.todos.length}] → ${cur?.text ?? "(无)"}`, cols));
+    } else {
+      s.todos.forEach((t, i) => {
+        const mark = t.state === "done" ? "done" : t.state === "run" ? "run " : "todo";
+        drawer.push(row(`${i + 1}. [${mark}] ${t.text}`, cols));
+      });
+    }
+  }
+  if (s.pendingApproval) {
+    drawer.push(bMid("⚠ approval", cols));
+    drawer.push(row(`${s.pendingApproval.agent} → ${s.pendingApproval.tool}    [y] approve   [n] reject`, cols));
+    drawer.push(row(truncateToWidth(s.pendingApproval.detail, cols - 4), cols));
+  }
+
+  // Layout: top(1)+title(1)+bodyHeader(1) + body(N) + drawer + statusSep(1)+status(1) + inputSep(1)+input(1) + bottom(1)
+  const overhead = 3 + drawer.length + 2 + 2 + 1;
+  const bodyBudget = Math.max(1, rows - overhead);
+
+  // Scrolling window: show tail by default; scrollOffset scrolls up.
+  const start = Math.max(0, body.length - bodyBudget - s.scrollOffset);
+  const windowed = body.slice(start, start + bodyBudget);
+  while (windowed.length < bodyBudget) windowed.push("");
+
   const out: string[] = [];
-  out.push(topBorder(title, cols));
-  out.push(row(`${padToWidth("Goal  " + s.goal, cols - 4 - displayWidth(meta) - 2)}  ${meta}`, cols));
-
-  // Main pane
-  out.push(midBorder(view.mode === "home" ? "Agents" : view.mode === "logs" ? "" : "", cols));
-  const body = view.mode === "home" ? agentTreeLines(s, cols)
-    : view.mode === "logs" ? logLines(s, cols)
-    : chatLines(s, cols);
-  out.push(...body);
-
-  // Plan layer (not shown in logs to keep it full-height; matches mockups keeping it in home/chat)
-  if (view.mode !== "logs") out.push(...planLines(s, view.planLevel, cols));
-
-  // Approval overlay takes priority above input
-  if (s.pendingApproval) out.push(...approvalOverlay(s, cols));
-
-  // Input + status
-  out.push(midBorder("Input", cols));
-  out.push(row(`> ${s.input}`, cols));
-  out.push(...statusBar(s, view, cols));
-  out.push(bottomBorder(cols));
-  return out;
+  out.push(bTop(cols));
+  // Title as its own content row (per spec), model/web right-aligned.
+  const meta = view.mode === "logs" ? "events · live" : `${s.model}${s.webOn ? " · web: on" : ""}`;
+  out.push(row(fit(title, cols - 4 - displayWidth(meta) - 1) + " " + meta, cols));
+  out.push(bMid(bodyTitle, cols));
+  for (const b of windowed) out.push(row(b, cols));
+  out.push(...drawer);
+  out.push(bMid("", cols));
+  out.push(row(s.statusLine || "idle", cols));
+  out.push(bMid("", cols));
+  out.push(row(`› ${s.input}`, cols));
+  out.push(bBot(cols));
+  return out.slice(0, rows);
 }
