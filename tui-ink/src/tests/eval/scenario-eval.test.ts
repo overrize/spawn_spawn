@@ -22,6 +22,8 @@ import { approve, ensureAgent, getState, getSessionTokens, pruneAgents, _resetFo
 import { loadMemory, loadMessages } from "../../memory/MemoryStore.js";
 import { executeTool } from "../../tools/registry.js";
 import type { TuiEvent } from "../../protocol.js";
+import { decideAgentIdleAfterNoTools, isActionEventType } from "../../runtime/OrchestratorRuntime.js";
+import { metricTypeForAlert } from "../../pm/ProcessManager.js";
 import { Timeline, DISPATCH } from "../support/orchestrationHarness.js";
 
 let tmpDir: string;
@@ -312,8 +314,38 @@ describe("EV·BC-001 首轮只规划不执行", () => {
     assert.deepEqual(actions, [], "纯规划轮：0 个行动事件 → 现行 harness 只能靠 nudge 补救（BC-001）");
   });
 
-  // ── M1-6e 拆分后必须补的闭包内行为（当前结构上不可测，保持可见）──────────
-  it.todo("EV-011 [after M1-6e] 纯规划轮触发 nudge 且写 no_progress_nudge 指标");
-  it.todo("EV-012 [after M1-6e] leader/worker acted 判定统一：纯 todo.set 两侧都不算 acted（M1-7 修复后）");
-  it.todo("EV-013 [after M1-6e] nudge 3 次耗尽后收敛/上报，不无限催");
+  it("EV-011 [after M1-6e] 纯规划轮触发 nudge 且写 no_progress_nudge 指标", () => {
+    assert.equal(decideAgentIdleAfterNoTools({
+      acted: false,
+      hasPendingTodos: true,
+      continuations: 0,
+      gaveUp: false,
+    }), "nudge");
+    assert.equal(metricTypeForAlert("no_progress"), "no_progress_nudge");
+  });
+
+  it("EV-012 [after M1-6e] leader/worker acted 判定统一：纯 todo.set 两侧都不算 acted", () => {
+    assert.equal(isActionEventType("todo.set"), false);
+    assert.equal(isActionEventType("step"), false);
+    assert.equal(isActionEventType("tool.call"), true);
+    assert.equal(isActionEventType("spawn"), true);
+    assert.equal(isActionEventType("message"), true);
+    assert.equal(isActionEventType("unit.handup"), true);
+    assert.equal(isActionEventType("agent.done"), true);
+  });
+
+  it("EV-013 [after M1-6e] nudge 3 次耗尽后收敛/上报，不无限催", () => {
+    assert.equal(decideAgentIdleAfterNoTools({
+      acted: false,
+      hasPendingTodos: true,
+      continuations: 3,
+      gaveUp: false,
+    }), "hard-circuit");
+    assert.equal(decideAgentIdleAfterNoTools({
+      acted: false,
+      hasPendingTodos: false,
+      continuations: 2,
+      gaveUp: false,
+    }), "silent-hard-circuit");
+  });
 });
