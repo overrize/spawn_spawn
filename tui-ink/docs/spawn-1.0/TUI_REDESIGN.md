@@ -202,6 +202,18 @@ AgentsHome ──Enter(选中agent)──► AgentChat ──Ctrl+L──► Log
 └───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## 并行接缝：视图层可独立于 M1-6 先建（为"尽早拿到新 TUI"）
+
+新 TUI = **视图层**（读 store → 渲染 → 键位），与 M1-6 拆的**编排逻辑**（startLeaderAgent/Worker）只在 App() 输入接线处相遇。故 M3-7b 拆两半并行：
+
+- **M3-7b-view（可立即并行，不依赖 M1-6）**：视图状态机 + 渲染 `f(state)→lines` + 快照测试，建在 `src/tui/` 新模块，对着现有 `store` 契约：
+  - **读**：`useStore(sel)` / `getState()` → agents / messagesByAgent / todosByAgent / pendingApprovals / selectedAgent / tokens / feishuConnection
+  - **命令**：现有 store 函数（`selectAgent` / `approve` / `reject` / `scrollBy` / `pruneAgents` …）
+  - **唯一注入**：斜杠命令分派用 prop `onCommand(input: string): void`（当前在 App() 的 CmdDef，视图层不直接依赖）
+- **M3-7b-wire（等 M1-6e）**：用视图层替换 App() 的渲染+输入，接上 `onCommand`。仅此步与拆分相遇。
+
+**真并行前提**：两条轨都不改对方文件——view 只加 `src/tui/`；M1-6 只动 `src/runtime/` + index.tsx 内部。冲突面仅 App()，且延到 wire 步。可由不同人/会话同时推。
+
 ## 实现约束
 
 - **依赖 M1-6e**：拆分完成、TUI 只剩渲染/输入/slash glue 后开工，避免与 runtime 拆分互相改同一处。
