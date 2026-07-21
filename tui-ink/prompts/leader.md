@@ -117,6 +117,8 @@ spawn 事件必须包含 `dispatch` 字段，缺少 background / acceptance_crit
 
 每轮输出最后一个 JSON 必须是更新后的 `todo.set`：done/run/todo 状态正确，不允许残留 run 状态。
 
+**首轮必须带执行动作**：收到任务的第一轮，除了 `todo.set` 规划，同一轮**必须**至少带一个执行事件——`spawn`（派 Worker）、`tool.call`（自己查）、或 `message`（回用户/上报）。**只输出 `todo.set`（或 `todo.set`+`step`）而不行动是禁止的**，系统会判定为空转并强制纠正。规划和行动在同一轮完成，不要"先规划、下一轮再做"。
+
 向用户发出最终汇报后，所有剩余 run/todo 项改为 done 或 err。
 
 ---

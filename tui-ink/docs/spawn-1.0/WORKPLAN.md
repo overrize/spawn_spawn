@@ -141,7 +141,7 @@
 | M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
 | M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | index.tsx <1500 行 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
-| M1-7 | **BC-001 修复**（用户可感知：不再"催了才干活"）：统一 leader/worker 的 acted 判定（纯 `todo.set` 不算 acted）+ prompt 强化首轮必须带执行动作 | 判定统一 + prompt 修订（见 `badcases/BC-001`） | QA 先交 characterization 测试钉现状；修复后示例任务 `no_progress_nudge` 显著下降；M1-5 快照按预期变化（nudge 分支收敛） | M0-3 | 未开始 |
+| M1-7 | **BC-001 修复**（用户可感知：不再"催了才干活"）：统一 leader/worker 的 acted 判定（纯 `todo.set` 不算 acted）+ prompt 强化首轮必须带执行动作 | index.tsx todo.set 不再置 actedThisTurn（对齐 worker）+ leader.md/pm.md 首轮必带执行动作 | golden 25 不变 + 全量 0 fail（无回归）；**真实效果需用户端到端**（🔴 不再"催了才动"、`/metrics no_progress_nudge` 下降）；EV-011/012 自动断言随 M1-6e 补 | M0-3 | 待回归（实现完成，待用户端到端） |
 | M1-8 | **resume 完整性**（用户可感知：断了接得上"现场"，不只接得上记忆）：中断时的审批队列 + 未完成 tool.call 写入 tombstone；resume 时重建为待办提示注入首轮（PLAN WS5.3 落地）；`resume_context_missing` 扩展检测部分缺失（缺 history/todo/child state，M0-4 观察项） | tombstone 扩展 + resume 注入 | resume 后首轮提示包含中断时 pending 项（单测）；部分缺失场景各产出一条 metric；明确不承诺恢复 streaming/活跃子进程 | M1-6c/d 后更易做，可提前 | 未开始 |
 
 **出口**：G2、G5 达成；`npm test` + `typecheck` 全绿；回归记录归档。
@@ -188,6 +188,7 @@
 
 ## 变更记录
 
+| 2026-07-22 | v1.1.0 | **M1-7 实现完成（Claude 直接实现），置「待回归·待用户端到端」**：index.tsx todo.set 处理去掉 `actedThisTurn=true`——纯规划轮不再算 acted，与 worker 对齐，走「强制执行」催促而非温和催促（BC-001 修复）；leader.md/pm.md 加"首轮必须带执行动作（spawn/tool.call/message 之一）"。golden 25 不变 + 全量 499/489/0 fail + test:full exit 0（无回归）。真实效果（不再"催了才动"）在 index.tsx 闭包内、拆分前不可自动断言 → 归 🔴 待用户端到端 + EV-011/012 随 M1-6e 转正 | Claude |
 | 2026-07-22 | v1.1.0 | **M1-4 完成（Claude 直接实现）**：`decision.record` 加入 protocol TuiEvent + normalizer VALID_TYPES（原被当未知类型丢弃的 GAP 修复）；SecretaryProxy 新增 decision.record 分支（decision→text、reason→rationale）；store 加展示（🧭 debug）；关键词正则收紧为 `looksLikeDecision`（需决策动词 决定/采用/… 且排除疑问句），消除"方案你看过了吗？"假阳。8/8 绿（4 it.todo 转正 + 假阳/GAP 两条 characterization 有意识翻转）、golden 25 不变、test:full exit 0、全量 499/489/0 fail | Claude |
 | 2026-07-21 | v1.1.0 | **M1-3 完成（Claude 直接实现）**：新增 `context/tokens.ts` estimateTokens（CJK≈1/字、ASCII≈len/4、单调、han(100)≥3×ascii(100)）+ `compactHistoryByTokens`；resume 60K字→15K tok、trim 80K字→20K tok、fork 40K字→10K tok 全切 token 预算；char 版 compactHistory 降级保留。5 条 it.todo 转正、golden 25 不变、test:full exit 0、全量 499/485/0 fail。**偏差**：原「estimateTokens 不可用降级 char」的 it.todo 取消——实现为纯启发式无网络、恒可用，改测单调性+欠预算直通 | Claude |
 | 2026-07-21 | v1.1.0 | **分工模型废止**：用户指示 Claude 直接实现+验证，不再拆 QA/执行侧两角。「分工」节加废止横幅、记忆 `feedback-prompt-style` 已更新。执行顺序/DoD/双轨预取等质量机制保留 | Claude |

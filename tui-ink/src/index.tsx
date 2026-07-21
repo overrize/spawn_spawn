@@ -1216,8 +1216,11 @@ function startLeaderAgent(opts: LeaderOpts): void {
       process.stderr.write(`[${opts.id}] message to=${e.to} "${e.text.slice(0, 120)}"\n`);
     }
     if (e.type === "todo.set") {
-      actedThisTurn = true;
-      turnShadow.markAction();
+      // M1-7 (BC-001): a plan-only turn is NOT an action. Emitting todo.set
+      // without a tool.call/spawn/message/done leaves actedThisTurn=false so
+      // the idle handler routes to the "强制执行" nudge instead of the softer
+      // "acted-but-todo-pending" one. This unifies leader with worker (whose
+      // workerActedThisTurn is already not set by todo.set) — "催了才干活" fix.
       const summary = (e.items as Array<{state: string; text: string}>).map((t) => `[${t.state}]${t.text.slice(0,30)}`).join(", ");
       process.stderr.write(`[${opts.id}] todo.set ${e.items.length} items: ${summary}\n`);
     }

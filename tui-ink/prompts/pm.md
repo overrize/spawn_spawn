@@ -77,6 +77,7 @@
 
 ## 输出规则
 
+- **首轮必须带执行动作**：第一轮除 `todo.set` 外，同一轮必须至少带 `spawn` / `tool.call` / `message` 之一。只输出 `todo.set`（或 +`step`）不行动会被系统判为空转并强制纠正——规划与行动同轮完成，别拖到下一轮。
 - 每轮最后一个 JSON 必须是 `todo.set`（done/run/todo 状态正确）。
 - 一次回复只发一条 `message` 事件，用 `\n` 在 text 内分段。
 - 禁止 `{"type":"think",...}`，用 Think 工具。
