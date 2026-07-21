@@ -136,7 +136,7 @@
 | M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | `src/context/tokens.ts`（estimateTokens/totalTokens）+ `compactHistoryByTokens`；resume→15K tok、trim→20K tok、fork→10K tok | `token-budget-m1-3.test.ts` 8/8 绿（含 5 条原 it.todo 转正 + 单调性）；golden 25 不变 | — | 完成 |
 | M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | protocol TuiEvent + normalizer VALID_TYPES + SecretaryProxy(decision.record→rationale) + store 展示；正则收紧为「决策动词且非疑问句」 | `decision-extraction-m1-4.test.ts` 8/8 绿（4 it.todo 转正 + 2 假阳/GAP characterization 有意识更新）；golden 25 不变 | — | 完成 |
 | M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/orchestration-golden.test.ts`（25 用例，已入 `npm test`） | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 完成 |
-| M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获） | 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始 |
+| M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获）**含第0步 RuntimeContext 注入**（见 [M1-6-SPLIT-SPEC.md](M1-6-SPLIT-SPEC.md)） | RuntimeContext + 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始（**规格已就绪，可指派**） |
 | M1-6b | 拆出 `ToolRuntime`（tool.call→执行→回注、审批、schema 校验） | 独立模块 | M1-5 快照不变；registry 测试全绿；**补 M1-1 递延项**：invalid_args ≤2 次自纠、超限 handup 的计数治理随 ToolRuntime 实现并可测 | M1-5, M1-1 | 未开始 |
 | M1-6c | 拆出 `MemoryRuntime`（SecretaryProxy、session、resume context、提取） | 独立模块 | M1-5 快照不变；memory 测试全绿 | M1-5 | 未开始 |
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
@@ -188,6 +188,7 @@
 
 ## 变更记录
 
+| 2026-07-22 | v1.1.0 | **M1-6 交接规格就绪 `M1-6-SPLIT-SPEC.md`（回答"能否指定人看文档做"）**：给出 index.tsx 结构地图、god-object 共享状态清单（agents 被引用 117 次等）+ RuntimeContext 注入方案（第0步）、5 步模块边界（搬什么进哪个）、安全拆分协议（每步 golden 逐字节不变/等价重构禁夹带行为变更）、6e 递延断言清单、验收。结论：senior TS 可照做，6e 需人工冒烟 + 用户端到端；golden 是防拆坏的唯一自动闸 | Claude |
 | 2026-07-22 | v1.1.0 | **M1-7 实现完成（Claude 直接实现），置「待回归·待用户端到端」**：index.tsx todo.set 处理去掉 `actedThisTurn=true`——纯规划轮不再算 acted，与 worker 对齐，走「强制执行」催促而非温和催促（BC-001 修复）；leader.md/pm.md 加"首轮必须带执行动作（spawn/tool.call/message 之一）"。golden 25 不变 + 全量 499/489/0 fail + test:full exit 0（无回归）。真实效果（不再"催了才动"）在 index.tsx 闭包内、拆分前不可自动断言 → 归 🔴 待用户端到端 + EV-011/012 随 M1-6e 转正 | Claude |
 | 2026-07-22 | v1.1.0 | **M1-4 完成（Claude 直接实现）**：`decision.record` 加入 protocol TuiEvent + normalizer VALID_TYPES（原被当未知类型丢弃的 GAP 修复）；SecretaryProxy 新增 decision.record 分支（decision→text、reason→rationale）；store 加展示（🧭 debug）；关键词正则收紧为 `looksLikeDecision`（需决策动词 决定/采用/… 且排除疑问句），消除"方案你看过了吗？"假阳。8/8 绿（4 it.todo 转正 + 假阳/GAP 两条 characterization 有意识翻转）、golden 25 不变、test:full exit 0、全量 499/489/0 fail | Claude |
 | 2026-07-21 | v1.1.0 | **M1-3 完成（Claude 直接实现）**：新增 `context/tokens.ts` estimateTokens（CJK≈1/字、ASCII≈len/4、单调、han(100)≥3×ascii(100)）+ `compactHistoryByTokens`；resume 60K字→15K tok、trim 80K字→20K tok、fork 40K字→10K tok 全切 token 预算；char 版 compactHistory 降级保留。5 条 it.todo 转正、golden 25 不变、test:full exit 0、全量 499/485/0 fail。**偏差**：原「estimateTokens 不可用降级 char」的 it.todo 取消——实现为纯启发式无网络、恒可用，改测单调性+欠预算直通 | Claude |
