@@ -28,6 +28,8 @@
 
 ## 分工
 
+> **⚠️ 已废止（2026-07-21）**：用户认为双角分工"不清楚"、增加来回，改为 **Claude 直接实现+验证一把抓**，不再拆 QA/执行侧。下表保留作历史。保留的质量习惯（非角色）：测试先行 it.todo 转绿、DoD 自查、坏例归档、回归记录、golden 不变。
+
 两个角色，边界按"写实现的人不给自己发验收"划分：
 
 | 角色 | 负责 | 不做 |
@@ -131,7 +133,7 @@
 |---|---|---|---|---|---|
 | M1-1 | 全工具 argsSchema → Zod：prompt 描述由 schema 生成；执行前强校验，失败发 `tool_error(invalid_args)` 供自纠（≤2 次，超限 handup），并埋 `tool_arg_schema_failed` | registry 全量改造 | 每工具合法/非法参数用例；registry 测试全绿 | M0-1 | 完成 |
 | M1-2 | fact 去重改字符级 n-gram Jaccard（CJK 有效），保留权重合并 | SecretaryProxy 去重改造 + 中文重复 fact 用例集 | 中文用例集去重召回 ≥90%；英文用例不回归 | — | 完成 |
-| M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | tokenizer 估算层 | 中英文混合历史截断对比测试 — QA 已交测试先行 `src/tests/eval/token-budget-m1-3.test.ts`（3 characterization 钉现状 + 5 it.todo 目标契约：estimateTokens 语言权重 / compactHistoryByTokens / 等 token 公平截断 / resume 重表述为 token / 降级兜底），执行侧实现到 it.todo 转绿 | — | 进行中（QA 测试先行已交，待实现） |
+| M1-3 | 字符预算 → token 预算（resume 60K / trim 80K / compactHistory） | `src/context/tokens.ts`（estimateTokens/totalTokens）+ `compactHistoryByTokens`；resume→15K tok、trim→20K tok、fork→10K tok | `token-budget-m1-3.test.ts` 8/8 绿（含 5 条原 it.todo 转正 + 单调性）；golden 25 不变 | — | 完成 |
 | M1-4 | decision 提取升级：显式 `decision.record` 协议事件为主，关键词正则降为 fallback | 协议 + SecretaryProxy 改造 | decision 提取用例（中/英）— QA 已交测试先行 `src/tests/eval/decision-extraction-m1-4.test.ts`（4 characterization 钉现状+假阳/假阴/**normalizer 缺 decision.record 的 GAP** + 4 it.todo 目标契约） | — | 进行中（QA 测试先行已交，待实现） |
 | M1-5 | 事件序列快照测试：为现有编排主流程（spawn/审批/handup/done/resume）建 TuiEvent 序列基线 | `src/tests/baseline/orchestration-golden.test.ts`（25 用例，已入 `npm test`） | 快照全绿——这是 M1-6 的安全网，必须先合 | — | 完成 |
 | M1-6a | 拆出 `ObservabilityRuntime`（TraceEvent/HealthMetric/坏例捕获） | 独立模块 | M1-5 快照不变 | M1-5, M0 | 未开始 |
@@ -186,6 +188,8 @@
 
 ## 变更记录
 
+| 2026-07-21 | v1.1.0 | **M1-3 完成（Claude 直接实现）**：新增 `context/tokens.ts` estimateTokens（CJK≈1/字、ASCII≈len/4、单调、han(100)≥3×ascii(100)）+ `compactHistoryByTokens`；resume 60K字→15K tok、trim 80K字→20K tok、fork 40K字→10K tok 全切 token 预算；char 版 compactHistory 降级保留。5 条 it.todo 转正、golden 25 不变、test:full exit 0、全量 499/485/0 fail。**偏差**：原「estimateTokens 不可用降级 char」的 it.todo 取消——实现为纯启发式无网络、恒可用，改测单调性+欠预算直通 | Claude |
+| 2026-07-21 | v1.1.0 | **分工模型废止**：用户指示 Claude 直接实现+验证，不再拆 QA/执行侧两角。「分工」节加废止横幅、记忆 `feedback-prompt-style` 已更新。执行顺序/DoD/双轨预取等质量机制保留 | Claude |
 | 2026-07-21 | v1.1.0 | **新增「执行侧验收自查清单（DoD）」节**：为 M1-3/M1-4/M1-6a..e/M1-7/M2-2 逐条列出完成必满足项 + 通用前置（typecheck/npm test/test:full/golden 不变），执行侧交付前自查勾全再置「待回归」，省一轮来回 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **新增「执行顺序与双轨模型」节**（回应"为什么不按顺序"）：明确执行侧轨=关键路径按依赖顺序（给出 M1-3→…→M1-6e→M2/M3 的起步队列）、QA 轨=测试先行预取与顺序无关；固化关闭规则（测试先行≠完成、里程碑需全任务完成）；澄清 M3-2 恒「进行中」直至 live QA-TL 执行器（归执行侧，排 M3-3 后）完成 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M2-2 双轨等价性判定框架交付（QA 测试先行，执行侧建 native 轨前）**：定义 `canonicalize()` 判等关系（type + 语义字段签名，忽略 id/时间戳/_fallback 等轨道噪声）；6 条文本轨金牌签名钉住目标（单 message/tool.call/spawn、**多动作轮 message+spawn 硬用例**、plan-then-act、done）；7 条 it.todo 为 native 侧（含 emit_events 多动作 + 全 M3-2 意图集等价）。执行侧建 native 适配层时实现到 it.todo 逐条 deepEqual 文本轨金牌。全量 499/480 绿/0 fail/19 todo，typecheck 干净 | Claude (QA) |

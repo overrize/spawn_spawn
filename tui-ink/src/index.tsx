@@ -623,7 +623,7 @@ function connectFeishu(appId: string, appSecret: string): void {
             { role: "assistant" as const, content: c.answer   },
           ]))
         : [];
-    const snapshot = HttpConvAgent.compactHistory([...rawCheckpoint, ...pendingForkMsgs], 40_000);
+    const snapshot = HttpConvAgent.compactHistoryByTokens([...rawCheckpoint, ...pendingForkMsgs], 10_000);
     const sharedSysPrompt = sessionPm instanceof HttpConvAgent
       ? sessionPm.getSystemPrompt()
       : undefined;

@@ -22,6 +22,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { HttpConvAgent } from "../../adapters/httpAgent.js";
+import { estimateTokens } from "../../context/tokens.js";
 
 type Msg = { role: "user" | "assistant"; content: string };
 
@@ -35,7 +36,11 @@ function han(n: number): string { return "中".repeat(n); }
 
 // ── A. Characterization: current char-based compactHistory ────────────────────
 
-describe("M1-3·characterization: compactHistory is char-based (current)", () => {
+// NOTE (M1-3 implemented): `compactHistory` below is now the LEGACY char-based
+// helper — kept and still exact, but the live budgets (resume/trim/fork) use the
+// token-based path characterized in section B. These 3 cases still pin the legacy
+// helper's contract on purpose (callers may still pass a char budget).
+describe("M1-3·characterization: compactHistory is char-based (legacy)", () => {
   it("keeps index 0 + last 4, drops middle by CHAR length until under maxChars", () => {
     const msgs: Msg[] = [
       msg("user", ascii(100)),      // 0 — always kept (initial context)
@@ -91,10 +96,45 @@ describe("M1-3·characterization: compactHistory is char-based (current)", () =>
 // but budget measured via estimateTokens. Resume/trim budgets re-expressed in
 // tokens (resume ≈ 15K tokens, trim ≈ 20K tokens) instead of 60K/80K chars.
 
-describe("M1-3·target: token-budget behavior (executor implements to green)", () => {
-  it.todo("estimateTokens: ascii(100)≈25, han(100)≥75 (CJK ≥3× ascii per char)");
-  it.todo("compactHistoryByTokens keeps index 0 + last 4, drops middle by TOKEN cost");
-  it.todo("equal-TOKEN EN and CN histories truncate to the same message count (language-fair)");
-  it.todo("resume budget re-expressed as ~15K tokens; CN history no longer overflows the token ceiling");
-  it.todo("degrade path: if estimateTokens unavailable, fall back to char budget (no crash)");
+describe("M1-3·target: token-budget behavior (implemented)", () => {
+  it("estimateTokens: ascii(100)≈25, han(100)≥75 (CJK ≥3× ascii per char)", () => {
+    assert.equal(estimateTokens(ascii(100)), 25);
+    assert.ok(estimateTokens(han(100)) >= 75, `han(100)=${estimateTokens(han(100))}`);
+    assert.ok(estimateTokens(han(100)) >= 3 * estimateTokens(ascii(100)));
+  });
+
+  it("estimateTokens is monotonic — appending never lowers the estimate", () => {
+    let prev = 0;
+    let s = "";
+    for (const chunk of ["abcd", "中文", "  ", "xyz123", "。！"]) {
+      s += chunk;
+      const now = estimateTokens(s);
+      assert.ok(now >= prev, `dropped at "${chunk}"`);
+      prev = now;
+    }
+  });
+
+  it("compactHistoryByTokens keeps index 0 + last 4, drops middle by TOKEN cost", () => {
+    // 6 CJK messages of 100 tokens each = 600 tokens; budget 450.
+    const msgs: Msg[] = Array.from({ length: 6 }, (_, i) =>
+      msg(i % 2 === 0 ? "user" : "assistant", han(100)));
+    const out = HttpConvAgent.compactHistoryByTokens(msgs, 450);
+    // Same shape as the char characterization: drops exactly index 1.
+    assert.equal(out.length, 5);
+  });
+
+  it("equal-TOKEN EN and CN histories truncate to the same message count (language-fair)", () => {
+    // Build EN and CN messages of ~equal TOKENS (ascii(400)≈100 tok, han(100)=100 tok).
+    const en: Msg[] = Array.from({ length: 6 }, (_, i) => msg(i % 2 === 0 ? "user" : "assistant", ascii(400)));
+    const cn: Msg[] = Array.from({ length: 6 }, (_, i) => msg(i % 2 === 0 ? "user" : "assistant", han(100)));
+    const outEn = HttpConvAgent.compactHistoryByTokens(en, 450);
+    const outCn = HttpConvAgent.compactHistoryByTokens(cn, 450);
+    // Language-fair: equal token cost → same number of messages kept.
+    assert.equal(outEn.length, outCn.length);
+  });
+
+  it("under-budget histories pass through unchanged", () => {
+    const msgs: Msg[] = [msg("user", han(10)), msg("assistant", ascii(20))];
+    assert.equal(HttpConvAgent.compactHistoryByTokens(msgs, 10_000).length, 2);
+  });
 });

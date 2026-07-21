@@ -10,6 +10,7 @@ import { globalBus } from "../bus/Bus.js";
 import { parseAgentOutput } from "../protocol/normalizer.js";
 import { appendFileSync } from "node:fs";
 import { buildLogContext, shadowDiff, logShadowDiff, logShadowStart } from "../context/LogContextBuilder.js";
+import { estimateTokens } from "../context/tokens.js";
 
 const SHADOW_LOG = process.env.SHADOW_LOG_FILE ?? `${process.cwd()}/shadow.log`;
 function shadowAppend(line: string) {
@@ -99,16 +100,19 @@ export class HttpConvAgent extends EventEmitter {
     if (cfg.initialMessages?.length) {
       this.messages = sanitizeHistoryMessages(cfg.initialMessages.slice(), cfg.id, "initialMessages");
     } else if (cfg.resumeFrom) {
-      const RESUME_CHAR_BUDGET = 60_000; // ≈ 15K tokens — leaves room for system prompt + new response
+      // Token budget (M1-3): ≈15K tokens leaves room for system prompt + new response.
+      // Measured in estimated tokens, not chars, so CJK histories don't silently
+      // carry ~4× the tokens an English one would under the old 60K-char budget.
+      const RESUME_TOKEN_BUDGET = 15_000;
       const raw = loadMessages(cfg.resumeFrom);
       const all = sanitizeHistoryMessages(
         raw.map((m) => ({ role: m.role, content: m.content })),
         cfg.id,
         `resume:${cfg.resumeFrom}`,
       );
-      const total = all.reduce((s, m) => s + m.content.length, 0);
-      process.stderr.write(`[${cfg.id}] resume: loaded ${all.length} msgs (${total} chars) from "${cfg.resumeFrom}"\n`);
-      if (total <= RESUME_CHAR_BUDGET) {
+      const total = all.reduce((s, m) => s + estimateTokens(m.content), 0);
+      process.stderr.write(`[${cfg.id}] resume: loaded ${all.length} msgs (~${total} tok) from "${cfg.resumeFrom}"\n`);
+      if (total <= RESUME_TOKEN_BUDGET) {
         this.messages = all;
       } else {
         // Walk newest→oldest; include messages until budget full.
@@ -118,12 +122,13 @@ export class HttpConvAgent extends EventEmitter {
         for (let i = all.length - 1; i >= 0; i--) {
           const m = all[i]!;
           const required = i >= all.length - 4;
-          if (!required && size + m.content.length > RESUME_CHAR_BUDGET) break;
+          const tok = estimateTokens(m.content);
+          if (!required && size + tok > RESUME_TOKEN_BUDGET) break;
           kept.unshift(m);
-          size += m.content.length;
+          size += tok;
         }
         process.stderr.write(
-          `[${cfg.id}] resume: history truncated ${all.length}→${kept.length} msgs (${total}→${size} chars)\n`,
+          `[${cfg.id}] resume: history truncated ${all.length}→${kept.length} msgs (~${total}→${size} tok)\n`,
         );
         this.messages = kept;
       }
@@ -185,9 +190,11 @@ export class HttpConvAgent extends EventEmitter {
   }
 
   /**
-   * Trim a message array to fit within maxChars total content length.
-   * Keeps the first message (initial task context) and always the last 4.
-   * Exported static so index.tsx can call it without an agent instance.
+   * LEGACY (char-based). Trim a message array to fit within maxChars total
+   * content length. Keeps the first message and always the last 4.
+   * Prefer compactHistoryByTokens — a char budget means a different token
+   * count per language (M1-3). Kept for its characterization test / callers
+   * that still pass a char budget.
    */
   static compactHistory(
     messages: Array<{ role: "user" | "assistant"; content: string }>,
@@ -200,6 +207,27 @@ export class HttpConvAgent extends EventEmitter {
     let i = 1; // keep index 0 (initial context)
     while (total > maxChars && i < result.length - 4) {
       total -= result[i]!.content.length;
+      result.splice(i, 1);
+    }
+    return result;
+  }
+
+  /**
+   * Trim a message array to fit within maxTokens (estimated). Same keep-rule as
+   * compactHistory — index 0 + last 4 always kept — but the budget is measured
+   * in estimated tokens so it means the same thing across scripts (M1-3).
+   */
+  static compactHistoryByTokens(
+    messages: Array<{ role: "user" | "assistant"; content: string }>,
+    maxTokens: number,
+  ): Array<{ role: "user" | "assistant"; content: string }> {
+    const cleanMessages = messages.filter((m) => typeof m.content === "string" && m.content.trim() !== "");
+    let total = cleanMessages.reduce((s, m) => s + estimateTokens(m.content), 0);
+    if (total <= maxTokens) return cleanMessages.slice();
+    const result = [...cleanMessages];
+    let i = 1; // keep index 0 (initial context)
+    while (total > maxTokens && i < result.length - 4) {
+      total -= estimateTokens(result[i]!.content);
       result.splice(i, 1);
     }
     return result;
@@ -425,19 +453,19 @@ export class HttpConvAgent extends EventEmitter {
   // Trim history to avoid oversized requests. Keeps first message (initial context) +
   // the most recent messages. Drops the oldest middle messages first.
   private _trimmedHistory(): typeof this.messages {
-    const MAX_CHARS = 80_000;
+    const MAX_TOKENS = 20_000; // M1-3: token budget (was 80K chars ≈ 20K EN tokens)
     const msgs = sanitizeHistoryMessages(this.messages, this.cfg.id, "request");
-    let total = msgs.reduce((s, m) => s + m.content.length, 0);
-    if (total <= MAX_CHARS) return msgs;
+    let total = msgs.reduce((s, m) => s + estimateTokens(m.content), 0);
+    if (total <= MAX_TOKENS) return msgs;
     // Always keep index 0 (initial user task) and never drop the last 4 messages.
     const result = [...msgs];
     let i = 1;
-    while (total > MAX_CHARS && i < result.length - 4) {
-      total -= result[i]!.content.length;
+    while (total > MAX_TOKENS && i < result.length - 4) {
+      total -= estimateTokens(result[i]!.content);
       result.splice(i, 1);
       // Don't advance i — splice shifts everything down
     }
-    process.stderr.write(`[${this.cfg.id}] history trimmed to ${result.length} msgs (${total} chars)\n`);
+    process.stderr.write(`[${this.cfg.id}] history trimmed to ${result.length} msgs (~${total} tok)\n`);
     return result;
   }
 
