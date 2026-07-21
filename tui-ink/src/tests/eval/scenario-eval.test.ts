@@ -18,7 +18,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { approve, ensureAgent, getState, pruneAgents, _resetForTest } from "../../store.js";
+import { approve, ensureAgent, getState, getSessionTokens, pruneAgents, _resetForTest } from "../../store.js";
+import { loadMemory, loadMessages } from "../../memory/MemoryStore.js";
+import { executeTool } from "../../tools/registry.js";
 import type { TuiEvent } from "../../protocol.js";
 import { Timeline, DISPATCH } from "../support/orchestrationHarness.js";
 
@@ -187,6 +189,96 @@ describe("EV·UI 状态·扩展", () => {
     // 选中 pm，spawn tl-1 → 自动切到 tl-1
     t.route({ v: 1, type: "spawn", parent: "pm", child: "tl-1", role: "Leader", goal: "聚焦测试", dispatch: DISPATCH });
     assert.equal(getState().selectedAgent, "tl-1");
+  });
+});
+
+describe("EV·记忆持久化·扩展", () => {
+  it("EV-021 done 后 tombstone 写 final_status 与 compact_summary，落盘可重载", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("tl-1", "LEADER", 1);
+    t.route({ v: 1, type: "tool.result", agent: "tl-1", id: "t1", ok: true, output: "关键事实 X" });
+    t.route({ v: 1, type: "agent.done", agent: "tl-1", success: true, reason: "全部完成" });
+    assert.equal(sec.getMemory().tombstone.final_status, "done");
+    assert.equal(sec.getMemory().tombstone.compact_summary?.startsWith("全部完成"), true);
+    const reloaded = loadMemory("tl-1");
+    assert.equal(reloaded?.tombstone.final_status, "done");
+  });
+
+  it("EV-022 对话消息持久化，loadMessages 可取回", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("tl-1", "LEADER", 1);
+    sec.observeMessage("user", "任务目标：拆分配置");
+    sec.observeMessage("assistant", "已理解，开始拆分");
+    const msgs = loadMessages("tl-1");
+    assert.ok(msgs.length >= 2);
+    assert.equal(msgs.some((m) => m.content.includes("拆分配置")), true);
+  });
+
+  it("EV-023 agent.error 终态写 tombstone final_status=error", () => {
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "pm" });
+    const sec = t.attachSecretary("w-1", "WORKER", 2);
+    t.route({ v: 1, type: "agent.error", agent: "w-1", code: "http_error", detail: "上游 500" });
+    assert.equal(sec.getMemory().tombstone.final_status, "error");
+  });
+});
+
+describe("EV·观测·扩展", () => {
+  it("EV-024 token.usage 累计到 per-agent 与 session", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    t.route({ v: 1, type: "token.usage", agent: "tl-1", prompt: 1200, completion: 300, ttft_ms: 0, total_ms: 0 } as TuiEvent);
+    t.route({ v: 1, type: "token.usage", agent: "tl-1", prompt: 800, completion: 200, ttft_ms: 0, total_ms: 0 } as TuiEvent);
+    assert.equal(getState().tokensByAgent.get("tl-1")?.prompt, 2000);
+    assert.equal(getSessionTokens().total, 2500);
+  });
+
+  it("EV-025 tool.call 计入 loop 计数，同路径 10 次触发 tool_call_repeated", () => {
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "pm" });
+    for (let i = 0; i < 10; i++) {
+      t.route({ v: 1, type: "tool.call", agent: "w-1", id: `t${i}`, name: "Read", args: { path: "src/x.ts" } } as TuiEvent);
+    }
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "loop_suspected"), true);
+  });
+});
+
+describe("EV·通信矩阵·正例", () => {
+  it("EV-026 leader→leader（TL→PM）合法，不产生 illegal_message 告警", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    t.route({ v: 1, type: "message", agent: "tl-1", to: "pm", text: "上报进展" });
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "illegal_message"), false);
+  });
+
+  it("EV-027 worker→worker 直接通信被拦截告警", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    ensureAgent({ id: "w-1", name: "w-1", role: "Worker", state: "run", parent: "tl-1" });
+    ensureAgent({ id: "w-2", name: "w-2", role: "Worker", state: "run", parent: "tl-1" });
+    t.route({ v: 1, type: "message", agent: "w-1", to: "w-2", text: "私聊" });
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "illegal_message" && a.agent === "w-1"), true);
+  });
+});
+
+describe("EV·治理·dispatch 校验", () => {
+  it("EV-028 spawn 缺 stop_conditions 被拒", () => {
+    t.route({ v: 1, type: "spawn", parent: "pm", child: "tl-x", role: "Leader", goal: "缺停止条件",
+      dispatch: { ...DISPATCH, stop_conditions: [] } });
+    assert.equal(getState().agents.has("tl-x"), false);
+    assert.equal(t.pm.getAlerts().some((a) => a.code === "dispatch_missing_stopcond"), true);
+  });
+
+  it("EV-029 相同 goal 但不同父节点不算重复，两者都放行", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    ensureAgent({ id: "tl-2", name: "tl-2", role: "Leader", state: "run", parent: "pm" });
+    t.route({ v: 1, type: "spawn", parent: "tl-1", child: "w-a", role: "Worker", goal: "跑测试", dispatch: DISPATCH });
+    t.route({ v: 1, type: "spawn", parent: "tl-2", child: "w-b", role: "Worker", goal: "跑测试", dispatch: DISPATCH });
+    assert.equal(getState().agents.has("w-a"), true);
+    assert.equal(getState().agents.has("w-b"), true);
+  });
+});
+
+describe("EV·工具", () => {
+  it("EV-030 未知工具经 executeTool 返回错误而非抛异常", async () => {
+    const r = await executeTool("NoSuchTool", { x: 1 });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /Unknown tool/);
   });
 });
 

@@ -108,7 +108,7 @@
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | M3-1 | 向量化长期记忆：写入时 embedding（sqlite-vec 或纯文件索引）；按 goal 检索 top-k 注入替代时间序注入；GC 改为热数据 50 条 + 全量归档 | 向量记忆层 | 跨 session 相关性注入命中率基线；embedding 失败降级 n-gram 的容错测试 | M1-2 | 未开始 |
-| M3-2 | 评测集 ≥30 条端到端用例（任务拆分/工具准确率/协议遵守/收敛/记忆质量），QA-TL 执行器，demo/live 双模式 | eval 用例 + 执行器 | 评测集在 demo 模式全量可跑，live 抽样可跑 | M1 起持续积累 | 进行中（种子 20/30：EV-001..010 + EV-014..020，17 具体 + 3 递延 M1-6e） |
+| M3-2 | 评测集 ≥30 条端到端用例（任务拆分/工具准确率/协议遵守/收敛/记忆质量），QA-TL 执行器，demo/live 双模式 | eval 用例 + 执行器 | 评测集在 demo 模式全量可跑，live 抽样可跑 | M1 起持续积累 | 进行中（**案例 30/30 达标**：EV-001..030，27 具体 demo 全绿 + 3 递延 M1-6e；剩「live QA-TL 执行器」半） |
 | M3-3 | prompt 即数据：frontmatter 版本号、运行时记录 prompt_version、评测门禁、一键回滚 | prompt 版本机制 | 演示：改 prompt → 门禁拦截劣化 → 回滚（G4 验收用例） | M3-2 | 未开始 |
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
@@ -130,6 +130,7 @@
 
 ## 变更记录
 
+| 2026-07-21 | v1.1.0 | **M3-2 案例编写达标 30/30**：续扩 20→30——新增 EV-021 tombstone 落盘重载、022 消息持久化 loadMessages、023 err tombstone、024 token 累计 per-agent/session、025 loop 计数告警、026 leader→leader 正例、027 worker→worker 拦截、028 dispatch 缺 stop_conditions、029 同 goal 不同父放行、030 未知工具返错不抛。27 具体 demo 全绿 + 3 递延（M1-6e）。剩 M3-2 的「live QA-TL 执行器」半仍待做。全量 485/473 绿/0 fail/12 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **QA 并行批量交付（减少一收一放）**：一次交三样待实现/我方任务的产出——① M1-4 测试先行 `decision-extraction-m1-4.test.ts`（4 characterization 钉现状：真决定/假阳「方案」误捕/假阴无关键词漏捕/**GAP：decision.record 未入 normalizer VALID_TYPES 会被丢**；4 it.todo 目标契约）；② M3-2 评测集扩容 10→20（新增 EV-014 fanout、015 深度、016 err 不复活、017 handup facts 提升、018 todo done 落 decision、019 prune 子树隐藏 pm 免疫、020 spawn 自动聚焦）；③ M1-6 安全网加宽评估后跳过——kill/orchestrator 逻辑在 index.tsx 内、拆分前不可测（正是拆分本身解锁），不做低质填充。全量 475/463 绿/0 fail/12 todo，typecheck 干净。M1-4 置「进行中(待实现)」、M3-2「进行中(20/30)」 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M1-3 测试先行交付（QA，协作节奏#1）**：`token-budget-m1-3.test.ts` 先于实现交付——A 半 characterization 钉死当前 char 预算行为（含"BUG: char 预算语言盲，等 char 的中英文截断结果相同、无视 token 成本差"）；B 半 5 条 it.todo 写死 token 预算目标契约（estimateTokens：ascii≈len/4、CJK≈1/字、han(100)≥3×ascii(100)；compactHistoryByTokens 保留 idx0+末4 按 token 丢中段；等 token EN/CN 公平截断；resume 重表述 ~15K token；estimateTokens 不可用时降级 char）。M1-3 置「进行中（待实现）」，执行侧实现到 5 条 it.todo 转绿。全量 460/452 绿/0 fail/8 todo，typecheck 干净 | Claude (QA) |
 | 2026-07-21 | v1.1.0 | **M0-7 回归通过置「完成」，BC-002 关闭，CI 全绿达成**：修复 8c24027 采纳 BC-002 推荐叠加方案——退出闸改 `suite.isSuccessful()`（phase 计数 + length>0 防空）+ `ensureMonitor()` 幂等兜底 + `run-full-exit.test.ts` 子进程退出码断言。QA 独立复核 CI 全部步骤：typecheck 干净、npm test 452/449 绿/0 fail/3 todo、test:headless 82/82、**test:full exit 0（65/0，修复目标达成）**、test:e2e:full exit 0（62/0，无连带回归）。CI red 两源（缺文件 5961b95 + 退出码 8c24027）均已解决 | Claude (QA) |
