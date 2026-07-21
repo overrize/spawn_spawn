@@ -153,7 +153,10 @@ describe("EV·收敛·扩展", () => {
     assert.equal(getState().agents.get("w-1")?.state, "err");
   });
 
-  it("EV-017 handup 的 facts_to_promote 提升进父 TL 记忆", () => {
+  it("EV-017 unit.handup 的 facts_to_promote 落入该 agent 自己的 Secretary 记忆", () => {
+    // 语义澄清（评审反馈）：SecretaryProxy.observe 对 unit.handup 的处理是
+    // `if (ev.agent === id)` → 提升到「发出 handup 的这个 agent 自己」的 working_set，
+    // 不是父节点聚合。父级聚合走 ingestChildMemory，见 EV-031。
     ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
     const sec = t.attachSecretary("tl-1", "LEADER", 1);
     t.route({ v: 1, type: "unit.handup", agent: "tl-1", parent: "pm",
@@ -162,6 +165,20 @@ describe("EV·收敛·扩展", () => {
     const texts = sec.getMemory().working_set.facts.map((f) => f.text);
     assert.equal(texts.some((x) => x.includes("单例")), true);
     assert.equal(texts.some((x) => x.includes("环境变量")), true);
+  });
+
+  it("EV-031 父级聚合：PM Secretary.ingestChildMemory 吸收子 TL 记忆（带来源前缀）", () => {
+    ensureAgent({ id: "tl-1", name: "tl-1", role: "Leader", state: "run", parent: "pm" });
+    const pmSec = t.attachSecretary("pm", "PM", 0);
+    const tlSec = t.attachSecretary("tl-1", "LEADER", 1);
+    // 子 TL 产生一条事实（tool.result 只写 ev.agent===id 的 secretary，pmSec 不误收）
+    t.route({ v: 1, type: "tool.result", agent: "tl-1", id: "t1", ok: true, output: "子任务关键结论 Z" });
+    assert.equal(pmSec.getMemory().working_set.facts.length, 0, "聚合前 PM 不含子事实");
+    // 显式父级聚合
+    pmSec.ingestChildMemory(tlSec.getMemory());
+    const pmFacts = pmSec.getMemory().working_set.facts.map((f) => f.text);
+    assert.equal(pmFacts.some((x) => x.includes("结论 Z")), true);
+    assert.equal(pmFacts.some((x) => x.startsWith("[tl-1]")), true, "聚合的事实带子节点来源前缀");
   });
 
   it("EV-018 done 后完成的 todo 项落 decisions", () => {
