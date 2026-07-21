@@ -172,7 +172,7 @@
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
 | M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
 | M3-7a | **TUI 重构·设计冻结**：`TUI_REDESIGN.md` 四个待确认项（审批浮层/chat 归属/滚动/旧键位迁移）确认关闭 | 设计规格终版 | 用户确认 + QA 评审无遗留缺口 | — | 完成 |
-| M3-7b-view | **TUI 视图层（可立即并行，不依赖 M1-6）**：单主视图（Home/Chat/Logs）+ Plan 三态 + 状态栏 + 审批浮层的视图状态机 + 渲染 `f(store)→lines`；建 `src/tui/`，对现有 store 契约（读 useStore/getState，命令用现有 store 函数，斜杠命令走注入 `onCommand`）；displayWidth 收口禁裸 `.length` | 新 `src/tui/` 模块（按 `TUI_REDESIGN.md` 并行接缝节） | 渲染快照矩阵（5 视图 × 英文/中文重/混合超长）零错位；键位状态机全转移单测；审批浮层用例 | M3-7a（**不依赖 M1-6**） | 未开始（**可立即开工**） |
+| M3-7b-view | **TUI 视图层（可立即并行，不依赖 M1-6）**：单主视图（Home/Chat/Logs）+ Plan 三态 + 状态栏 + 审批浮层的视图状态机 + 渲染 `f(store)→lines`；建 `src/tui/`，对现有 store 契约（读 useStore/getState，命令用现有 store 函数，斜杠命令走注入 `onCommand`）；displayWidth 收口禁裸 `.length` | 新 `src/tui/` 模块（按 `TUI_REDESIGN.md` 并行接缝节） | 渲染快照矩阵（5 视图 × 英文/中文重/混合超长）零错位；键位状态机全转移单测；审批浮层用例 | M3-7a（**不依赖 M1-6**） | 进行中（核心已建：width/viewState/render + 25 对齐测试 + 预览脚本；余 store→snapshot selector + 视图内滚动） |
 | M3-7b-wire | **TUI 接线**：用视图层替换 App() 渲染+输入，接 `onCommand`；旧输入 bug（Tab 卡/cursor 消失/审批锁输入）逐条验证不复现 | index.tsx App() 改造 | 全量绿；`npm run dev` 手工冒烟键位/审批/滚动；旧 bug 清单不复现 | M1-6e, M3-7b-view | 未开始 |
 | M3-8 | **指令体验扩充**（用户可感知：操作不僵硬）：① 常用操作补齐（/retry、/kill <id>、/clear、/focus，含旧快捷键迁移 /pause /fork /info）；② 未知命令提示最近似命令而非静默；③ 命令参数容错（大小写/别名/前缀匹配）；④ /help 分组展示；⑤ **`/sessions` 列表增强**：补状态（done/err/中断点）、todo 进度、最后活动时间，支持按 agent/时间过滤；⑥ **Claude Code 对标基线（用户定的产品原则）**：基础操作对齐——新增 `/usage`（token/成本汇总，从 /status 独立）、`/context`（各 agent 上下文占用/预算/截断状态）、`/compact`（手动压缩历史，compactHistory 已有只缺命令）、`/clear`；命名沿用 Claude Code 习惯 | 新 UI 命令层扩充（落在 M3-7b 的薄命令层上） | 命令解析单测（别名/容错/相似提示）；/help 输出快照；/sessions 输出快照（含状态与进度列） | M3-7b | 未开始 |
 
@@ -189,7 +189,7 @@
 
 ## 变更记录
 
-| 2026-07-22 | v1.1.0 | **M3-7b 拆为 view/wire 两半以支持并行（"尽早拿到新 TUI"）**：视图层（Home/Chat/Logs+Plan+审批浮层的状态机与渲染）建 `src/tui/`、对现有 store 契约，**不依赖 M1-6，可立即开工**；仅接线步依赖 M1-6e。并行接缝写入 `TUI_REDESIGN.md`：两轨互不改对方文件（view 只加 src/tui/、M1-6 只动 src/runtime/+index.tsx 内部），冲突面仅 App() 且延到 wire 步——可不同人/会话同时推 | Claude |
+| 2026-07-22 | v1.1.0 | **M3-7b-view 核心建成（并行轨，不依赖 M1-6）**：`src/tui/` — width.ts（CJK 对齐基元）、viewState.ts（Home/Chat/Logs + Plan 三态状态机纯 reducer）、render.ts（纯 `f(snapshot)→lines`，全视图 + Plan 层 + 审批浮层 + 状态栏）；`render.test.ts` 25 用例：**每视图每行 displayWidth 精确=cols**（英文/中文重/混合超长/审批，@88+@100）+ 状态机全转移。`scripts/tui-preview.mts` 可视预览——中文帧右边框与英文精确对齐，错位 bug 结构性消除。typecheck 干净、全量 524/514/0 fail。余：store→snapshot selector + 视图内滚动 | Claude |（"尽早拿到新 TUI"）**：视图层（Home/Chat/Logs+Plan+审批浮层的状态机与渲染）建 `src/tui/`、对现有 store 契约，**不依赖 M1-6，可立即开工**；仅接线步依赖 M1-6e。并行接缝写入 `TUI_REDESIGN.md`：两轨互不改对方文件（view 只加 src/tui/、M1-6 只动 src/runtime/+index.tsx 内部），冲突面仅 App() 且延到 wire 步——可不同人/会话同时推 | Claude |
 
 | 2026-07-22 | v1.1.0 | **M1-6 交接规格就绪 `M1-6-SPLIT-SPEC.md`（回答"能否指定人看文档做"）**：给出 index.tsx 结构地图、god-object 共享状态清单（agents 被引用 117 次等）+ RuntimeContext 注入方案（第0步）、5 步模块边界（搬什么进哪个）、安全拆分协议（每步 golden 逐字节不变/等价重构禁夹带行为变更）、6e 递延断言清单、验收。结论：senior TS 可照做，6e 需人工冒烟 + 用户端到端；golden 是防拆坏的唯一自动闸 | Claude |
 | 2026-07-22 | v1.1.0 | **M1-7 实现完成（Claude 直接实现），置「待回归·待用户端到端」**：index.tsx todo.set 处理去掉 `actedThisTurn=true`——纯规划轮不再算 acted，与 worker 对齐，走「强制执行」催促而非温和催促（BC-001 修复）；leader.md/pm.md 加"首轮必须带执行动作（spawn/tool.call/message 之一）"。golden 25 不变 + 全量 499/489/0 fail + test:full exit 0（无回归）。真实效果（不再"催了才动"）在 index.tsx 闭包内、拆分前不可自动断言 → 归 🔴 待用户端到端 + EV-011/012 随 M1-6e 转正 | Claude |
