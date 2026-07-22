@@ -23,16 +23,20 @@ function toItem(m: Message, key: string): Item {
   return { kind: "msg", key, sender, lines: (m.text ?? "").split("\n"), dim };
 }
 
-/** Rounded startup banner (Codex / Kimi CLI style) — scrolls away as chat grows. */
+/** Startup banner — top+bottom rule lines (same style as the input bar). Scrolls away. */
 function Banner({ model }: { model: string }): React.ReactElement {
   const cwd = process.cwd();
+  const rule = "─".repeat(process.stdout.columns ?? 80);
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={2} paddingY={0} marginBottom={1}>
-      <Text><Text color="cyan" bold>◆ spawn</Text><Text dimColor>  multi-agent · full-duplex</Text></Text>
-      <Text> </Text>
-      <Text dimColor>model:     <Text color="white">{model}</Text>   <Text color="cyan">/model</Text> to change</Text>
-      <Text dimColor>directory: {cwd}</Text>
-      <Text dimColor>commands:  <Text color="cyan">@agent</Text> switch · <Text color="cyan">/command</Text> · <Text color="cyan">Ctrl+T</Text> plan · <Text color="cyan">y/n</Text> approve</Text>
+    <Box flexDirection="column">
+      <Text dimColor>{rule}</Text>
+      <Box flexDirection="column" paddingX={1}>
+        <Text><Text color="cyan" bold>◆ spawn</Text><Text dimColor>  multi-agent · full-duplex</Text></Text>
+        <Text dimColor>model:     <Text color="white">{model}</Text>   <Text color="cyan">/model</Text> to change</Text>
+        <Text dimColor>directory: {cwd}</Text>
+        <Text dimColor>commands:  <Text color="cyan">@agent</Text> switch · <Text color="cyan">/command</Text> · <Text color="cyan">Ctrl+T</Text> plan · <Text color="cyan">y/n</Text> approve</Text>
+      </Box>
+      <Text dimColor>{rule}</Text>
     </Box>
   );
 }
