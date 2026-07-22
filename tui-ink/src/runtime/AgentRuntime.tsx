@@ -2690,6 +2690,13 @@ function App() {
   // M3-7c interaction: view mode (Agents tree ↔ chat) + Plan drawer toggle.
   const [viewMode, setViewMode] = useState<"agents" | "chat" | "logs">("agents");
   const [planOpen, setPlanOpen] = useState(false);
+  // Ctrl+T / Ctrl+L are intercepted at the stdin layer (so the input field
+  // never sees the char); register the React state toggles here.
+  useEffect(() => {
+    ctrlTHandler = () => setPlanOpen((v) => !v);
+    ctrlLHandler = () => setViewMode((m) => (m === "logs" ? "chat" : "logs"));
+    return () => { ctrlTHandler = null; ctrlLHandler = null; };
+  }, []);
 
   // ── 消息队列 (agent busy 时暂存输入) ─────────────────────────────────────
   const msgQueue = useRef(new Map<string, string[]>());
@@ -3559,10 +3566,8 @@ function App() {
     if (key.ctrl && char === "c") { requestExit(); return; }
     if (char === "q" && !input) { requestExit(); return; }
     // ── M3-7c view-mode keys (only when composing nothing) ──────────────────
-    if (key.ctrl && char === "t") { setPlanOpen((v) => !v); return; }
-    if (key.ctrl && char === "l" && !input) {
-      setViewMode((m) => (m === "logs" ? "chat" : "logs")); return;
-    }
+    // Ctrl+T / Ctrl+L handled at the stdin layer (see filteredStdin) so the
+    // input field doesn't receive the literal char.
     // View navigation + agent selection (Tab always; ↑/↓ when in the Agents tree).
     const navAgent = (dir: 1 | -1) => {
       const ids = agentList;
@@ -3936,13 +3941,13 @@ process.stdout.write(DISABLE_MOUSE_TRACKING);
 const filteredStdin = new Transform({
   transform(chunk, _encoding, callback) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    const ctrlC = buf.includes(0x03);
-    const cleaned = ctrlC ? Buffer.from(buf.filter((byte) => byte !== 0x03)) : buf;
-    if (ctrlC) {
-      const request = requestExitFromSignal;
-      if (request) request();
-      else process.exit(130);
-    }
+    // Strip control-shortcut bytes BEFORE Ink/ink-text-input sees them, so the
+    // input field never appends 't'/'l' on Ctrl+T / Ctrl+L. Fire the app handler
+    // instead (same pattern as Ctrl+C). 0x14=Ctrl+T, 0x0C=Ctrl+L, 0x03=Ctrl+C.
+    if (buf.includes(0x03)) { const r = requestExitFromSignal; if (r) r(); else process.exit(130); }
+    if (buf.includes(0x14)) ctrlTHandler?.();
+    if (buf.includes(0x0c)) ctrlLHandler?.();
+    const cleaned = Buffer.from(buf.filter((b) => b !== 0x03 && b !== 0x14 && b !== 0x0c));
     if (cleaned.length > 0) this.push(cleaned);
     callback();
   },
@@ -3966,6 +3971,10 @@ process.on("exit", restoreTerminalForExit);
 process.on("SIGTERM", () => { process.stdout.write(TERM_RESET); process.exit(143); });
 
 let requestExitFromSignal: (() => void) | null = null;
+// Control-shortcut handlers, registered by App; fired from filteredStdin so the
+// input field never receives the char (fixes Ctrl+T typing a literal 't').
+let ctrlTHandler: (() => void) | null = null;
+let ctrlLHandler: (() => void) | null = null;
 process.on("SIGINT", () => {
   process.stdout.write(TERM_RESET);
   if (requestExitFromSignal) {
