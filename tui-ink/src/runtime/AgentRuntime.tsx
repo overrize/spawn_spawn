@@ -3945,5 +3945,16 @@ process.on("SIGINT", () => {
   };
 }
 
-render(<App />, { stdin: filteredStdin as any, exitOnCtrlC: false });
+// Route diagnostic stderr to tui.log while the interactive TUI runs. The app
+// emits many raw process.stderr.write agent-event logs; written to the terminal
+// they corrupt Ink's <Static> line tracking (stranded status bar / blank gaps).
+// A file keeps the terminal clean for Ink. (Skipped for non-TTY: tests/CI.)
+if (process.stdout.isTTY && !DEMO) {
+  try {
+    const _logStream = fs.createWriteStream(path.join(process.cwd(), "tui.log"), { flags: "a" });
+    process.stderr.write = ((chunk: any, ...rest: any[]) => _logStream.write(chunk, ...rest)) as typeof process.stderr.write;
+  } catch { /* fall back to terminal stderr */ }
+}
+
+render(<App />, { stdin: filteredStdin as any, exitOnCtrlC: false, patchConsole: false });
 
