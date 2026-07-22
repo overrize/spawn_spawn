@@ -21,10 +21,10 @@ function Mascot(): React.ReactElement {
   const eyes = closed ? "─ ─" : "● ●";
   return (
     <Box flexDirection="column" marginRight={2}>
-      <Text color="cyan">  ▟█▙  </Text>
-      <Text color="cyan">╭─────╮</Text>
-      <Text color="cyan">│ {eyes} │</Text>
-      <Text color="cyan">╰─────╯</Text>
+      <Text color="cyan">▟███████▙</Text>
+      <Text color="cyan"> ╭─────╮ </Text>
+      <Text color="cyan"> │ {eyes} │ </Text>
+      <Text color="cyan"> ╰─────╯ </Text>
     </Box>
   );
 }
