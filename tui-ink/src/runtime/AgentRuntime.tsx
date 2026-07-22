@@ -76,7 +76,7 @@ import { OutboundGateway } from "../feishu/outbound/OutboundGateway.js";
 import { ConversationRuntime, TurnController, classifyFollowup, isStatusQuery } from "./OrchestratorRuntime.js";
 import { getCursorAnchorSequence } from "./CursorAnchor.js";
 import { formatMetricsReport, getHealthMetricsStore, recordHealthMetric } from "./ObservabilityRuntime.js";
-import { Transcript } from "../tui/Transcript.js";
+import { SpawnHeader } from "../tui/Transcript.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -3721,8 +3721,12 @@ function App() {
 
   return (
     <PaletteContext.Provider value={palette}>
-      <Box flexDirection="column">
-        <Transcript model={MODEL} />
+      <Box flexDirection="column" height={process.stdout.rows ?? 24}>
+        <Box flexDirection="column" flexGrow={1}>
+          {(getState().messagesByAgent.get(getState().selectedAgent)?.length ?? 0) === 0
+            ? <SpawnHeader model={MODEL} /> : null}
+          <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+        </Box>
         {modelSelecting
           ? (() => {
               const cfg = loadConfig();
@@ -3956,5 +3960,5 @@ if (process.stdout.isTTY && !DEMO) {
   } catch { /* fall back to terminal stderr */ }
 }
 
-render(<App />, { stdin: filteredStdin as any, exitOnCtrlC: false, patchConsole: false });
+render(<App />, { stdin: filteredStdin as any, exitOnCtrlC: false });
 
