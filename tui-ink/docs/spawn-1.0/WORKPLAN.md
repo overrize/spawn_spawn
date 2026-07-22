@@ -151,7 +151,7 @@
 
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| M2-1 | provider `capabilities: { nativeFC, structuredOutput }` 配置与运行时选轨 | config 扩展 | config-presets 测试扩展 | M1 | 未开始 |
+| M2-1 | provider `capabilities: { nativeFC, structuredOutput }` 配置与运行时选轨 | config 扩展 | `config-capabilities.test.ts` 5/5 绿（第一方/兼容端点/显式覆盖/防误配） | M1 | 完成 |
 | M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 — QA 已交判定框架 `src/tests/eval/dual-rail-equivalence-m2-2.test.ts`（`canonicalize()` 判等关系 + 6 条文本轨金牌签名含多动作硬用例 + 7 it.todo native 侧） | M2-1 | 进行中（QA 判定框架已交，待 native 实现） |
 | M2-3 | 文本轨修复管线指标 → provider 协议健康度评分 | 健康度聚合 | 指标断言测试 | M0-2 | 未开始 |
 | M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | `src/tests/eval/parser-eval.test.ts`（13 用例：7 绿 + 6 XFAIL 账本，源自 tui.log 3500 次真实 parse 失败的挖掘） | 全部用例通过或明确 xfail | — | 完成 |

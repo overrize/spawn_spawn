@@ -7,6 +7,12 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
 export type PaletteName = "paper" | "green" | "amber";
 
+/** M2-1: which protocol rail a provider can drive. */
+export interface ProviderCapabilities {
+  nativeFC: boolean;          // supports native tool_use / tool_calls
+  structuredOutput: boolean;  // supports structured / JSON-schema output
+}
+
 export interface ProviderConfig {
   provider: "anthropic" | "openai";
   model: string;
@@ -14,6 +20,31 @@ export interface ProviderConfig {
   baseUrl?: string;
   maxTokens?: number;
   reasoningEffort?: "low" | "medium" | "high" | "max";
+  /** Explicit override; otherwise inferred by resolveCapabilities(). */
+  capabilities?: ProviderCapabilities;
+}
+
+/**
+ * Resolve a provider's protocol capabilities (M2-1). Explicit config wins.
+ * Otherwise: Anthropic and first-party OpenAI drive the native rail; other
+ * OpenAI-compatible endpoints (Kimi/DeepSeek/ollama/dashscope/…) default to the
+ * text rail because native tool_use reliability varies — overridable per config.
+ */
+export function resolveCapabilities(
+  cfg: Pick<ProviderConfig, "provider" | "baseUrl" | "capabilities">,
+): ProviderCapabilities {
+  if (cfg.capabilities) return cfg.capabilities;
+  if (cfg.provider === "anthropic") return { nativeFC: true, structuredOutput: true };
+  const base = cfg.baseUrl ?? "https://api.openai.com";
+  const firstParty = /(^|\/\/)api\.openai\.com(\/|$)/.test(base);
+  return { nativeFC: firstParty, structuredOutput: firstParty };
+}
+
+/** Which rail to run for a provider config: "native" (tool_use) or "text" (JSON protocol). */
+export function selectRail(
+  cfg: Pick<ProviderConfig, "provider" | "baseUrl" | "capabilities">,
+): "native" | "text" {
+  return resolveCapabilities(cfg).nativeFC ? "native" : "text";
 }
 
 export interface AgentRoleConfig {
