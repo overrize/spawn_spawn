@@ -76,7 +76,7 @@ import { OutboundGateway } from "../feishu/outbound/OutboundGateway.js";
 import { ConversationRuntime, TurnController, classifyFollowup, isStatusQuery } from "./OrchestratorRuntime.js";
 import { getCursorAnchorSequence } from "./CursorAnchor.js";
 import { formatMetricsReport, getHealthMetricsStore, recordHealthMetric } from "./ObservabilityRuntime.js";
-import { Transcript, startupHeader } from "../tui/Transcript.js";
+import { Transcript } from "../tui/Transcript.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -3722,7 +3722,7 @@ function App() {
   return (
     <PaletteContext.Provider value={palette}>
       <Box flexDirection="column">
-        <Transcript header={startupHeader(MODEL)} />
+        <Transcript model={MODEL} />
         {modelSelecting
           ? (() => {
               const cfg = loadConfig();

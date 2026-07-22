@@ -128,7 +128,7 @@ export function startHttpServer(config?: Partial<HttpServerConfig>): http.Server
 
   const server = createHttpServer(cfg);
   server.listen(cfg.port, () => {
-    console.log(`[http-server] REST API listening on http://localhost:${cfg.port}`);
+    console.error(`[http-server] REST API listening on http://localhost:${cfg.port}`);
   });
   server.unref(); // Don't prevent process exit
   return server;
