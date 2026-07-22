@@ -76,7 +76,6 @@ import { OutboundGateway } from "../feishu/outbound/OutboundGateway.js";
 import { ConversationRuntime, TurnController, classifyFollowup, isStatusQuery } from "./OrchestratorRuntime.js";
 import { getCursorAnchorSequence } from "./CursorAnchor.js";
 import { formatMetricsReport, getHealthMetricsStore, recordHealthMetric } from "./ObservabilityRuntime.js";
-import { InkView } from "../tui/InkView.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -3553,38 +3552,297 @@ function App() {
 
   // 全局快捷键
   useInput((char, key) => {
-    // New TUI (src/tui/InkView) owns all input now — old handler retired.
-    return;
+    if (key.ctrl && char === "c") { requestExit(); return; }
+    if (char === "q" && !input) { requestExit(); return; }
+    if (key.tab && !input) {
+      if (modelSelecting) setModelSelecting(false);
+      if (effortSelecting) setEffortSelecting(false);
+      const ids = agentList;
+      if (!ids.length) return;
+      const idx = ids.indexOf(sel);
+      const nextIdx = idx >= 0 ? (idx + 1) % ids.length : 0;
+      const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+      selectAgentVisible(ids[nextIdx]!, maxVis);
+      return;
+    }
+    if (modelSelecting) {
+      if (key.escape) setModelSelecting(false);
+      return;
+    }
+    // Only handle ESC here when InputBar is NOT focused (pending approvals).
+    // When InputBar is focused (pending.length===0), it handles ESC itself via onESC prop.
+    // Handling it in both places caused double "⏹ interrupted by ESC" messages.
+    if (key.escape && selectedPending.length > 0) { handleESCInterrupt(); return; }
+
+    // 待审批时 y/n 接管
+    if (selectedPending.length > 0) {
+      if (char === "y") {
+        const m = selectedPending[0]!;
+        const toolId = m.tool_id!;
+        approve(toolId);
+        const agentInst = agents.get(m.agent);
+        if (agentInst) {
+          executeTool(m.tool_name ?? "", m.tool_args, { agentId: m.agent }).then((r) => {
+            applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: r.ok, output: r.output });
+            agentInst.sendCommand({ type: "tool.result", id: toolId, ok: r.ok, output: r.output });
+          });
+        }
+        return;
+      }
+      if (char === "n") {
+        const m = selectedPending[0]!;
+        const toolId = m.tool_id!;
+        reject(toolId);
+        const agentInst = agents.get(m.agent);
+        if (agentInst) {
+          const errMsg = "Tool rejected by user";
+          applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: false, output: errMsg });
+          agentInst.sendCommand({ type: "tool.result", id: toolId, ok: false, output: errMsg });
+        }
+        return;
+      }
+    }
+
+    // Scroll shortcuts — [ scroll up (older), ] scroll down (newer), when input empty
+    if (!input) {
+      if (char === "[") { scrollBy(3);  return; } // older = hide 3 recent msgs
+      if (char === "]") { scrollBy(-3); return; } // newer = unhide 3 recent msgs
+    }
+
+    // P/F/C/E/M shortcuts — only when not typing and no pending approvals
+    if (!input && selectedPending.length === 0) {
+      // E — open effort selector (ESC/Enter handled inside EffortBar's own useInput)
+      if (char === "E" && !effortSelecting) { setEffortSelecting(true); return; }
+      if (key.escape && effortSelecting)    { setEffortSelecting(false); return; }
+      if (char === "M" && !effortSelecting) { setModelSelecting(true); return; }
+      if (char === "P") {
+        const id = getState().selectedAgent;
+        agents.get(id)?.kill?.();
+        applyEvent({ v: 1, type: "message", agent: id, to: "user", text: `⏸ paused by user` });
+        return;
+      }
+      if (char === "F") {
+        const selId = getState().selectedAgent;
+        const selInfo = getState().agents.get(selId);
+        // F forks a Tech Lead from PM, or a Worker from a Tech Lead
+        const isLeaderLevel = !selInfo?.parent || selId === "pm";
+        const child = isLeaderLevel
+          ? `tl-${Date.now().toString(36).slice(-4)}`
+          : `worker-${Date.now().toString(36).slice(-4)}`;
+        const role: "Leader" | "Worker" = isLeaderLevel ? "Leader" : "Worker";
+        const spawnEv: Extract<TuiEvent, { type: "spawn" }> = {
+          v: 1, type: "spawn", parent: selId, child, role,
+          goal: "(awaiting instructions — type your task)",
+          dispatch: { background: `Forked from ${selId} by user`, constraints: [],
+            acceptance_criteria: ["agent.done"], stop_conditions: ["agent.done"] },
+        };
+        const parentRole = getState().agents.get(selId)?.role;
+        const check = pm.preCheckSpawn(spawnEv, parentRole);
+        if (!check.ok) {
+          applyEvent({ v: 1, type: "agent.error", agent: selId, code: check.code, detail: check.detail });
+          return;
+        }
+        applyEvent(spawnEv);
+        pm.observe(spawnEv);
+        startWorker(spawnEv);
+        return;
+      }
+      if (char === "C") {
+        const id = getState().selectedAgent;
+        const info = getState().agents.get(id);
+        applyEvent({ v: 1, type: "message", agent: id, to: "user",
+          text: `⚙ ${info?.name ?? id}\nrole: ${info?.role ?? "?"}\nmodel: ${info?.model ?? "?"}\nparent: ${info?.parent ?? "-"}\nstate: ${info?.state ?? "?"}`,
+        });
+        return;
+      }
+    }
+
+    // 斜杠补全选择 — ↑/↓ 在列表中移动，优先于历史导航
+    if (input.startsWith("/") && slashDisplay.length > 0) {
+      if (key.upArrow) {
+        setSlashSelectedIdx((p) => (p <= 0 ? slashDisplay.length - 1 : p - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSlashSelectedIdx((p) => (p >= slashDisplay.length - 1 ? 0 : p + 1));
+        return;
+      }
+    }
+
+    // 命令历史 — ↑ 回溯, ↓ 前进
+    if (key.upArrow && (input === "" || browsingHistory.current)) {
+      if (cmdHistory.current.length === 0) return;
+      browsingHistory.current = true;
+      const idx = Math.min(historyIdx.current + 1, cmdHistory.current.length - 1);
+      historyIdx.current = idx;
+      setInput(cmdHistory.current[cmdHistory.current.length - 1 - idx]!);
+      return;
+    }
+    if (key.downArrow && browsingHistory.current) {
+      if (historyIdx.current > 0) {
+        historyIdx.current--;
+        setInput(cmdHistory.current[cmdHistory.current.length - 1 - historyIdx.current]!);
+      } else {
+        historyIdx.current = -1;
+        browsingHistory.current = false;
+        setInput("");
+      }
+      return;
+    }
+
+    if (key.tab) {
+      if (input.startsWith("/")) {
+        // 斜杠模式：有选中项则补全选中，否则 LCP 补全
+        const selected = slashSelectedIdx >= 0 ? slashDisplay[slashSelectedIdx] : undefined;
+        if (selected) {
+          setInput("/" + selected.name + " ");
+          setSlashSelectedIdx(-1);
+          completeTick.current++;
+        } else if (slashMatches.length === 1) {
+          setInput("/" + slashMatches[0]!.name + " ");
+          completeTick.current++;
+        } else if (slashMatches.length > 1) {
+          const commonPrefix = lcp(slashMatches.map((m) => m.name));
+          const newInput = "/" + commonPrefix;
+          if (newInput !== input) { setInput(newInput); completeTick.current++; }
+        }
+        return;
+      }
+      // agent 切换 — 仅在非斜杠模式
+      const ids = agentList;
+      if (!ids.length) return;
+      const idx = ids.indexOf(sel);
+      const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+      const nextIdx = idx >= 0 ? (idx + 1) % ids.length : 0;
+      selectAgentVisible(ids[nextIdx]!, maxVis);
+    }
   });
 
-  // ── New vertical single-main-view TUI (spawn-1.0 M3-7c). Replaces old 3-pane. ──
   return (
-    <InkView
-      onCommand={dispatchUser}
-      onExit={requestExit}
-      onApprove={(toolId) => {
-        const m = getState().pendingApprovals.find((p) => p.tool_id === toolId);
-        if (!m) return;
-        approve(toolId);
-        const ai = agents.get(m.agent);
-        if (ai) executeTool(m.tool_name ?? "", m.tool_args, { agentId: m.agent }).then((r) => {
-          applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: r.ok, output: r.output });
-          ai.sendCommand({ type: "tool.result", id: toolId, ok: r.ok, output: r.output });
-        });
-      }}
-      onReject={(toolId) => {
-        const m = getState().pendingApprovals.find((p) => p.tool_id === toolId);
-        if (!m) return;
-        reject(toolId);
-        const ai = agents.get(m.agent);
-        if (ai) {
-          applyEvent({ v: 1, type: "tool.result", agent: m.agent, id: toolId, ok: false, output: "Tool rejected by user" });
-          ai.sendCommand({ type: "tool.result", id: toolId, ok: false, output: "Tool rejected by user" });
+    <PaletteContext.Provider value={palette}>
+      <Box flexDirection="column" height={process.stdout.rows ?? 24}>
+        <TitleBar />
+        {layout === "v3" ? (
+          <Box flexDirection="column" flexGrow={1}>
+            <DagView maxHeight={12} />
+            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+          </Box>
+        ) : zenMode ? (
+          // Zen mode: centre ConvPane only — no AGENTS/TODO sidebars, so users can
+          // select/copy the conversation text without sidebar columns breaking lines.
+          <Box flexGrow={1}>
+            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+          </Box>
+        ) : statusMode ? (
+          // Status mode: left AGENTS pane only, expanded — a focused agent-status view
+          // with each agent's recent prompts and token usage.
+          <Box flexGrow={1}>
+            <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} expanded />
+          </Box>
+        ) : (
+          // Responsive sidebar widths: shrink panes on narrow terminals so
+          // ConvPane always gets enough columns for readable text.
+          // At termCols=89: normal(22+32)→conv=30; responsive(14+22)→conv=48
+          (() => {
+            const tc = process.stdout.columns ?? 80;
+            const agW = tc >= 120 ? 22 : tc >= 90 ? 18 : 14;
+            const toW = tc >= 120 ? 32 : tc >= 90 ? 24 : 18;
+            return (
+              <Box flexGrow={1}>
+                <AgentsPane width={agW} scroll={agentPaneScroll} />
+                <VDivider />
+                <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+                <VDivider />
+                <TodoPane width={toW} />
+              </Box>
+            );
+          })()
+        )}
+        {modelSelecting
+          ? (() => {
+              const cfg = loadConfig();
+              const modelChoices = Object.keys(cfg.models);
+              const modelDescriptions = Object.fromEntries(
+                Object.entries(cfg.models).map(([name, modelCfg]) => [
+                  name,
+                  `${modelCfg.provider} / ${modelCfg.model}${modelCfg.baseUrl ? ` ${modelCfg.baseUrl}` : ""}`,
+                ]),
+              );
+              return <ModelBar
+                currentRole={selectedConfigRole()}
+                currentModelByRole={{
+                  leader: cfg.agents.leader.model,
+                  worker: cfg.agents.worker.model,
+                  secretary: cfg.agents.secretary.model,
+                }}
+                modelChoices={modelChoices}
+                modelDescriptions={modelDescriptions}
+                onConfirm={confirmModelChoice}
+                onCancel={() => setModelSelecting(false)}
+              />;
+            })()
+          : effortSelecting
+          ? <EffortBar current={effort} onConfirm={confirmEffort} onCancel={() => setEffortSelecting(false)} />
+          : <>
+              {slashDisplay.length > 0 && (
+                <>
+                  <Box>
+                    <Text dimColor>{"─".repeat(process.stdout.columns ?? 80)}</Text>
+                  </Box>
+                  <Box paddingX={2} flexDirection="column" flexShrink={1}>
+                    {slashVisible.map((c, i) => {
+                      const absIdx = slashScrollStart + i;
+                      const selected = absIdx === slashSelectedIdx;
+                      return (
+                        <Box key={c.name}>
+                          <Text color="cyan" inverse={selected}>{`/${c.name}`.padEnd(12)}</Text>
+                          <Text dimColor={!selected}> {c.desc}</Text>
+                        </Box>
+                      );
+                    })}
+                    {slashDisplay.length > SLASH_MAX_VISIBLE && (
+                      <Text dimColor>  {"·".repeat(3)} {slashDisplay.length - SLASH_MAX_VISIBLE} more</Text>
+                    )}
+                  </Box>
+                </>
+              )}
+              <InputBar
+                key={completeTick.current}
+                focused={selectedPending.length === 0}
+                value={input}
+                onChange={setInput}
+                onESC={handleESCInterrupt}
+                onSubmit={(v) => {
+                  if (v.trim()) {
+                    cmdHistory.current.push(v.trim());
+                    historyIdx.current = -1;
+                    browsingHistory.current = false;
+                  }
+                  dispatchUser(v);
+                  setInput("");
+                }}
+                hint={
+                  selectedPending.length > 0
+                    ? `[${selectedPending[0]!.agent}] ${selectedPending[0]!.tool_name ?? ""} — y approve · n reject`
+                    : pending.length > 0
+                    ? `${pending.length} pending approval(s) in other agent(s) — Tab to review`
+                    : getState().pendingRating
+                    ? "Session done — /rate good [comment] or /rate bad [comment] to rate"
+                    : (() => {
+                        const sel = getState().selectedAgent;
+                        const selState = getState().agents.get(sel)?.state;
+                        const hasPendingInput = getState().pendingInputAgents.has(sel);
+                        if (selState === "run") return "working… (ESC to interrupt)";
+                        if (hasPendingInput)    return "message queued, waiting for agent…";
+                        return undefined;
+                      })()
+                }
+              />
+            </>
         }
-      }}
-      model={MODEL}
-      webOn={false}
-    />
+        <StatusBar demo={DEMO} exitConfirm={exitConfirm} exitSecsLeft={exitSecsLeft} effort={effort} />
+      </Box>
+    </PaletteContext.Provider>
   );
 }
 
