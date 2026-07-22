@@ -76,6 +76,7 @@ import { OutboundGateway } from "../feishu/outbound/OutboundGateway.js";
 import { ConversationRuntime, TurnController, classifyFollowup, isStatusQuery } from "./OrchestratorRuntime.js";
 import { getCursorAnchorSequence } from "./CursorAnchor.js";
 import { formatMetricsReport, getHealthMetricsStore, recordHealthMetric } from "./ObservabilityRuntime.js";
+import { Transcript, startupHeader } from "../tui/Transcript.js";
 import { config as dotenvConfig } from "dotenv";
 // Load .env so FEISHU_APP_ID / FEISHU_APP_SECRET are available even without shell export
 dotenvConfig();
@@ -3720,44 +3721,8 @@ function App() {
 
   return (
     <PaletteContext.Provider value={palette}>
-      <Box flexDirection="column" height={process.stdout.rows ?? 24}>
-        <TitleBar />
-        {layout === "v3" ? (
-          <Box flexDirection="column" flexGrow={1}>
-            <DagView maxHeight={12} />
-            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
-          </Box>
-        ) : zenMode ? (
-          // Zen mode: centre ConvPane only — no AGENTS/TODO sidebars, so users can
-          // select/copy the conversation text without sidebar columns breaking lines.
-          <Box flexGrow={1}>
-            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
-          </Box>
-        ) : statusMode ? (
-          // Status mode: left AGENTS pane only, expanded — a focused agent-status view
-          // with each agent's recent prompts and token usage.
-          <Box flexGrow={1}>
-            <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} expanded />
-          </Box>
-        ) : (
-          // Responsive sidebar widths: shrink panes on narrow terminals so
-          // ConvPane always gets enough columns for readable text.
-          // At termCols=89: normal(22+32)→conv=30; responsive(14+22)→conv=48
-          (() => {
-            const tc = process.stdout.columns ?? 80;
-            const agW = tc >= 120 ? 22 : tc >= 90 ? 18 : 14;
-            const toW = tc >= 120 ? 32 : tc >= 90 ? 24 : 18;
-            return (
-              <Box flexGrow={1}>
-                <AgentsPane width={agW} scroll={agentPaneScroll} />
-                <VDivider />
-                <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
-                <VDivider />
-                <TodoPane width={toW} />
-              </Box>
-            );
-          })()
-        )}
+      <Box flexDirection="column">
+        <Transcript header={startupHeader(MODEL)} />
         {modelSelecting
           ? (() => {
               const cfg = loadConfig();
