@@ -2687,6 +2687,9 @@ function App() {
   const browsingHistory = useRef(false);
   const completeTick    = useRef(0);
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(-1);
+  // M3-7c interaction: view mode (Agents tree ↔ chat) + Plan drawer toggle.
+  const [viewMode, setViewMode] = useState<"agents" | "chat">("agents");
+  const [planOpen, setPlanOpen] = useState(false);
 
   // ── 消息队列 (agent busy 时暂存输入) ─────────────────────────────────────
   const msgQueue = useRef(new Map<string, string[]>());
@@ -3555,6 +3558,26 @@ function App() {
   useInput((char, key) => {
     if (key.ctrl && char === "c") { requestExit(); return; }
     if (char === "q" && !input) { requestExit(); return; }
+    // ── M3-7c view-mode keys (only when composing nothing) ──────────────────
+    if (key.ctrl && char === "t") { setPlanOpen((v) => !v); return; }
+    if (!input && selectedPending.length === 0 && !modelSelecting && !effortSelecting) {
+      if (viewMode === "agents") {
+        if (key.upArrow || key.downArrow) {
+          const ids = agentList;
+          if (ids.length) {
+            const idx = ids.indexOf(sel);
+            const dir = key.upArrow ? -1 : 1;
+            const next = idx < 0 ? 0 : (idx + dir + ids.length) % ids.length;
+            const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+            selectAgentVisible(ids[next]!, maxVis);
+          }
+          return;
+        }
+        if (key.return) { setViewMode("chat"); return; }
+      } else if (viewMode === "chat" && key.escape) {
+        setViewMode("agents"); return;
+      }
+    }
     if (key.tab && !input) {
       if (modelSelecting) setModelSelecting(false);
       if (effortSelecting) setEffortSelecting(false);
@@ -3723,10 +3746,36 @@ function App() {
     <PaletteContext.Provider value={palette}>
       <Box flexDirection="column" height={process.stdout.rows ?? 24}>
         <Box flexDirection="column" flexGrow={1}>
-          {(getState().messagesByAgent.get(getState().selectedAgent)?.length ?? 0) === 0
-            ? <SpawnHeader model={MODEL} /> : null}
-          <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+          {viewMode === "agents" ? (
+            <>
+              {(getState().messagesByAgent.get(getState().selectedAgent)?.length ?? 0) === 0
+                ? <SpawnHeader model={MODEL} /> : null}
+              <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} expanded />
+            </>
+          ) : (
+            <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
+          )}
         </Box>
+        {planOpen && (() => {
+          const todos = getState().todosByAgent.get(getState().selectedAgent) ?? [];
+          const rule = "─".repeat(process.stdout.columns ?? 80);
+          return (
+            <Box flexDirection="column" flexShrink={0}>
+              <Text dimColor>{rule}</Text>
+              <Box paddingX={1}><Text bold>Plan</Text><Text dimColor>  ({getState().selectedAgent})  Ctrl+T close</Text></Box>
+              {todos.length === 0
+                ? <Box paddingX={1}><Text dimColor italic>no plan yet</Text></Box>
+                : todos.map((t, i) => (
+                    <Box key={t.id} paddingX={1}>
+                      <Text color={t.state === "done" ? "green" : t.state === "run" ? "cyan" : undefined}>
+                        {`${i + 1}. [${t.state === "done" ? "done" : t.state === "run" ? "run " : "todo"}] `}
+                      </Text>
+                      <Text dimColor={t.state === "todo"} wrap="truncate-end">{t.text}</Text>
+                    </Box>
+                  ))}
+            </Box>
+          );
+        })()}
         {modelSelecting
           ? (() => {
               const cfg = loadConfig();
@@ -3789,6 +3838,7 @@ function App() {
                   }
                   dispatchUser(v);
                   setInput("");
+                  setViewMode("chat"); // submitting a message → show the conversation
                 }}
                 hint={
                   selectedPending.length > 0
