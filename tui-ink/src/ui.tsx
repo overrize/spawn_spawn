@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { execSync } from "node:child_process";
-import { useStore, approve, reject, switchSession, getSessionTokens } from "./store.js";
+import { useStore, approve, reject, switchSession, getSessionTokens, setScrollOffset } from "./store.js";
 import { setCursorAnchor } from "./runtime/CursorAnchor.js";
 import type {
   AgentInfo, Message, TodoItem, AgentRunState,
@@ -545,6 +545,11 @@ export function ConvPane({ scrollOffset = 0, completionRows = 0 }: { scrollOffse
   const scrollRows = Math.max(4, availRows - liveBarRows);
   const maxOff = Math.max(0, total - scrollRows);
   const off     = Math.min(scrollOffset, maxOff);
+  // Write the clamp back to the store so scrollOffset never drifts past maxOff —
+  // otherwise scrolling up past the top inflates it and scrolling down lags.
+  useEffect(() => {
+    if (scrollOffset > maxOff) setScrollOffset(maxOff);
+  }, [scrollOffset, maxOff]);
 
   // Slice the visible window (newest content at bottom)
   const winEnd   = Math.max(0, total - off);

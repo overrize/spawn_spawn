@@ -521,6 +521,15 @@ export function scrollBy(delta: number): void {
   notify();
 }
 
+/** Clamp the stored scroll offset to a max the renderer knows (content-aware).
+ *  Prevents scrollOffset from drifting past the top: without this, scrolling up
+ *  past the oldest line keeps inflating the offset, so scrolling back down has to
+ *  unwind the excess before it responds. */
+export function setScrollOffset(n: number): void {
+  const clamped = Math.max(0, n);
+  if (clamped !== state.scrollOffset) { state.scrollOffset = clamped; notify(); }
+}
+
 export function scrollAgentBy(delta: number, totalAgents: number, maxVisible: number): void {
   const max = Math.max(0, totalAgents - maxVisible);
   state.agentPaneScroll = Math.max(0, Math.min(max, state.agentPaneScroll + delta));
