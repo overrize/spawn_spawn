@@ -170,7 +170,7 @@
 | M3-3 | prompt 即数据：frontmatter 版本号、运行时记录 prompt_version、评测门禁、一键回滚 | prompt 版本机制 | 演示：改 prompt → 门禁拦截劣化 → 回滚（G4 验收用例） | M3-2 | 未开始 |
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
 | M3-5 | 进化触发器（建议模式）：指标超阈值 → bad-case report → 可 dispatch QA-TL 分析；patch 仍需评测 + 审批 | 触发器 | 阈值触发测试；不自动合入的守卫测试 | M3-4 | 未开始 |
-| M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | 安全矩阵测试覆盖；逃逸用例全拦截 | — | 未开始 |
+| M3-6 | `SECURITY_MODEL.md`：WorkspaceBoundary 覆盖全部写路径、banned list、审批矩阵成文并配测试 | 安全文档 + 测试 | `SECURITY_MODEL.md` + `security-model-m3-6.test.ts` 4/4：banned 拒绝/破坏性审批/越界写拒绝/未知工具默认审批 | — | 完成 |
 | M3-7a | **TUI 重构·设计冻结**：`TUI_REDESIGN.md` 四个待确认项（审批浮层/chat 归属/滚动/旧键位迁移）确认关闭 | 设计规格终版 | 用户确认 + QA 评审无遗留缺口 | — | 完成 |
 | M3-7b-view | **TUI 视图层（可立即并行，不依赖 M1-6）**：单主视图（Home/Chat/Logs）+ Plan 三态 + 状态栏 + 审批浮层的视图状态机 + 渲染 `f(store)→lines`；建 `src/tui/`，对现有 store 契约（读 useStore/getState，命令用现有 store 函数，斜杠命令走注入 `onCommand`）；displayWidth 收口禁裸 `.length` | 新 `src/tui/` 模块（按 `TUI_REDESIGN.md` 并行接缝节） | 渲染快照矩阵（5 视图 × 英文/中文重/混合超长）零错位；键位状态机全转移单测；审批浮层用例 | M3-7a（**不依赖 M1-6**） | 进行中（核心已建：width/viewState/render + 25 对齐测试 + 预览脚本；余 store→snapshot selector + 视图内滚动） |
 | ~~M3-7b-wire~~ | **已撤销（d2ad585）**：单主视图 InkView 太稀疏/没铺满/观感差于旧富 UI，用户否决。恢复旧富 UI 作起点 | — | — | — | 取消 |
