@@ -3274,6 +3274,11 @@ function App() {
     let body = text;
     if (m) { target = m[1]!; body = m[2]!; selectAgent(target); }
 
+    // "不理人" fix: a target with no live LLM instance (system/monitor agent, a
+    // done/cleaned-up agent, or the not-yet-started PM) can't receive a message.
+    // Route to the PM — the conversation entry point — instead of dropping it.
+    if (target !== "pm" && !agents.get(target)) { target = "pm"; selectAgent("pm"); }
+
     if (target === "pm" && !pmStarted.current) {
       userMessage("pm", body);
       pmStarted.current = true;
@@ -3285,7 +3290,13 @@ function App() {
     if (target === "pm") { clearDoneAgents(); clearPendingRating(); }
     userMessage(target, body);
     const a = agents.get(target);
-    if (!a) return;
+    if (!a) {
+      // Should be unreachable after the reroute above; never drop silently.
+      applyEvent({ v: 1, type: "message", agent: "pm", to: "user",
+        text: `⚠ 无法送达 "${target}"（该 agent 无活动实例）。已选中 pm，请重发。` });
+      selectAgent("pm");
+      return;
+    }
 
     // Mark pending so the UI shows activity even if the agent is busy and
     // queues the message. Cleared automatically when agent.state:run fires.
