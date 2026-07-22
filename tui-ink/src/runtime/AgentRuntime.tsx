@@ -2688,7 +2688,7 @@ function App() {
   const completeTick    = useRef(0);
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(-1);
   // M3-7c interaction: view mode (Agents tree ↔ chat) + Plan drawer toggle.
-  const [viewMode, setViewMode] = useState<"agents" | "chat">("agents");
+  const [viewMode, setViewMode] = useState<"agents" | "chat" | "logs">("agents");
   const [planOpen, setPlanOpen] = useState(false);
 
   // ── 消息队列 (agent busy 时暂存输入) ─────────────────────────────────────
@@ -3560,33 +3560,29 @@ function App() {
     if (char === "q" && !input) { requestExit(); return; }
     // ── M3-7c view-mode keys (only when composing nothing) ──────────────────
     if (key.ctrl && char === "t") { setPlanOpen((v) => !v); return; }
+    if (key.ctrl && char === "l" && !input) {
+      setViewMode((m) => (m === "logs" ? "chat" : "logs")); return;
+    }
+    // View navigation + agent selection (Tab always; ↑/↓ when in the Agents tree).
+    const navAgent = (dir: 1 | -1) => {
+      const ids = agentList;
+      if (!ids.length) return;
+      const idx = ids.indexOf(sel);
+      const next = idx < 0 ? 0 : (idx + dir + ids.length) % ids.length;
+      const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
+      selectAgentVisible(ids[next]!, maxVis);
+    };
     if (!input && selectedPending.length === 0 && !modelSelecting && !effortSelecting) {
-      if (viewMode === "agents") {
-        if (key.upArrow || key.downArrow) {
-          const ids = agentList;
-          if (ids.length) {
-            const idx = ids.indexOf(sel);
-            const dir = key.upArrow ? -1 : 1;
-            const next = idx < 0 ? 0 : (idx + dir + ids.length) % ids.length;
-            const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
-            selectAgentVisible(ids[next]!, maxVis);
-          }
-          return;
-        }
-        if (key.return) { setViewMode("chat"); return; }
-      } else if (viewMode === "chat" && key.escape) {
-        setViewMode("agents"); return;
+      if (viewMode === "agents" && (key.upArrow || key.downArrow)) {
+        navAgent(key.upArrow ? -1 : 1); return;
       }
+      if (viewMode === "agents" && key.return) { setViewMode("chat"); return; }
+      if ((viewMode === "chat" || viewMode === "logs") && key.escape) { setViewMode("agents"); return; }
     }
     if (key.tab && !input) {
       if (modelSelecting) setModelSelecting(false);
       if (effortSelecting) setEffortSelecting(false);
-      const ids = agentList;
-      if (!ids.length) return;
-      const idx = ids.indexOf(sel);
-      const nextIdx = idx >= 0 ? (idx + 1) % ids.length : 0;
-      const maxVis = Math.max(3, Math.floor(Math.max(6, (process.stdout.rows ?? 24) - 5) / 3));
-      selectAgentVisible(ids[nextIdx]!, maxVis);
+      navAgent(1);
       return;
     }
     if (modelSelecting) {
@@ -3751,9 +3747,16 @@ function App() {
               {/* Home banner: stable in the Agents view (not tied to the selected
                   agent's messages). It's gone once you Enter into a chat. */}
               <SpawnHeader model={MODEL} />
-              <Box paddingLeft={1}><Text dimColor>↑/↓ select · Enter open · Tab switch · Ctrl+T plan</Text></Box>
-              <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} expanded />
+              <Box paddingLeft={1}><Text dimColor>↑/↓ select · Enter open · Tab switch · Ctrl+T plan · Ctrl+L logs</Text></Box>
+              <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} />
             </>
+          ) : viewMode === "logs" ? (
+            <Box flexDirection="column" flexGrow={1} paddingX={1}>
+              <Text dimColor>logs · {getState().selectedAgent} · Esc back · Ctrl+L chat</Text>
+              {(getState().messagesByAgent.get(getState().selectedAgent) ?? []).slice(-60).map((m) => (
+                <Text key={m.id} dimColor wrap="truncate-end">[{m.kind}] {(m.text ?? "").split("\n")[0]}</Text>
+              ))}
+            </Box>
           ) : (
             <ConvPane scrollOffset={scrollOffset} completionRows={slashPaneRows} />
           )}
