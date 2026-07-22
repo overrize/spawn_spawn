@@ -147,7 +147,14 @@ function buildSystemPrompt(
         ? JSON.parse(mem.tombstone.last_todo).map((t: {state: string; text: string}) => `  [${t.state}] ${t.text}`).join("\n")
         : "(unknown)";
       process.stderr.write(`[resume] context injected: facts=${topFacts.length}, decisions=${mem.working_set.decisions.length}, hint="${(mem.tombstone.resume_hint ?? "").slice(0, 80)}"\n`);
-      tpl += `\n\n---\n\n## ⚠️ RESUMED CONTEXT\n\n你正在从中断恢复。上次中断原因：${mem.tombstone.resume_hint ?? "未知"}\n\nResume budget: ${budgetKb}KB\n\n**上次 TODO 状态：**\n${lastTodo}\n\n**已确认事实（weight top 10，预算内）：**\n${facts || "(无)"}\n\n**关键决定：**\n${decisions || "(无)"}\n\n**第一句必须输出 todo.set 重申当前计划，然后继续推进。**`;
+      // M1-8: surface the interrupted "现场" — tool.calls that never got a result.
+      const pendingTools = mem.tombstone.pending_tool_calls ?? [];
+      const pendingBlock = pendingTools.length
+        ? `\n\n**中断时未完成的操作（需你决定重做或跳过）：**\n${pendingTools
+            .map((t) => `- ${t.name}${t.needs_approval ? "（曾等待审批）" : ""} [id=${t.id}]`)
+            .join("\n")}`
+        : "";
+      tpl += `\n\n---\n\n## ⚠️ RESUMED CONTEXT\n\n你正在从中断恢复。上次中断原因：${mem.tombstone.resume_hint ?? "未知"}\n\nResume budget: ${budgetKb}KB\n\n**上次 TODO 状态：**\n${lastTodo}\n\n**已确认事实（weight top 10，预算内）：**\n${facts || "(无)"}\n\n**关键决定：**\n${decisions || "(无)"}${pendingBlock}\n\n**第一句必须输出 todo.set 重申当前计划，然后继续推进。**`;
     }
   }
 

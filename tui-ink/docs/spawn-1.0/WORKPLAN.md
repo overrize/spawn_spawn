@@ -142,7 +142,7 @@
 | M1-6d | 拆出 `OrchestratorRuntime`（spawn、parent-child、kill、resume 编排） | 独立模块 | M1-5 快照不变；pm-hierarchy 全绿 | M1-5 | 未开始 |
 | M1-6e | 拆出 `AgentRuntime`（agent send、事件处理、terminal guard）；TUI 只剩渲染/输入/slash glue | **验收改（原 index.tsx<1500 被 Goodhart）**：无单一编排文件 >1500 行 + 提取的策略必须接进活代码 | M1-5 快照不变；全量测试绿；**补 M0 递延断言**：`hard_circuit_fired` / `resume_context_missing` / `agent_done_blocked_by_guard` / `test_failed_but_claimed_done` 埋点随 glue 拆出后必须可单测并补测试 | M1-6a..d | 未开始 |
 | M1-7 | **BC-001 修复**（用户可感知：不再"催了才干活"）：统一 leader/worker 的 acted 判定（纯 `todo.set` 不算 acted）+ prompt 强化首轮必须带执行动作 | index.tsx todo.set 不再置 actedThisTurn（对齐 worker）+ leader.md/pm.md 首轮必带执行动作 | golden 25 不变 + 全量 0 fail（无回归）；**真实效果需用户端到端**（🔴 不再"催了才动"、`/metrics no_progress_nudge` 下降）；EV-011/012 自动断言随 M1-6e 补 | M0-3 | 待回归（实现完成，待用户端到端） |
-| M1-8 | **resume 完整性**（用户可感知：断了接得上"现场"，不只接得上记忆）：中断时的审批队列 + 未完成 tool.call 写入 tombstone；resume 时重建为待办提示注入首轮（PLAN WS5.3 落地）；`resume_context_missing` 扩展检测部分缺失（缺 history/todo/child state，M0-4 观察项） | tombstone 扩展 + resume 注入 | resume 后首轮提示包含中断时 pending 项（单测）；部分缺失场景各产出一条 metric；明确不承诺恢复 streaming/活跃子进程 | M1-6c/d 后更易做，可提前 | 未开始 |
+| M1-8 | **resume 完整性**（用户可感知：断了接得上"现场"，不只接得上记忆）：中断时的审批队列 + 未完成 tool.call 写入 tombstone；resume 时重建为待办提示注入首轮（PLAN WS5.3 落地）；`resume_context_missing` 扩展检测部分缺失（缺 history/todo/child state，M0-4 观察项） | tombstone 扩展 + resume 注入 | resume 后首轮提示包含中断时 pending 项（单测）；部分缺失场景各产出一条 metric；明确不承诺恢复 streaming/活跃子进程 | — | 完成（在途 tool.call 半） |
 
 **出口**：G2、G5 达成；`npm test` + `typecheck` 全绿；回归记录归档。
 拆分按 a→e 分 PR 小步走，每步快照必须不变。

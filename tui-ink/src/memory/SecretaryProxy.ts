@@ -25,6 +25,8 @@ export class SecretaryProxy extends EventEmitter {
   private factSeq: number;
   private decisionSeq: number;
   private destroyed = false;
+  // M1-8: tool.calls issued but not yet resolved — persisted to tombstone for resume.
+  private _inflightTools = new Map<string, { id: string; name: string; needs_approval?: boolean }>();
   // Accept btw messages addressed to "<id>-secretary" as well as "<id>"
   private readonly secretaryAlias: string;
   // Bus log offset: the working_set reflects all events published up to this point.
@@ -70,14 +72,24 @@ export class SecretaryProxy extends EventEmitter {
     const id = this.memory.agent_id;
 
     switch (ev.type) {
+      case "tool.call":
+        // M1-8: track in-flight tool.calls so an interruption's "现场" survives.
+        if (ev.agent === id) {
+          this._inflightTools.set(ev.id, { id: ev.id, name: ev.name, needs_approval: ev.needs_approval });
+        }
+        break;
+
       case "tool.result":
-        if (ev.agent === id && ev.ok) {
-          this.addFact({
-            id: `f${++this.factSeq}`,
-            text: ev.output.slice(0, 200),
-            src: `tool:${ev.id}`,
-            ts: Date.now(),
-          });
+        if (ev.agent === id) {
+          this._inflightTools.delete(ev.id); // completed → no longer in flight
+          if (ev.ok) {
+            this.addFact({
+              id: `f${++this.factSeq}`,
+              text: ev.output.slice(0, 200),
+              src: `tool:${ev.id}`,
+              ts: Date.now(),
+            });
+          }
         }
         break;
 
@@ -158,6 +170,8 @@ export class SecretaryProxy extends EventEmitter {
 
       case "agent.done":
         if (ev.agent === id) {
+          this._inflightTools.clear(); // M1-8: a completed agent has no pending 现场
+          this.memory.tombstone.pending_tool_calls = undefined;
           this.memory.tombstone.final_status = ev.success ? "done" : "error";
           const recentFacts = this.memory.working_set.facts
             .slice(-5)
@@ -354,6 +368,7 @@ export class SecretaryProxy extends EventEmitter {
     this._logCursor = cursor;
     this.memory.tombstone.log_cursor = cursor;
     this.memory.tombstone.log_cursor_epoch = epoch;
+    this.memory.tombstone.pending_tool_calls = this._inflightTools.size ? [...this._inflightTools.values()] : undefined;
     this.memory.updated_at = Date.now();
     setImmediate(() => {
       if (!this.destroyed) saveMemory(this.memory.agent_id, this.memory);
@@ -366,6 +381,7 @@ export class SecretaryProxy extends EventEmitter {
     this._logCursor = cursor;
     this.memory.tombstone.log_cursor = cursor;
     this.memory.tombstone.log_cursor_epoch = epoch;
+    this.memory.tombstone.pending_tool_calls = this._inflightTools.size ? [...this._inflightTools.values()] : undefined;
     this.memory.updated_at = Date.now();
     saveMemory(this.memory.agent_id, this.memory);
   }
