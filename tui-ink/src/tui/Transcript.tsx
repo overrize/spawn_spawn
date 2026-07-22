@@ -1,14 +1,15 @@
 /**
- * SpawnHeader — startup banner shown at the top of the Agents view. Top/bottom
- * rule lines (input-bar style) + a blinking mascot. It's the home banner; it's
- * gone once you Enter into a chat. (spawn-1.0 M3-7c)
+ * SpawnHeader — startup banner at the top of the Agents view: top/bottom rule
+ * lines (input-bar style) + a blinking mascot. Uses the live palette (so
+ * /palette recolors it). Gone once you Enter into a chat. (spawn-1.0 M3-7c)
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useContext, useEffect, useState } from "react";
 import { Box, Text } from "ink";
+import { PaletteContext } from "../ui.js";
 
 /** A little mascot whose eyes blink every few seconds. */
-function Mascot(): React.ReactElement {
+function Mascot({ color }: { color: string }): React.ReactElement {
   const [closed, setClosed] = useState(false);
   useEffect(() => {
     const t = setInterval(() => {
@@ -21,27 +22,28 @@ function Mascot(): React.ReactElement {
   const eyes = closed ? "─ ─" : "● ●";
   return (
     <Box flexDirection="column" marginRight={2}>
-      <Text color="cyan">▟███████▙</Text>
-      <Text color="cyan"> ╭─────╮ </Text>
-      <Text color="cyan"> │ {eyes} │ </Text>
-      <Text color="cyan"> ╰─────╯ </Text>
+      <Text color={color}>  ▟█▙  </Text>
+      <Text color={color}>╭─────╮</Text>
+      <Text color={color}>│ {eyes} │</Text>
+      <Text color={color}>╰─────╯</Text>
     </Box>
   );
 }
 
 export function SpawnHeader({ model }: { model: string }): React.ReactElement {
+  const p = useContext(PaletteContext);
   const cwd = process.cwd();
   const rule = "─".repeat(process.stdout.columns ?? 80);
   return (
     <Box flexDirection="column" flexShrink={0}>
       <Text dimColor>{rule}</Text>
       <Box paddingX={1}>
-        <Mascot />
+        <Mascot color={p.accent} />
         <Box flexDirection="column">
-          <Text><Text color="cyan" bold>◆ spawn</Text><Text dimColor>  multi-agent · full-duplex</Text></Text>
-          <Text dimColor>model:     <Text color="white">{model}</Text>   <Text color="cyan">/model</Text> to change</Text>
+          <Text><Text color={p.accent} bold>◆ spawn</Text><Text dimColor>  multi-agent · full-duplex</Text></Text>
+          <Text dimColor>model:     <Text color={p.text}>{model}</Text>   <Text color={p.accent}>/model</Text> to change</Text>
           <Text dimColor>directory: {cwd}</Text>
-          <Text dimColor>commands:  <Text color="cyan">@agent</Text> switch · <Text color="cyan">/command</Text> · <Text color="cyan">Ctrl+T</Text> plan · <Text color="cyan">Ctrl+L</Text> logs</Text>
+          <Text dimColor>commands:  <Text color={p.accent}>@agent</Text> switch · <Text color={p.accent}>/command</Text> · <Text color={p.accent}>Ctrl+T</Text> plan · <Text color={p.accent}>Ctrl+L</Text> logs</Text>
         </Box>
       </Box>
       <Text dimColor>{rule}</Text>

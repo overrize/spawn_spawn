@@ -3767,7 +3767,7 @@ function App() {
             <>
               {/* Home banner: stable in the Agents view (not tied to the selected
                   agent's messages). It's gone once you Enter into a chat. */}
-              <SpawnHeader model={MODEL} />
+              <SpawnHeader model={getAgentProviderConfig(loadConfig(), "leader").model} />
               <Box paddingLeft={1}><Text dimColor>↑/↓ select · Enter open · Tab switch · Ctrl+T plan · Ctrl+L logs</Text></Box>
               <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} />
             </>
