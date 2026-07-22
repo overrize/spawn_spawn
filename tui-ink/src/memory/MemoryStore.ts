@@ -27,6 +27,36 @@ export function sessionsPath(agentId: string): string {
   return path.join(memoryDir(), `${agentId}.sessions.json`);
 }
 
+/** M3-1: cold-fact archive — facts evicted from the working set are kept here
+ *  (append-only JSONL) instead of being lost, so goal-relevance retrieval can
+ *  still surface them. */
+export function archivePath(agentId: string): string {
+  return path.join(memoryDir(), `${agentId}.archive.jsonl`);
+}
+
+/** Append evicted facts to the archive (best-effort, never throws). */
+export function archiveFacts(agentId: string, facts: MemoryFact[]): void {
+  if (!facts.length) return;
+  try {
+    fs.mkdirSync(memoryDir(), { recursive: true });
+    fs.appendFileSync(archivePath(agentId), facts.map((f) => JSON.stringify(f)).join("\n") + "\n", "utf8");
+  } catch { /* archive is best-effort */ }
+}
+
+/** Load archived facts (most-recent `cap`), skipping corrupt lines. */
+export function loadArchivedFacts(agentId: string, cap = 500): MemoryFact[] {
+  try {
+    const lines = fs.readFileSync(archivePath(agentId), "utf8").split(/\r?\n/);
+    const out: MemoryFact[] = [];
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      try { out.push(JSON.parse(t) as MemoryFact); } catch { /* skip corrupt */ }
+    }
+    return out.slice(-cap);
+  } catch { return []; }
+}
+
 export function remindersPath(): string {
   return path.join(memoryDir(), "reminders.json");
 }

@@ -55,6 +55,7 @@ import type { PaletteName, AgentConfigRole, WebSearchProviderType } from "../con
 import { createRuntimeContext } from "./RuntimeContext.js";
 import { SecretaryProxy } from "./MemoryRuntime.js";
 import { createMemory, loadMemory, loadMemoryByHash, listUnfinishedAgents, deleteAgentMemory, topFactsByWeight, loadSessions } from "./MemoryRuntime.js";
+import { retrieveRelevant } from "../memory/retrieval.js";
 import { executeTool, toolNeedsApproval, buildToolSchemaBlock } from "./ToolRuntime.js";
 import type { AgentRole } from "./ToolRuntime.js";
 import { TestSuite } from "../tests/e2e/runner/TestSuite.js";
@@ -124,17 +125,14 @@ function buildSystemPrompt(
       const budgetKb = mem.dispatch?.memory_quota_kb ?? 60;
       const budgetChars = budgetKb * 512; // rough: ~512 chars per KB in markdown
 
-      // Sort facts by weight desc, then by ts desc (newer first for tie)
-      const sorted = [...mem.working_set.facts].sort((a, b) => {
-        const wDiff = (b.weight ?? 1) - (a.weight ?? 1);
-        if (wDiff !== 0) return wDiff;
-        return b.ts - a.ts; // recent first
-      });
+      // M3-1: retrieve facts most RELEVANT to the current goal, across the working
+      // set + cold archive (falls back to weight/recency when goal is empty).
+      const relevant = retrieveRelevant(resumedMemoryId, mem.working_set.facts, goal ?? "", 10);
 
       // Take top 10 respecting budget
       const topFacts: string[] = [];
       let charsUsed = 0;
-      for (const f of sorted.slice(0, 10)) {
+      for (const f of relevant) {
         const line = `- [w${f.weight ?? 1}] ${f.text}`;
         if (charsUsed + line.length > budgetChars && topFacts.length > 0) break;
         topFacts.push(line);

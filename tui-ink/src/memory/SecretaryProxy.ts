@@ -5,7 +5,7 @@
 import { EventEmitter } from "node:events";
 import type { TuiEvent } from "../protocol.js";
 import type { AgentMemory, MemoryFact, MemoryDecision } from "./types.js";
-import { saveMemory, appendMessage, appendReminder, startSession, topFactsByWeight } from "./MemoryStore.js";
+import { saveMemory, appendMessage, appendReminder, startSession, topFactsByWeight, archiveFacts } from "./MemoryStore.js";
 import { globalBus } from "../bus/Bus.js";
 import { recordHealthMetric } from "../runtime/HealthMetrics.js";
 
@@ -345,6 +345,7 @@ export class SecretaryProxy extends EventEmitter {
     const kept = new Set(this.memory.working_set.facts.map((f) => f.id));
     const dropped = before.filter((f) => !kept.has(f.id));
     if (dropped.length > 0) {
+      archiveFacts(this.memory.agent_id, dropped); // M3-1: keep in cold archive, not lost
       recordHealthMetric({
         agent_id: this.memory.agent_id,
         event_type: "memory_fact_dropped",

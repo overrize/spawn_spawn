@@ -165,7 +165,7 @@
 
 | ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| M3-1 | 向量化长期记忆：写入时 embedding（sqlite-vec 或纯文件索引）；按 goal 检索 top-k 注入替代时间序注入；GC 改为热数据 50 条 + 全量归档 | 向量记忆层 | 跨 session 相关性注入命中率基线；embedding 失败降级 n-gram 的容错测试 | M1-2 | 未开始 |
+| M3-1 | 向量化长期记忆：写入时 embedding（sqlite-vec 或纯文件索引）；按 goal 检索 top-k 注入替代时间序注入；GC 改为热数据 50 条 + 全量归档 | 向量记忆层 | `vector-memory-m3-1.test.ts` 5/5：goal 相关性检索 + 冷归档 round-trip；n-gram 降级（无 embedding API）；resume 注入改用 retrieveRelevant | M1-2 | 完成（n-gram 降级版；真 embedding 待接） |
 | M3-2 | 评测集 ≥30 条端到端用例（任务拆分/工具准确率/协议遵守/收敛/记忆质量），QA-TL 执行器，demo/live 双模式 | eval 用例 + 执行器 | 评测集在 demo 模式全量可跑，live 抽样可跑 | M1 起持续积累 | 进行中（**案例 31 条**：EV-001..031，28 具体 demo 全绿 + 3 递延 M1-6e；剩「live QA-TL 执行器」半） |
 | M3-3 | prompt 即数据：frontmatter 版本号、运行时记录 prompt_version、评测门禁、一键回滚 | prompt 版本机制 | 演示：改 prompt → 门禁拦截劣化 → 回滚（G4 验收用例） | M3-2 | 未开始 |
 | M3-4 | 坏例归档与回流：评测失败/线上告警 → 带上下文 bad case（事件切片 + session 片段）→ 标注回流评测集 | 归档管线 | 一条真实坏例走完全流程 | M0, M3-2 | 未开始 |
