@@ -3748,8 +3748,10 @@ function App() {
         <Box flexDirection="column" flexGrow={1}>
           {viewMode === "agents" ? (
             <>
-              {(getState().messagesByAgent.get(getState().selectedAgent)?.length ?? 0) === 0
-                ? <SpawnHeader model={MODEL} /> : null}
+              {/* Home banner: stable in the Agents view (not tied to the selected
+                  agent's messages). It's gone once you Enter into a chat. */}
+              <SpawnHeader model={MODEL} />
+              <Box paddingLeft={1}><Text dimColor>↑/↓ select · Enter open · Tab switch · Ctrl+T plan</Text></Box>
               <AgentsPane width={process.stdout.columns ?? 80} scroll={agentPaneScroll} expanded />
             </>
           ) : (
