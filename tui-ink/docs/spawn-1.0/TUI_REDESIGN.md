@@ -226,3 +226,38 @@ AgentsHome ──Enter(选中agent)──► AgentChat ──Ctrl+L──► Log
 - 键位状态机单测：全部转移（home/chat/logs/plan 三态/审批浮层）穷举。
 - 审批浮层用例：出现即打断、y/n 只在浮层生效、队列逐条。
 - 旧 M3-7 输入 bug 清单（Tab 卡住/cursor 消失/审批锁输入）逐条验证在新 UI 下不复现。
+
+---
+
+## 最终锁定模型（2026-07-22，用户逐条明确）——Claude Code Static 滚动 transcript
+
+**放弃固定视口整屏刷新，改为 Ink `<Static>` 滚动流。** 这是最终形态：
+
+```
+<Box flexDirection="column">          // 无固定 height，让 Static 滚进终端历史
+  <Static items={header + messages}>  // ← 上方：滚动 transcript
+    {item => <Text>{item.lines}</Text>}
+  </Static>
+  ── 以下是 live 区，永远锚定底部 ──
+  {planDrawer if Ctrl+T}              // task/plan 抽屉，绑在输入栏上方
+  {slashPalette}                       // 斜杠命令面板（保留）
+  <InputBar/>                          // 富输入（光标/IME/@switch，保留）
+  <StatusBar/>                         // 运行状态行（保留，图里那条）
+</Box>
+```
+
+**逐条要求（用户原话）：**
+1. **保留下方**：输入栏 + 状态行（现在这个富输入层，已恢复可用）不动。
+2. **上方用新 TUI 模式、对齐 Claude Code**：内容用 `<Static>` 往上滚进历史，可回翻。
+3. **HEADER 去掉锚定**：header 只作为 Static 的**第一个 item**，启动时出现，对话一多就自然被顶上去滚走（像 Claude Code），不再常驻顶部。
+4. **去掉三列**：不再左右分栏（AgentsPane|ConvPane|TodoPane）。
+5. **agents 与对话不同界面**：对话界面 = Static transcript（选中 agent 的消息流）；agents 树 = 另一个界面（切换键进入），不与对话同屏。
+6. **task/plan 绑输入栏、Ctrl+T 开关**：plan 是输入栏正上方的抽屉，Ctrl+T 开合（Claude Code 的 todo 位置）。
+7. **旧 TUI 的病根**：固定三列 + 无法滚动 + 顶部锚定 header —— 全部去掉。
+
+**实现顺序（下次专注会话，需交互验证 dev:watch）：**
+- (1) `src/tui/Transcript.tsx`：`<Static>` 渲染 header(首项) + 选中 agent 消息；每条消息 = 发送者标签 + 换行正文（复用 width wrap）。
+- (2) App return 改造：去 `<TitleBar/>`、去外层 `height`、body 换 `<Transcript/>`；保留 palette + InputBar + StatusBar + 加 Ctrl+T plan 抽屉。
+- (3) agents 界面：一个 mode 键切到全宽 agent 树（复用 AgentsPane expanded），Esc 回对话。
+- (4) 切 agent 时 Static 重置的处理（key 重挂 or 清历史重铺）——这是 Static 模型唯一的坑，需专门处理。
+- 验收：dev:watch 看 header 滚走、transcript 可滚、输入栏 5 项功能不回归、Ctrl+T plan、agents 切换。
