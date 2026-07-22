@@ -522,6 +522,13 @@ export function ConvPane({ scrollOffset = 0, completionRows = 0 }: { scrollOffse
     const t = setInterval(() => setSpinIdx((i) => (i + 1) % SPINNER.length), 180);
     return () => clearInterval(t);
   }, [a?.state]);
+  // Blink — the "thinking" dot pulses on/off to signal the agent is running.
+  const [blink, setBlink] = useState(true);
+  useEffect(() => {
+    if (a?.state !== "run") { setBlink(true); return; }
+    const t = setInterval(() => setBlink((b) => !b), 450);
+    return () => clearInterval(t);
+  }, [a?.state]);
 
   const isPending = useStore((s) => s.pendingInputAgents.has(s.selectedAgent));
   const isRunning = a?.state === "run";
@@ -595,8 +602,14 @@ export function ConvPane({ scrollOffset = 0, completionRows = 0 }: { scrollOffse
 
       {isActive && (
         <Box flexDirection="column" paddingLeft={1}>
-          <Text color={p.dim} bold>{`◆ ${a?.name ?? sel}`}</Text>
-          <Text dimColor>{`  ${isPending && !isRunning ? "waiting in queue…" : step || "generating…"} ${SPINNER[spinIdx]}`}</Text>
+          <Box>
+            <Text color={blink ? p.accent : p.dim} bold>● </Text>
+            <Text color={p.dim} bold>{a?.name ?? sel}</Text>
+            <Text dimColor>  {isPending && !isRunning ? "waiting in queue…" : "思考中 · thinking…"} {SPINNER[spinIdx]}</Text>
+          </Box>
+          {isRunning && step && (
+            <Text dimColor wrap="truncate-end">{`    ${step}`}</Text>
+          )}
         </Box>
       )}
 
