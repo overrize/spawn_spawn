@@ -7,3 +7,42 @@ dist/
 
 # Re-include project docs (parent repo .gitignore has a global 'docs/' rule)
 !docs/
+
+# ── agent 产出 / 一次性调试残留（留在本地，不进仓库）────────────────────────
+# 临时目录 & 误建的嵌套目录
+tmp/
+tui-ink/
+urdf-tool/
+tests/
+
+# agent 调研产出（机器人/驱动器等，与本项目无关）
+docs/papers/
+docs/design/
+docs/actuator_selection_report.md
+docs/browser-integration.md
+docs/feishu-bot-sop-revised.md
+docs/feishu-integration.md
+docs/feishu-websocket-guide.md
+docs/interface-review.md
+*_report.md
+*-report.md
+actuator_report.md
+hand_chapter.md
+head_neck.md
+joint_actuator_analysis.md
+下肢与躯干.md
+humanoid_control_architecture.svg
+humanoid_control_architecture.png
+
+# WebSocket 联调一次性脚本
+test-ws*.mjs
+test-ws*.cts
+test-websocket.*
+preload-ws.cjs
+set-global-ws.cjs
+run-websocket-test.mjs
+gen_*.py
+
+# shell 事故产物
+$null
+{r2.status}
