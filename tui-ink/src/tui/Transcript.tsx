@@ -22,7 +22,7 @@ function Mascot({ color }: { color: string }): React.ReactElement {
   const eyes = closed ? "─ ─" : "● ●";
   return (
     <Box flexDirection="column" marginRight={2}>
-      <Text color={color}>  ▟█▙  </Text>
+      <Text color={color}> ▟███▙ </Text>
       <Text color={color}>╭─────╮</Text>
       <Text color={color}>│ {eyes} │</Text>
       <Text color={color}>╰─────╯</Text>
@@ -43,7 +43,7 @@ export function SpawnHeader({ model }: { model: string }): React.ReactElement {
           <Text><Text color={p.accent} bold>◆ spawn</Text><Text dimColor>  multi-agent · full-duplex</Text></Text>
           <Text dimColor>model:     <Text color={p.text}>{model}</Text>   <Text color={p.accent}>/model</Text> to change</Text>
           <Text dimColor>directory: {cwd}</Text>
-          <Text dimColor>commands:  <Text color={p.accent}>@agent</Text> switch · <Text color={p.accent}>/command</Text> · <Text color={p.accent}>Ctrl+T</Text> plan · <Text color={p.accent}>Ctrl+L</Text> logs</Text>
+          <Text dimColor>commands:  <Text color={p.accent}>Enter</Text> open · <Text color={p.accent}>Shift+Tab</Text> back · <Text color={p.accent}>/command</Text> · <Text color={p.accent}>Ctrl+T</Text> plan · <Text color={p.accent}>Ctrl+L</Text> logs</Text>
         </Box>
       </Box>
       <Text dimColor>{rule}</Text>

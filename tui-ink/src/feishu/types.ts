@@ -19,6 +19,7 @@ export type FeishuMsgType =
   | 'text'
   | 'post'
   | 'image'
+  | 'file'
   | 'interactive'
   | 'share_chat'
   | 'share_user';
@@ -36,12 +37,24 @@ export interface FeishuMessageRequestBase {
   content: string;
 }
 
-// Union type supporting text / post / interactive (as required by acceptance criteria)
+// Union type supporting text / post / interactive / image / file
 export type FeishuMessageRequest =
   | FeishuMessageRequestBase
   | (FeishuMessageRequestBase & { msg_type: 'text' })
   | (FeishuMessageRequestBase & { msg_type: 'post' })
-  | (FeishuMessageRequestBase & { msg_type: 'interactive' });
+  | (FeishuMessageRequestBase & { msg_type: 'interactive' })
+  | (FeishuMessageRequestBase & { msg_type: 'image' })
+  | (FeishuMessageRequestBase & { msg_type: 'file' });
+
+/** 图片消息 content (msg_type: 'image') — image_key 来自 im/v1/images 上传 */
+export interface FeishuImageContent {
+  image_key: string;
+}
+
+/** 文件消息 content (msg_type: 'file') — file_key 来自 im/v1/files 上传 */
+export interface FeishuFileContent {
+  file_key: string;
+}
 
 /* ------------------------------------------------------------------ */
 /*  消息内容结构 (SOP §3) — 供 message.ts 使用                          */

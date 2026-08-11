@@ -134,6 +134,19 @@ describe("Sanitizer", () => {
     assert.equal(sanitize("line1\\nline2", "document"), "line1\nline2");
   });
 
+  // Regression: Windows paths contain \t / \n as real separators — unescaping them
+  // turned "\tui-ink" into a TAB and corrupted the path (broke image auto-send).
+  it("preserves Windows paths (does not unescape \\t inside them)", () => {
+    const p = "E:\\spawn-work\\tui-ink\\humanoid_control_architecture.png";
+    for (const fmt of ["text", "document"] as const) {
+      const out = sanitize(`找到了：${p}`, fmt);
+      assert.ok(out.includes(p), `${fmt}: path must survive intact`);
+      assert.ok(!out.includes("\t"), `${fmt}: no TAB injected into the path`);
+    }
+    // 真正的转义序列仍要还原（路径之外）
+    assert.equal(sanitize(`${p}\\n下一行`, "document"), `${p}\n下一行`);
+  });
+
   it("strips **bold** in text mode", () => {
     assert.equal(sanitize("**bold** text", "text"), "bold text");
   });

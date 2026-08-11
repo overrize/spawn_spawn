@@ -448,18 +448,21 @@ function ScrollBar({ total, visible, offset }: { total: number; visible: number;
   const maxOff = total - visible;
   const ratio  = maxOff > 0 ? offset / maxOff : 0; // 0 = newest, 1 = oldest
   const thumbSize = Math.max(1, Math.round((visible / total) * barH));
-  // thumb moves from bottom (ratio=0/newest) to top (ratio=1/oldest)
-  const thumbTop  = Math.round(ratio * (barH - thumbSize));
+  // Bottom-anchored: newest (ratio=0) → thumb at the BOTTOM of the bar; oldest
+  // (ratio=1) → top. So while streaming (pinned to newest) the thumb stays glued to
+  // the bottom and just shrinks smoothly, instead of jittering from the top each frame.
+  const thumbTop  = Math.round((1 - ratio) * (barH - thumbSize));
 
-  const rows: string[] = [];
+  const rows: boolean[] = []; // true = thumb (your position)
   for (let i = 0; i < barH; i++) {
-    rows.push(i >= thumbTop && i < thumbTop + thumbSize ? "█" : "│");
+    rows.push(i >= thumbTop && i < thumbTop + thumbSize);
   }
 
+  // Track is the thick rail (dim █); thumb is a thin bright marker (accent │).
   return (
     <Box flexDirection="column" width={1}>
-      {rows.map((ch, i) => (
-        <Text key={i} color={ch === "█" ? p.accent : p.dim}>{ch}</Text>
+      {rows.map((isThumb, i) => (
+        <Text key={i} color={isThumb ? p.accent : p.dim}>{isThumb ? "│" : "█"}</Text>
       ))}
     </Box>
   );
@@ -1065,8 +1068,14 @@ export function StatusBar({ demo, exitConfirm, exitSecsLeft, effort }: {
       <Box>
         {exitConfirm
           ? <Text color="yellow" bold>再按一次 q / Ctrl+C 确认退出（{exitSecsLeft}s）</Text>
-          : <><Text dimColor>log:{minLevel}  </Text>
-             <Text dimColor>E effort · tab cycle · [ ] scroll · y/n approve · q quit</Text></>
+          : (() => {
+              // Keybind hints live in the input bar contextually (y/n approve, ESC
+              // interrupt, etc.) — the status bar only keeps the log-level indicator so
+              // the line never crowds the left cluster into a wrapped/misaligned row.
+              return (
+                <Text dimColor>log:{minLevel}</Text>
+              );
+            })()
         }
       </Box>
     </Box>

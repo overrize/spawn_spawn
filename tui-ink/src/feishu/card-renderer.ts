@@ -4,7 +4,7 @@
 import { taskRegistry, cardIndex, FeishuTask, CardBlock } from './session.js';
 import { PatchScheduler } from './patch-scheduler.js';
 import { PMEvent } from './pm-bridge.js';
-import { patchCardMessage, replyToMessageWithCard, sendTextMessage, deleteProcessingReaction } from './message.js';
+import { patchCardMessage, replyToMessageWithCard, sendTextMessage, deleteProcessingReaction, hasInlineAttachments, sendInlineAttachments, autoSendImagePaths } from './message.js';
 import { TokenManager } from './auth.js';
 import { feishuLog } from './debug.js';
 import { FeishuInteractiveContent, FeishuCardElement } from './types.js';
@@ -77,6 +77,17 @@ export function createTask(
           t.replyMessageId = msgId;
           cardIndex.set(msgId, t.taskId);
           feishuLog(`[CardRenderer] created reply card ${msgId} for task ${t.taskId}`);
+        }
+        // Attachments on the card path too: upload [[image]]/[[file]] markers and
+        // auto-send any local image path the reply mentions (see message.ts).
+        const cardBody = [...t.blocks.values()].map((b) => b.body).join("\n");
+        try {
+          if (hasInlineAttachments(cardBody)) {
+            await sendInlineAttachments(t.replyId, t.replyType, cardBody, tokenManager);
+          }
+          await autoSendImagePaths(t.replyId, t.replyType, cardBody, tokenManager);
+        } catch (err) {
+          feishuLog(`[CardRenderer] attachment send failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       } else {
         await patchCardMessage(t.replyMessageId, card, tokenManager);
