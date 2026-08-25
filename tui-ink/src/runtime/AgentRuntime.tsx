@@ -26,6 +26,9 @@ import { fileURLToPath } from "node:url";
 import { HttpConvAgent } from "../adapters/httpAgent.js";
 import { startHttpServer } from "../server/httpServer.js";
 import {
+  DISABLE_MOUSE_TRACKING, TERM_RESET, writeTermSync, buildExitRestoreSequence,
+} from "./TerminalRestore.js";
+import {
   TitleBar, AgentsPane, SessionsPane, ConvPane, TodoPane, StatusBar, InputBar, EffortBar, ModelBar,
   EFFORT_LEVELS, type Effort,
   DagView, VDivider, PaletteContext, PALETTES,
@@ -686,7 +689,7 @@ function App() {
       return origEmit.call(process.stdin, event, ...args);
     };
     return () => {
-      process.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?2004l");
+      writeTermSync("\x1b[?1000l\x1b[?1006l\x1b[?2004l");
       inPaste = false; pasteBuf = "";
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (process.stdin as any).emit = origEmit;
@@ -756,6 +759,10 @@ function App() {
     if (exitConfirm) {
       if (exitConfirmTimer.current) clearInterval(exitConfirmTimer.current);
       exit();
+      // Restore the terminal HERE, not only from the "exit" handler: exit() is
+      // async (Ink unmount), so its effect cleanup may never run before the
+      // process.exit(0) below. writeTermSync guarantees the sequence lands.
+      writeTermSync(TERM_RESET);
       process.exit(0);
       return;
     }
@@ -1188,11 +1195,13 @@ if (_rgCheck.error || _rgCheck.status !== 0) {
   console.warn("   Install: apt install ripgrep  |  brew install ripgrep  |  cargo install ripgrep\n");
 }
 
-// ── stdin passthrough (keyboard-only TUI) ───────────────────────────────────
-// This TUI deliberately does not implement mouse interaction. Keep terminal
-// mouse tracking disabled so normal terminal selection/copy remains native.
-const DISABLE_MOUSE_TRACKING = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
-process.stdout.write(DISABLE_MOUSE_TRACKING);
+// ── stdin passthrough ───────────────────────────────────────────────────────
+// Mouse tracking IS enabled at runtime (wheel scrolling — see the \x1b[?1000h
+// effect in App). Start from a known-clean slate here: a previous run that died
+// without restoring would otherwise leave the terminal reporting.
+// Restore sequences and the synchronous writer live in TerminalRestore.ts —
+// see that file for why an async stdout write does not survive exit on Windows.
+writeTermSync(DISABLE_MOUSE_TRACKING);
 
 const filteredStdin = new Transform({
   transform(chunk, _encoding, callback) {
@@ -1217,14 +1226,14 @@ Object.defineProperties(filteredStdin, {
   unref: { value: () => process.stdin.unref() },
 });
 
-// Re-disable on exit — covers clean exit, SIGINT (Ctrl+C), and SIGTERM
-const TERM_RESET = `${DISABLE_MOUSE_TRACKING}\x1b[?2004l\x1b[?25h`;
+// Re-disable on exit — covers clean exit, SIGINT (Ctrl+C), and SIGTERM.
+// Every path writes synchronously (see writeTermSync): an async stdout write
+// here does not survive process teardown on Windows.
 function restoreTerminalForExit(): void {
-  const rows = process.stdout.rows ?? 24;
-  process.stdout.write(`${TERM_RESET}\x1b[${rows};1H\x1b[2K\n`);
+  writeTermSync(buildExitRestoreSequence(process.stdout.rows ?? 24));
 }
 process.on("exit", restoreTerminalForExit);
-process.on("SIGTERM", () => { process.stdout.write(TERM_RESET); process.exit(143); });
+process.on("SIGTERM", () => { writeTermSync(TERM_RESET); process.exit(143); });
 
 let requestExitFromSignal: (() => void) | null = null;
 // Control-shortcut handlers, registered by App; fired from filteredStdin so the
@@ -1232,7 +1241,7 @@ let requestExitFromSignal: (() => void) | null = null;
 let ctrlTHandler: (() => void) | null = null;
 let ctrlLHandler: (() => void) | null = null;
 process.on("SIGINT", () => {
-  process.stdout.write(TERM_RESET);
+  writeTermSync(TERM_RESET);
   if (requestExitFromSignal) {
     requestExitFromSignal();
     return;

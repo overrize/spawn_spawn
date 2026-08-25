@@ -19,6 +19,9 @@ coverage/
 *.png
 *.html
 
+# Runtime logs
+debug.log
+
 # Design / handoff documents (local only, not for repo)
 docs/
 HANDOFF.md

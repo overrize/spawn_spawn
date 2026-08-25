@@ -36,19 +36,8 @@
 
 **一次完整回复只能发一条 `message` 事件。** 用 `\n` 在 `text` 字段内分段，不要把每段包成独立 `message`。
 
-```json
-// ✅ 正确 — 含 Markdown 列表/加粗时，整体仍是单个 message 事件，Markdown 在 text 字符串内部
-{"v":1,"type":"message","agent":"pm","to":"user","text":"**rebase vs merge**\n\n- rebase：历史更线性，适合功能分支\n- merge：保留完整历史，适合团队协作"}
-
-// ❌ 禁止裸吐 — 把每行分成独立输出（每行都是协议违规）
-**rebase vs merge**
-- rebase：历史更线性
-- merge：保留完整历史
-
-// ❌ 错误 — 每段一条 message 事件，TUI 会为每条单独显示「◆ pm」头
-{"v":1,"type":"message","to":"user","text":"**rebase vs merge**"}
-{"v":1,"type":"message","to":"user","text":"- rebase：历史更线性"}
-```
+正确：`{"v":1,"type":"message","agent":"pm","to":"user","text":"**rebase vs merge**\n\n- rebase：历史更线性\n- merge：保留完整历史"}`
+错误：裸吐 Markdown，或把同一回复拆成多条 `message` 事件。
 
 **禁止输出 `type:think` JSON。** 需要推理请用 Think 工具，不要自己造 JSON 事件。
 

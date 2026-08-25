@@ -17,8 +17,10 @@
 | M1 | 内核加固 | G2（Zod 强校验）、G5（index.tsx 拆分 <1500 行），测试全绿 | 进行中 |
 | M2 | 双轨与工具 | G1（协议双轨）、G6（trace_id 全链路） | 未开始 |
 | M3 | 进化地基 | G3（记忆升级）、G4（评估闭环）→ 1.0 发布 | 未开始 |
+| M4 | 内核换底（cordis） | G8：agent 生命周期单点收口 + 六条 waterfall 策略缝可插拔（见 [ADR-001](ADR-001-cordis-kernel.md)） | 未开始 |
 
 依赖：M0 先行（后续所有进化能力依赖稳定指标）→ M1 是 M2/M3 前置（拆分后才好插 adapter 与 trace）。
+M4 依赖 M1 收口（B 阶段动的正是 M1-6 刚拆出的那批模块），且**吞掉 M2-5 / M2-6**（见 ADR-001 §8）。
 例外：M3-2 评测用例的积累从 M1 即开始，不等 M3 启动。
 
 任务状态取值：`未开始 | 进行中 | 待回归 | 完成 | 取消`。
@@ -159,8 +161,8 @@
 | M2-2 | native 轨：Anthropic tool_use / OpenAI tool_calls → TuiEvent 适配；多动作输出走 `emit_events` 工具 | native 适配层 | 双轨等价性测试：同任务集产出等价 TuiEvent 序列 — QA 已交判定框架 `src/tests/eval/dual-rail-equivalence-m2-2.test.ts`（`canonicalize()` 判等关系 + 6 条文本轨金牌签名含多动作硬用例 + 7 it.todo native 侧） | M2-1 | 进行中（QA 判定框架已交，待 native 实现） |
 | M2-3 | 文本轨修复管线指标 → provider 协议健康度评分 | `protocolHealth.ts` + `protocol-health-m2-3.test.ts` 4/4：按 provider 聚合 protocol_* 指标为健康分（parse✗最重>fallback>repair），<阈值标记 native 轨候选 | M0-2 | 完成（命令展示待并入 M3-8）|
 | M2-4 | parser 评测集：shadow.log / stderr 历史坏输出沉淀为 normalizer 回归用例 | `src/tests/eval/parser-eval.test.ts`（13 用例：7 绿 + 6 XFAIL 账本，源自 tui.log 3500 次真实 parse 失败的挖掘） | 全部用例通过或明确 xfail | — | 完成 |
-| M2-5 | ToolRegistry 抽 adapter 层：Local / Mcp / Http 同接口，权限与观测在 adapter 之上收口 | adapter 层 | 现有工具行为不回归（registry 测试）；tool span 产出 | M1-6b | 未开始 |
-| M2-6 | MCP 最小接入：stdio MCP server 挂载为工具组 | McpAdapter | 新增一个 MCP 工具全程零核心代码改动（验收演示） | M2-5 | 未开始 |
+| M2-5 | ToolRegistry 抽 adapter 层：Local / Mcp / Http 同接口，权限与观测在 adapter 之上收口 | adapter 层 | 现有工具行为不回归（registry 测试）；tool span 产出 | M1-6b | **改由 M4-B2 吞掉**（[ADR-001](ADR-001-cordis-kernel.md) §8）：不再手搓 adapter 层，改为注册到 `ctx.tools` 作用域注册表 |
+| M2-6 | MCP 最小接入：stdio MCP server 挂载为工具组 | McpAdapter | 新增一个 MCP 工具全程零核心代码改动（验收演示） | ~~M2-5~~ → M4-B2 | **依赖改挂 M4-B2**（[ADR-001](ADR-001-cordis-kernel.md) §8）：「零核心改动」正是 cordis 的价值主张，B2 后近乎白送 |
 | M2-7 | trace_id/parent_span 全链路传播 + `/trace <id>` 调用树还原 | trace 传播 + TUI 命令 | 单任务链路日志可还原完整调用树（G6 验收用例） | M1-6a | 未开始 |
 | M2-8 | **child-err 收敛**（用户可感知：子节点被限流/网络挂掉后 PM 不再卡死吞消息）：子节点进 `err` 终态时唤醒父节点重新评估——像 `agent.done` 那样触发收敛 + 消费待办输入，不再永远 `waiting for children`。诊断见 2026-07-23 tui.log（tl-06 HTTP 429→err，feishu-PM `hasPending=true` 却卡在等子节点） | leader/worker done-guard 旁增 err-terminal 唤醒父 | 复现用例：子节点 err 后父节点收敛且消费 pending 输入（单测）；golden 25 不变 | M1-6d | 未开始 |
 | M2-9 | **agent.done 后 .json 残留**（冒烟发现 2026-07-24）：worker `agent.done` 处理块（AgentRuntime L1998）调 `deleteAgentMemory` 删 working_set `.json`，但**未调 `destroySecretary`**——secretary 仍活着，其 60s 快照/收尾 flush 把刚删的 `.json` 又写回（worker-01.json 残留 1659B=清空后最小快照）。kill 路径有 destroySecretary 故干净。fix：done 路径也 `destroySecretary(secretaries, id)`（在 deleteAgentMemory 之后停快照，或先 destroy 再 delete）；leader done（L1267）同查 | done 路径补 destroySecretary | resume/kill 不回归；done 后 `.json` 确不存在（单测）；golden 25 不变 | M1-6c | 完成（leader L1267 + worker L1998 均先 `destroySecretary` 再 `deleteAgentMemory`；golden 60+全量 562/0 fail 不回归；待用户冒烟确认 done 后 `.json` 不残留） |
@@ -188,6 +190,34 @@
 
 ---
 
+## M4 · 内核换底（cordis）
+
+> 决策与完整论证见 **[ADR-001](ADR-001-cordis-kernel.md)**（路径 B：引 cordis 做 DI/生命周期/事件内核，保留自己的 agent loop）。
+> 选包：`@deepseek-ai/cordis@4.0.1`（锁精确版本；上游 `cordis` 仍是 4.0.0-rc.8）。
+> 策略：**加性并存**——cordis Context 与 `globalBus` 并行运行，每阶段 golden 25 逐字节不变，任意阶段停下都不留断壁。
+
+| ID | 任务 | 交付物 | 回归验证 | 依赖 | 状态 |
+|---|---|---|---|---|---|
+| M4-B0 | 装依赖 + 建根 `Context` + `globalBus.publish` → `ctx.emit` 单向桥；写 cordis 行为契约测试（升版护栏） | `src/runtime/kernel/Context.ts` + `cordis-contract.test.ts` | **零行为变更**：golden 25 逐字节不变；全量 0 fail；typecheck 干净 | M1 收口 | 未开始 |
+| M4-B1 | `AgentScope`：agent 生命周期全部登记改走 `ctx.effect()`，一次 `fiber.dispose()` 收口五个容器（`agents`/`secretaries`/`killedAgents`/`feishuBusy`/`leaderApprovalQueue`） | `src/runtime/kernel/AgentScope.ts` | done/kill 后五个容器**同时**干净（单测，逐容器断言）；`.json` 不残留；golden 25 不变。**M2-8 / M2-10 在此转为结构性修复** | M4-B0 | 未开始 |
+| M4-B2 | 七个 service 落地（`agents`/`tools`/`memory`/`pm`/`approval`/`feishu`/`llm`）+ `inject` 就绪等待；删 `configureX(deps)` | 七个 `Service` 子类 | `grep "let _deps" src/` = 0；consumer 先挂 provider 后挂仍正常（单测）；golden 25 不变。**⚠️ 实质承诺点：此后回退成本上升** | M4-B1 | 未开始 |
+| M4-B3 | 六条 waterfall 策略链：`spawn/check`、`message/route`、`tools/pre-execute`、`agent/done`、`agent/idle`、`feishu/outbound`；已提取的纯函数改挂 listener | 事件声明 + listener 注册 | 每条链 **veto/delegate 双向**单测；"只观察的 listener 必须调 `next()`" 有专项用例；golden 25 不变 | M4-B2 | 未开始 |
+| M4-B4 | per-agent 作用域（`agent.ctx`）：工具集、prompt 段按 agent 隔离注册 | 作用域注册改造 | 一个 agent 的工具集变更不泄漏到兄弟节点（单测）；golden 25 不变 | M4-B3 | 未开始 |
+| M4-B5 | （**可选，延后单独决策**）`cordis.yml` 配置驱动组合 + HMR；引入 loader/include peer 依赖 | 配置层 | 换一个策略插件零代码改动（验收演示） | M4-B4 | 未开始 |
+
+**出口（G8）**：B0–B4 全绿；`grep "let _deps" src/` = 0；六条策略缝各有 veto/delegate 双向用例；
+全程 golden 25 逐字节不变；回归记录归档。B5 不在 M4 出口内。
+
+**估时**：B0–B4 合计 12–16 个工作日（spike 已排除未知数，且一期不做 YAML loader）。
+
+**与其他任务的关系**（详见 ADR-001 §8）：
+- **M2-5**（ToolRegistry 抽 adapter 层）→ 被 `ctx.tools` 作用域注册表取代，**改为"注册到 ctx.tools"**，不再手搓 adapter
+- **M2-6**（MCP 零核心改动接入）→ B2 完成后近乎白送，这正是 cordis 的核心价值主张
+- **M2-8 / M2-10** → **不等 M4**，按原计划在 M2 内先修（用户可感知 bug 优先）；B1 落地后把补丁收敛进 `AgentScope`
+- **M3-3 / M3-5** → prompt 段变可逆 `ctx.effect()` 注册；进化触发器从"改写策略"变成"增挂 listener"
+
+---
+
 ## 回归策略
 
 1. **常规回归**：每个任务合入前 `npm run typecheck` + `npm test` 全绿；触碰编排路径的必须过 M1-5 事件序列快照。
@@ -197,6 +227,8 @@
 
 ## 变更记录
 
+| 2026-08-16 | v1.1.0 | **修复：退出后鼠标上报泄漏进父 shell（Windows 专属，用户冒烟发现）**。TUI 为滚轮启用 `\x1b[?1000h\x1b[?1006h`，退出时的关闭序列走 `process.stdout.write()`——但 Node 的 stdout 对 **TTY 在 Windows 上是异步写**（POSIX 才同步），故 `process.on("exit")` 处理器里的写在进程终止前被丢弃；同时 `requestExit` 在 `exit()`（Ink unmount，异步）后立刻 `process.exit(0)`，effect cleanup 里那条关闭序列也来不及跑——**两条恢复路径同时失效**，而在 Linux/macOS 上均正常，故此前未暴露。修法：抽出 `src/runtime/TerminalRestore.ts` 统一用 `fs.writeSync(1, ...)` 同步写（顺带绕开 stdout 的 synchronized-output shim），四条退出路径（exit / SIGINT / SIGTERM / requestExit）全部改用，并在 `requestExit` 的 `process.exit` 前显式恢复。顺带修正 L1192 的过期注释（原写"本 TUI 刻意不实现鼠标交互"，实际已实现滚轮）。新增 `terminal-restore.test.ts` 6/6。typecheck 干净、全量 574/0 fail、golden 25 不变 | Claude |
+| 2026-08-15 | v1.1.0 | **新增 M4 · 内核换底（cordis），归档 [ADR-001](ADR-001-cordis-kernel.md)**（用户决策：路径 B）。调研 DSH/cordis 后确认三类 bug（M2-8/9/10）同源于"生命周期无收口"，且 M1-6 已把六组策略提成纯函数、waterfall 化条件成熟。**选包 `@deepseek-ai/cordis@4.0.1`**（上游 `cordis` 仍是 4.0.0-rc.8 未 GA），已做 spike 实证：Node 24 + tsx + ESM 下 `inject` 就绪等待 / `ctx.effect` 反注册 / listener 自动移除 / waterfall veto 四项全部验证通过（用真实规则 `pm_cannot_spawn_worker` 作 veto 样例）。分 B0–B4 五阶段加性并存，12–16 工作日，每阶段 golden 25 逐字节不变。**连带调整**：M2-5 被 M4-B2 吞掉、M2-6 依赖改挂 M4-B2；M2-8/M2-10 不等 M4，先在 M2 内修 | Claude |
 | 2026-07-22 | v1.1.0 | **新 TUI 彻底取代旧三栏（用户定调：不留旧 TUI）**：App() 唯一渲染改为 `<InkView>`（单主视图，读实时 store），旧 3 栏 JSX 返回（~126 行）+ 旧 useInput（~165 行）已删除、退成 no-op。InkView 复用 App 现有 `dispatchUser`（斜杠命令+用户消息）、审批 onApprove/onReject（复用工具执行 executeTool+sendCommand）、退出 requestExit。放弃之前的 flag 开关方案（新旧共存与"彻底换代"矛盾）。typecheck 干净、全量 527/520/0 fail、test:full exit 0。**交互冒烟归用户**（`npm run dev:watch`）；旧 pane 组件的未用 import 待清理 | Claude |
 | 2026-07-22 | v1.1.0 | **M3-7b-view 补 store→snapshot selector（新 TUI 接真实数据）**：`src/tui/snapshot.ts` 把 store State 投影为 TuiSnapshot（agent 树前序、chat、todos、审批、running）；测试驱动真实 store（applyEvent→buildSnapshot→renderFrame）验证投影正确 + 中文实况每行 displayWidth 精确=cols + 空 store 不崩。527/520/0 fail。TUI 视图层已可接真数据，余 wire（换 App() 渲染+输入，等 M1-6e） | Claude |
 | 2026-07-22 | v1.1.0 | **M1-6 idle 接线经代码复核判定不可安全速做（证据升级）**：读活代码 `!actedThisTurn` 分支——首判 `hasPending && activeChildren>0 → 等孩子(不催)`，而 `AgentIdlePolicy` 未建模 children-wait，直接替换会错误催促"正在等子节点的 leader"=反向 bug，golden 不守此路径。正解：**先扩 AgentIdlePolicy 忠实覆盖活分支（含 children-wait+reset），再委托，EV 才有效**——专注任务，不在会话尾仓促做。M1-6 维持退回 | Claude |

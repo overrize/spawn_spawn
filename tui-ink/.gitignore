@@ -9,11 +9,12 @@ dist/
 !docs/
 
 # ── agent 产出 / 一次性调试残留（留在本地，不进仓库）────────────────────────
-# 临时目录 & 误建的嵌套目录
-tmp/
-tui-ink/
-urdf-tool/
-tests/
+# 临时目录 & 误建的嵌套目录（必须锚定到 tui-ink/ 根，
+# 否则裸 `tests/` 会把 src/tests/ 下所有【新增】测试文件静默忽略掉）
+/tmp/
+/tui-ink/
+/urdf-tool/
+/tests/
 
 # agent 调研产出（机器人/驱动器等，与本项目无关）
 docs/papers/
